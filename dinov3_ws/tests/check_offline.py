@@ -9,6 +9,8 @@ import rclpy
 from PIL import Image
 from transformers import DINOv3ViTConfig, DINOv3ViTModel, DINOv3ViTImageProcessorFast
 from dinov3_cases.node import Encoder, CaseNode, case_path, render_heatmap
+from dinov3_cases.boxes import BoxConfig, extract_boxes, detection_message
+from std_msgs.msg import Header
 
 # Below-threshold pixels stay unchanged; equality is included.
 bgr = np.full((2, 2, 3), 120, dtype=np.uint8)
@@ -29,6 +31,25 @@ with tempfile.TemporaryDirectory() as tmp:
     features, valid, geo = encoder.encode(picture)
     assert features.shape == (196, 32)
     assert 0 < valid.sum() < 196
+    patch_scores, patch_valid, geometry = encoder.similarity_map(picture, features[valid])
+    assert patch_scores.shape == patch_valid.shape == (14, 14)
+    assert geometry == geo
+    boxes = extract_boxes(patch_scores, patch_valid, geometry, picture.size, 16, .7,
+                          BoxConfig(rgb_border_fraction=0))
+    assert boxes, 'Self-matching patches must produce a box'
+    header = Header()
+    header.frame_id = 'test_camera'
+    header.stamp.sec = 123
+    detections = detection_message(boxes, 'test_case', header)
+    assert detections.header == header
+    assert len(detections.detections) == len(boxes)
+    for detection, (bounds, score) in zip(detections.detections, boxes):
+        assert detection.header == header
+        assert detection.results[0].hypothesis.class_id == 'test_case'
+        assert detection.results[0].hypothesis.score == score
+        assert detection.bbox.size_x == bounds[2] - bounds[0]
+        assert detection.bbox.size_y == bounds[3] - bounds[1]
+    assert not detection_message([], 'test_case', header).detections
     scores = encoder.heatmap(picture, features[valid])
     assert scores.shape == (96, 192) and np.isfinite(scores).all()
     assert scores.min() >= -1.001 and scores.max() <= 1.001

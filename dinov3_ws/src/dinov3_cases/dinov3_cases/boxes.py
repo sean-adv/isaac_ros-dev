@@ -1,0 +1,144 @@
+"""Patch-mask boxes in original-image half-open xyxy coordinates."""
+from dataclasses import dataclass
+import math
+import cv2
+import numpy as np
+
+
+@dataclass(frozen=True)
+class BoxConfig:
+    closing_kernel: int = 3
+    min_component_patches: int = 4
+    padding_patches: float = 0.5
+    rgb_border_fraction: float = 0.1
+    edge_min_gradient: float = 20.0
+    edge_min_support: float = 0.6
+
+    def __post_init__(self):
+        if self.closing_kernel < 1 or self.closing_kernel % 2 != 1:
+            raise ValueError('closing_kernel must be positive and odd.')
+        if self.min_component_patches < 1:
+            raise ValueError('min_component_patches must be positive.')
+        if not math.isfinite(self.padding_patches) or self.padding_patches < 0:
+            raise ValueError('padding_patches must be finite and nonnegative.')
+        if not 0 <= self.rgb_border_fraction <= .25:
+            raise ValueError('rgb_border_fraction must be in [0, 0.25]; 0 disables RGB.')
+        if not math.isfinite(self.edge_min_gradient) or self.edge_min_gradient <= 0:
+            raise ValueError('edge_min_gradient must be finite and positive.')
+        if not 0 < self.edge_min_support <= 1:
+            raise ValueError('edge_min_support must be in (0, 1].')
+
+
+def clean_mask(scores, valid, threshold, kernel):
+    mask = ((scores >= threshold) & valid).astype(np.uint8)
+    # Explicit background prevents closing from growing along grid boundaries.
+    padded = np.pad(mask, kernel)
+    padded = cv2.morphologyEx(padded, cv2.MORPH_CLOSE, np.ones((kernel, kernel), np.uint8))
+    mask = padded[kernel:-kernel, kernel:-kernel] & valid.astype(np.uint8)
+    flooded = np.pad(mask, 1)
+    cv2.floodFill(flooded, None, (0, 0), 1)
+    return (mask | (1 - flooded[1:-1, 1:-1])) & valid.astype(np.uint8)
+
+
+def _edge_position(bgr, positions, start, stop, vertical, origin, cfg):
+    """Read only an outer strip and a one-pixel Sobel stencil halo."""
+    if not len(positions) or stop - start < 3:
+        return origin
+    height, width = bgr.shape[:2]
+    lo, hi = int(positions.min()), int(positions.max())
+    if vertical:
+        a, b = max(0, lo - 1), min(width, hi + 2)
+        strip = bgr[start:stop, a:b]
+    else:
+        a, b = max(0, lo - 1), min(height, hi + 2)
+        strip = bgr[a:b, start:stop]
+    # Channel maximum retains chromatic edges of similar luminance.
+    grad = np.abs(cv2.Sobel(strip, cv2.CV_32F, int(vertical), int(not vertical),
+                           ksize=3, scale=1 / 4)).max(axis=2)
+    responses = grad[:, positions - a].T if vertical else grad[positions - a, :]
+    strong = responses >= cfg.edge_min_gradient
+    support = strong.mean(axis=1)
+    run = np.zeros(len(positions), dtype=int)
+    longest = run.copy()
+    for column in strong.T:
+        run = np.where(column, run + 1, 0)
+        longest = np.maximum(longest, run)
+    reliable = (support >= cfg.edge_min_support) & (longest >= responses.shape[1] * .4)
+    if not reliable.any():
+        return origin
+    distance = np.abs(positions - origin)
+    quality = support * responses.mean(axis=1) / (1 + distance / max(1, len(positions)))
+    quality[~reliable] = -1
+    return int(positions[np.argmax(quality)])
+
+
+def refine_box(bgr, box, cfg):
+    if cfg.rgb_border_fraction == 0:
+        return box
+    x0, y0, x1, y1 = box
+    height, width = bgr.shape[:2]
+    dx = math.floor((x1 - x0) * cfg.rgb_border_fraction)
+    dy = math.floor((y1 - y0) * cfg.rgb_border_fraction)
+    # Outward only: RGB cannot trim DINO support or its padding.
+    left = _edge_position(bgr, np.arange(max(0, x0 - dx), x0), y0, y1, True, x0, cfg)
+    right = _edge_position(bgr, np.arange(x1, min(width, x1 + dx)), y0, y1, True, x1, cfg)
+    top = _edge_position(bgr, np.arange(max(0, y0 - dy), y0), x0, x1, False, y0, cfg)
+    bottom = _edge_position(bgr, np.arange(y1, min(height, y1 + dy)), x0, x1, False, y1, cfg)
+    return left, top, right, bottom
+
+
+def extract_boxes(scores, valid, geometry, image_size, patch_size, threshold, cfg, bgr=None):
+    """CC on native grid, then undo letterbox and scale patch boundaries."""
+    left, top, nw, nh, grid = geometry
+    width, height = image_size
+    if scores.shape != (grid, grid) or valid.shape != scores.shape:
+        raise ValueError('Similarity and validity masks must match the native patch grid.')
+    mask = clean_mask(scores, valid, threshold, cfg.closing_kernel)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    boxes = []
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        if area < cfg.min_component_patches:
+            continue
+        pad = cfg.padding_patches
+        x0 = max(0, math.floor(((x - pad) * patch_size - left) * width / nw))
+        y0 = max(0, math.floor(((y - pad) * patch_size - top) * height / nh))
+        x1 = min(width, math.ceil(((x + w + pad) * patch_size - left) * width / nw))
+        y1 = min(height, math.ceil(((y + h + pad) * patch_size - top) * height / nh))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        box = (x0, y0, x1, y1)
+        if bgr is not None:
+            box = refine_box(bgr, box, cfg)
+        # Filled holes/closed gaps do not invent similarity evidence.
+        evidence = (labels == label) & valid & (scores >= threshold)
+        boxes.append((box, float(scores[evidence].mean())))
+    return boxes
+
+
+def detection_message(boxes, name, header=None):
+    from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
+    result = Detection2DArray()
+    if header is not None:
+        result.header = header
+    for index, ((x0, y0, x1, y1), score) in enumerate(boxes):
+        detection = Detection2D()
+        detection.header = result.header
+        detection.id = str(index)
+        detection.bbox.center.position.x = (x0 + x1) / 2.
+        detection.bbox.center.position.y = (y0 + y1) / 2.
+        detection.bbox.size_x = float(x1 - x0)
+        detection.bbox.size_y = float(y1 - y0)
+        hypothesis = ObjectHypothesisWithPose()
+        hypothesis.hypothesis.class_id = name
+        hypothesis.hypothesis.score = score
+        detection.results = [hypothesis]
+        result.detections.append(detection)
+    return result
+
+
+def draw_boxes(image, boxes):
+    for (x0, y0, x1, y1), score in boxes:
+        cv2.rectangle(image, (x0, y0), (x1 - 1, y1 - 1), (60, 220, 80), 2)
+        cv2.putText(image, f'{score:.2f}', (x0, max(16, y0 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX, .5, (60, 220, 80), 1)

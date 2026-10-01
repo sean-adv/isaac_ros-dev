@@ -19,6 +19,9 @@ from sensor_msgs.msg import Image as ImageMsg
 from transformers import AutoModel, AutoImageProcessor
 from werkzeug.serving import make_server
 
+from .boxes import BoxConfig, extract_boxes, detection_message, draw_boxes
+from vision_msgs.msg import Detection2DArray
+
 MODEL = 'facebook/dinov3-vith16plus-pretrain-lvd1689m'
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
 
@@ -78,15 +81,24 @@ class Encoder:
         return features, valid, (left, top, nw, nh, grid)
 
     @torch.inference_mode()
-    def heatmap(self, image, bank):
-        features, _, (left, top, nw, nh, grid) = self.encode(image)
+    def similarity_map(self, image, bank):
+        features, valid, geometry = self.encode(image)
+        grid = geometry[-1]
         # Bound matrix memory even for a large case bank.
         score = torch.full((features.shape[0],), -1., device=self.device)
         for chunk in bank.split(2048):
             score = torch.maximum(score, (features @ chunk.T).max(dim=1).values)
         raw = score.reshape(grid, grid).cpu().numpy()
+        return raw, valid.reshape(grid, grid).cpu().numpy(), geometry
+
+    def heatmap(self, image, bank):
+        raw, _, geometry = self.similarity_map(image, bank)
+        return self.project_heatmap(raw, geometry, image.size)
+
+    def project_heatmap(self, raw, geometry, image_size):
+        left, top, nw, nh, _ = geometry
         square = cv2.resize(raw, (self.side, self.side), interpolation=cv2.INTER_LINEAR)
-        return cv2.resize(square[top:top + nh, left:left + nw], image.size, interpolation=cv2.INTER_LINEAR)
+        return cv2.resize(square[top:top + nh, left:left + nw], image_size, interpolation=cv2.INTER_LINEAR)
 
 
 class CaseNode(Node):
@@ -96,8 +108,7 @@ class CaseNode(Node):
                         image_topic='/camera/color/image_raw', model_id=MODEL,
                         image_size=448, port=8090, host='127.0.0.1', inference_hz=5.0,
                         max_reference_patches=8192, cosine_threshold=0.70,
-                        use_proposals=False, proposals_topic='/rgbd_proposals/detections',
-                        proposal_image_topic='/rgbd_proposals/rgb')
+                        **vars(BoxConfig()))
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
@@ -109,7 +120,7 @@ class CaseNode(Node):
         self.threshold = float(self.param('cosine_threshold'))
         if not 0 <= self.threshold <= 1:
             raise ValueError('cosine_threshold must be between 0 and 1.')
-        self.proposals = None
+        self.box_config = BoxConfig(**{key: self.param(key) for key in vars(BoxConfig())})
         self.selected = '' 
         self.generation = 0
         self.source = 'camera'
@@ -118,7 +129,6 @@ class CaseNode(Node):
         self.jpeg = None
         self.preview_jpeg = None
         self.camera_frame = None
-        self.camera_proposals = None
         self.camera_seq = 0
         self.camera_received_at = None
         self.preview_error = None
@@ -128,17 +138,9 @@ class CaseNode(Node):
         self.bank_key = None
         self.pub = self.create_publisher(ImageMsg, '/dinov3/heatmap/overlay', 1)
         self.raw_pub = self.create_publisher(ImageMsg, '/dinov3/heatmap/similarity', 1)
-        if self.param('use_proposals'):
-            import message_filters
-            from vision_msgs.msg import Detection2DArray
-            self.recognition_pub = self.create_publisher(Detection2DArray, '/medicine_recognition/detections', 10)
-            self.recognition_debug_pub = self.create_publisher(ImageMsg, '/medicine_recognition/debug_image', 1)
-            self.proposal_rgb_sub = message_filters.Subscriber(self, ImageMsg, self.param('proposal_image_topic'), qos_profile=10)
-            self.proposal_box_sub = message_filters.Subscriber(self, Detection2DArray, self.param('proposals_topic'), qos_profile=10)
-            self.proposal_sync = message_filters.TimeSynchronizer([self.proposal_rgb_sub, self.proposal_box_sub], 10)
-            self.proposal_sync.registerCallback(self.on_proposals)
-        else:
-            self.create_subscription(ImageMsg, self.param('image_topic'), self.on_image, qos_profile_sensor_data)
+        self.recognition_pub = self.create_publisher(Detection2DArray, '/medicine_recognition/detections', 10)
+        self.recognition_debug_pub = self.create_publisher(ImageMsg, '/medicine_recognition/debug_image', 1)
+        self.create_subscription(ImageMsg, self.param('image_topic'), self.on_image, qos_profile_sensor_data)
         self.app = self.make_app()
         self.server = make_server(self.param('host'), self.param('port'), self.app, threaded=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -151,7 +153,6 @@ class CaseNode(Node):
     def on_image(self, msg):
         with self.lock:
             self.camera_frame = msg
-            self.camera_proposals = None
             self.camera_seq += 1
             self.camera_received_at = time.monotonic()
             if self.source != 'camera':
@@ -159,33 +160,15 @@ class CaseNode(Node):
             self.frame = msg
             self.frame_seq += 1
 
-    def on_proposals(self, msg, detections):
-        if msg.header.frame_id != detections.header.frame_id:
-            self.get_logger().warning('Proposal image and detections have different coordinate frames')
-            return
-        with self.lock:
-            self.camera_frame = msg
-            self.camera_proposals = detections
-            self.camera_seq += 1
-            self.camera_received_at = time.monotonic()
-            if self.source == 'camera':
-                self.frame = msg
-                self.proposals = detections
-                self.frame_seq += 1
-
     def run_preview(self):
         processed = -1
         while not self.stop.wait(1 / 15):
             with self.lock:
-                frame, proposals, seq = self.camera_frame, self.camera_proposals, self.camera_seq
+                frame, seq = self.camera_frame, self.camera_seq
             if frame is None or seq == processed:
                 continue
             try:
                 bgr = self.bridge.imgmsg_to_cv2(frame, desired_encoding='bgr8')
-                if proposals is not None:
-                    from .proposals import draw_proposals
-                    bgr = bgr.copy()
-                    draw_proposals(bgr, proposals)
                 if bgr.shape[1] > 960:
                     bgr = cv2.resize(bgr, (960, round(bgr.shape[0] * 960 / bgr.shape[1])))
                 ok, data = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
@@ -218,7 +201,7 @@ class CaseNode(Node):
             with self.lock:
                 age = None if self.camera_received_at is None else time.monotonic() - self.camera_received_at
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
-                               camera_topic=self.param('proposal_image_topic') if self.param('use_proposals') else self.param('image_topic'), camera_age=age,
+                               camera_topic=self.param('image_topic'), camera_age=age,
                                camera_connected=age is not None and age < 3,
                                preview_error=self.preview_error,
                                overlay_age=None if self.overlay_at is None else time.monotonic() - self.overlay_at)
@@ -333,7 +316,6 @@ class CaseNode(Node):
             with self.lock:
                 name, gen, frame, seq = self.selected, self.generation, self.frame, self.frame_seq
                 threshold = self.threshold
-                proposals = self.proposals if self.source == 'camera' and self.param('use_proposals') else None
             if not name or frame is None:
                 with self.lock:
                     if gen == self.generation:
@@ -372,18 +354,14 @@ class CaseNode(Node):
                 else:
                     image = frame
                 start = time.monotonic()
-                recognition = None
-                if proposals is not None:
-                    from .proposals import recognize_proposals
-                    scores, recognition = recognize_proposals(encoder, image, self.bank, proposals, name, threshold)
-                else:
-                    scores = encoder.heatmap(image, self.bank)
-                # A fixed [0,1] cosine scale avoids per-frame false contrast.
-                rgb = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-                overlay = render_heatmap(rgb, scores, threshold)
-                if recognition is not None:
-                    from .proposals import draw_recognition
-                    draw_recognition(overlay, recognition)
+                patch_scores, valid, geometry = encoder.similarity_map(image, self.bank)
+                scores = encoder.project_heatmap(patch_scores, geometry, image.size)
+                bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+                boxes = extract_boxes(patch_scores, valid, geometry, image.size,
+                                      encoder.model.config.patch_size, threshold, self.box_config, bgr)
+                recognition = detection_message(boxes, name, header)
+                overlay = render_heatmap(bgr, scores, threshold)
+                draw_boxes(overlay, boxes)
                 cv2.putText(overlay, f'{name} | cosine >= {threshold:.2f} | max {scores.max():.2f}',
                             (12, 28), cv2.FONT_HERSHEY_SIMPLEX, .6, (255,255,255), 2)
                 ok, data = cv2.imencode('.jpg', overlay)
@@ -405,9 +383,11 @@ class CaseNode(Node):
                         raw.header = out.header
                     self.pub.publish(out)
                     self.raw_pub.publish(raw)
-                    if recognition is not None:
-                        self.recognition_pub.publish(recognition)
-                        self.recognition_debug_pub.publish(out)
+                    recognition.header = out.header
+                    for detection in recognition.detections:
+                        detection.header = out.header
+                    self.recognition_pub.publish(recognition)
+                    self.recognition_debug_pub.publish(out)
                 processed = (gen, seq)
             except Exception as e:
                 with self.lock:
@@ -425,7 +405,7 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</
 <select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
-<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Only similarity values at or above this threshold receive heatmap color. Lower values show the original camera image.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
+<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Threshold controls patch-mask boxes and heatmap color. Boxes use mask closing, hole filling and padding; RGB only adjusts outer borders.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
 <script>
 const el=id=>document.getElementById(id);
 let thresholdDirty=false;
