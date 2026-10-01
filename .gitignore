@@ -1,0 +1,8 @@
+/.agents
+/.codex
+/build
+/dinov3_cases_data
+/dinov3_venv
+/isaac_ros_assets
+/log
+/orbbec_sdk

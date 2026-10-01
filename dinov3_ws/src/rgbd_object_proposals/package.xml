@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>rgbd_object_proposals</name><version>0.1.0</version>
+  <description>Aligned RGB-D geometric object proposals for crop-based recognition</description>
+  <maintainer email="admin@example.com">Workspace maintainers</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend><exec_depend>sensor_msgs_py</exec_depend>
+  <exec_depend>vision_msgs</exec_depend><exec_depend>cv_bridge</exec_depend>
+  <exec_depend>message_filters</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend><exec_depend>python3-yaml</exec_depend>
+  <exec_depend>launch</exec_depend><exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <test_depend>python3-pytest</test_depend><test_depend>python3-pil</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

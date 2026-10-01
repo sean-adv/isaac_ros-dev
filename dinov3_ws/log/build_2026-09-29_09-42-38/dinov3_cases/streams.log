@@ -1,0 +1,22 @@
+[0.697s] Invoking command in '/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases': PS1=(dinov3_venv) PYTHONPATH=/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(dinov3_venv) /workspaces/isaac_ros-dev/dinov3_venv/bin/python -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/build --no-deps symlink_data
+[0.893s] running develop
+[0.984s] running egg_info
+[0.992s] creating dinov3_cases.egg-info
+[0.992s] writing dinov3_cases.egg-info/PKG-INFO
+[0.992s] writing dependency_links to dinov3_cases.egg-info/dependency_links.txt
+[0.992s] writing entry points to dinov3_cases.egg-info/entry_points.txt
+[0.993s] writing top-level names to dinov3_cases.egg-info/top_level.txt
+[0.993s] writing manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+[1.011s] reading manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+[1.011s] writing manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+[1.021s] running build_ext
+[1.021s] Creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages/dinov3-cases.egg-link (link to .)
+[1.021s] Installing case_heatmap script to /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/dinov3_cases
+[1.022s] 
+[1.022s] Installed /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases
+[1.022s] running symlink_data
+[1.022s] creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/ament_index/resource_index/packages
+[1.022s] symbolically linking /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/resource/dinov3_cases -> /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/ament_index/resource_index/packages
+[1.022s] creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/dinov3_cases
+[1.023s] symbolically linking /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/package.xml -> /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/dinov3_cases
+[1.055s] Invoked command in '/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases' returned '0': PS1=(dinov3_venv) PYTHONPATH=/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(dinov3_venv) /workspaces/isaac_ros-dev/dinov3_venv/bin/python -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/build --no-deps symlink_data

@@ -1,0 +1,20 @@
+running develop
+running egg_info
+creating dinov3_cases.egg-info
+writing dinov3_cases.egg-info/PKG-INFO
+writing dependency_links to dinov3_cases.egg-info/dependency_links.txt
+writing entry points to dinov3_cases.egg-info/entry_points.txt
+writing top-level names to dinov3_cases.egg-info/top_level.txt
+writing manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+reading manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+writing manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+running build_ext
+Creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages/dinov3-cases.egg-link (link to .)
+Installing case_heatmap script to /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/dinov3_cases
+
+Installed /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases
+running symlink_data
+creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/ament_index/resource_index/packages
+symbolically linking /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/resource/dinov3_cases -> /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/ament_index/resource_index/packages
+creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/dinov3_cases
+symbolically linking /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/package.xml -> /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/share/dinov3_cases

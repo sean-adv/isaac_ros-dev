@@ -1,0 +1,12 @@
+package.xml
+setup.cfg
+setup.py
+dinov3_cases/__init__.py
+dinov3_cases/node.py
+dinov3_cases/proposals.py
+dinov3_cases.egg-info/PKG-INFO
+dinov3_cases.egg-info/SOURCES.txt
+dinov3_cases.egg-info/dependency_links.txt
+dinov3_cases.egg-info/entry_points.txt
+dinov3_cases.egg-info/top_level.txt
+resource/dinov3_cases

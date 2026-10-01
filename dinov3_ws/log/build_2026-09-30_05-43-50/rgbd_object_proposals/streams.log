@@ -1,0 +1,17 @@
+[0.792s] Invoking command in '/workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals': PYTHONPATH=/workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspaces/isaac_ros-dev/dinov3_ws/install/rgbd_object_proposals/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(dinov3_venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals/build --no-deps symlink_data
+[1.013s] running develop
+[1.103s] running egg_info
+[1.112s] writing rgbd_object_proposals.egg-info/PKG-INFO
+[1.112s] writing dependency_links to rgbd_object_proposals.egg-info/dependency_links.txt
+[1.112s] writing entry points to rgbd_object_proposals.egg-info/entry_points.txt
+[1.114s] writing requirements to rgbd_object_proposals.egg-info/requires.txt
+[1.115s] writing top-level names to rgbd_object_proposals.egg-info/top_level.txt
+[1.131s] reading manifest file 'rgbd_object_proposals.egg-info/SOURCES.txt'
+[1.131s] writing manifest file 'rgbd_object_proposals.egg-info/SOURCES.txt'
+[1.141s] running build_ext
+[1.141s] Creating /workspaces/isaac_ros-dev/dinov3_ws/install/rgbd_object_proposals/lib/python3.12/site-packages/rgbd-object-proposals.egg-link (link to .)
+[1.142s] Installing rgbd_object_proposal_node script to /workspaces/isaac_ros-dev/dinov3_ws/install/rgbd_object_proposals/lib/rgbd_object_proposals
+[1.142s] 
+[1.142s] Installed /workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals
+[1.142s] running symlink_data
+[1.205s] Invoked command in '/workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals' returned '0': PYTHONPATH=/workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspaces/isaac_ros-dev/dinov3_ws/install/rgbd_object_proposals/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(dinov3_venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /workspaces/isaac_ros-dev/dinov3_ws/build/rgbd_object_proposals/build --no-deps symlink_data

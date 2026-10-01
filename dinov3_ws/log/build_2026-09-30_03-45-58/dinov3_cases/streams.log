@@ -1,0 +1,16 @@
+[0.845s] Invoking command in '/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases': PYTHONPATH=/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages: /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/build --no-deps symlink_data
+[1.029s] running develop
+[1.076s] running egg_info
+[1.080s] writing dinov3_cases.egg-info/PKG-INFO
+[1.080s] writing dependency_links to dinov3_cases.egg-info/dependency_links.txt
+[1.080s] writing entry points to dinov3_cases.egg-info/entry_points.txt
+[1.080s] writing top-level names to dinov3_cases.egg-info/top_level.txt
+[1.089s] reading manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+[1.090s] writing manifest file 'dinov3_cases.egg-info/SOURCES.txt'
+[1.096s] running build_ext
+[1.096s] Creating /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages/dinov3-cases.egg-link (link to .)
+[1.096s] Installing case_heatmap script to /workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/dinov3_cases
+[1.097s] 
+[1.097s] Installed /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases
+[1.097s] running symlink_data
+[1.137s] Invoked command in '/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases' returned '0': PYTHONPATH=/workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/workspaces/isaac_ros-dev/dinov3_ws/install/dinov3_cases/lib/python3.12/site-packages: /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /workspaces/isaac_ros-dev/dinov3_ws/build/dinov3_cases/build --no-deps symlink_data

@@ -1,0 +1,2 @@
+[console_scripts]
+case_heatmap = dinov3_cases.node:main

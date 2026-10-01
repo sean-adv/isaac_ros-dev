@@ -1,0 +1,17 @@
+README.md
+package.xml
+setup.cfg
+setup.py
+config/proposals.yaml
+launch/proposals.launch.py
+resource/rgbd_object_proposals
+rgbd_object_proposals/__init__.py
+rgbd_object_proposals/geometry.py
+rgbd_object_proposals/node.py
+rgbd_object_proposals/visualization.py
+rgbd_object_proposals.egg-info/PKG-INFO
+rgbd_object_proposals.egg-info/SOURCES.txt
+rgbd_object_proposals.egg-info/dependency_links.txt
+rgbd_object_proposals.egg-info/entry_points.txt
+rgbd_object_proposals.egg-info/requires.txt
+rgbd_object_proposals.egg-info/top_level.txt
