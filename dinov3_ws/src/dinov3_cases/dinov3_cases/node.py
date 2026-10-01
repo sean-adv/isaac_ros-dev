@@ -18,10 +18,10 @@ from sensor_msgs.msg import Image as ImageMsg
 from transformers import AutoModel, AutoImageProcessor
 from werkzeug.serving import make_server
 
-from .boxes import BoxConfig, similarity_to_bboxes, detection_message, draw_boxes
+from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
 from .tiling import (TileConfig, generate_tiles, run_dino_batch, patch_features,
                      compute_similarity_maps, merge_similarity_maps, debug_visualizations,
-                     inference_dtype)
+                     inference_dtype, context_margin, generate_context_tiles)
 from vision_msgs.msg import Detection2DArray
 
 MODEL = 'facebook/dinov3-vith16plus-pretrain-lvd1689m'
@@ -70,8 +70,10 @@ class Encoder:
         scale = self.side / max(w, h)
         nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
         left, top = (self.side - nw) // 2, (self.side - nh) // 2
-        canvas = Image.new('RGB', (self.side, self.side), (124, 116, 104))
-        canvas.paste(image.resize((nw, nh), Image.Resampling.BICUBIC), (left, top))
+        resized = np.asarray(image.resize((nw, nh), Image.Resampling.BICUBIC))
+        canvas = Image.fromarray(np.pad(resized, ((top, self.side-nh-top),
+                                                  (left, self.side-nw-left), (0, 0)),
+                                         mode='edge'))
         inputs = self.processor(images=canvas, do_resize=False, do_center_crop=False, return_tensors='pt')
         inputs = {k: v.to(device=self.device, dtype=self.dtype) for k, v in inputs.items()}
         outputs = self.model(**inputs)
@@ -81,8 +83,12 @@ class Encoder:
         if not torch.isfinite(features).all():
             raise RuntimeError(f'Non-finite DINOv3 reference features with {self.dtype}; reference bank rejected.')
         centers = (torch.arange(grid, device=self.device) + .5) * self.model.config.patch_size
-        valid = ((centers[:, None] >= top) & (centers[:, None] < top + nh)
-                 & (centers[None, :] >= left) & (centers[None, :] < left + nw)).flatten()
+        patch = self.model.config.patch_size
+        # Border descriptors see artificial padding or truncated context.
+        inset = 2 * patch
+        valid = ((centers[:, None] >= top + inset) & (centers[:, None] < top + nh - inset)
+                 & (centers[None, :] >= left + inset)
+                 & (centers[None, :] < left + nw - inset)).flatten()
         return features, valid, (left, top, nw, nh, grid)
 
     @torch.inference_mode()
@@ -90,14 +96,17 @@ class Encoder:
         # One host -> device transfer. Tiles are views; only a batch is stacked.
         pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).to(self.device)
         cfg = self.tiling
-        tiles, coords = generate_tiles(pixels, cfg.tile_size, cfg.overlap)
+        margin = context_margin(cfg.tile_size, self.model.config.patch_size)
+        tiles, coords, padded_shape = generate_context_tiles(pixels, cfg.tile_size,
+                                                              cfg.overlap, margin)
         maps = []
         for features in run_dino_batch(tiles, self.model, cfg.batch_size, cfg.tile_size,
                                        self.processor, self.dtype):
             maps.append(compute_similarity_maps(features, bank))
         tile_scores = torch.cat(maps)
-        merged = merge_similarity_maps(tile_scores, coords, (image.height, image.width),
-                                       cfg.merge_mode, cfg.tile_size)
+        merged = merge_similarity_maps(tile_scores, coords, padded_shape,
+                                       cfg.merge_mode, cfg.tile_size, margin)
+        merged = merged[margin:margin+image.height, margin:margin+image.width]
         # Only the final map crosses to CPU for OpenCV/ROS. Debug adds one copy.
         raw = merged.cpu().numpy()
         if not np.isfinite(raw).all():
@@ -399,12 +408,16 @@ class CaseNode(Node):
                 detections, mask = similarity_to_bboxes(
                     scores, threshold, self.param('min_area'), self.param('bbox_padding'),
                     self.box_config.closing_kernel, bgr=bgr, cfg=self.box_config, return_mask=True)
+                detections = merge_boxes_by_iou(detections, self.box_config.merge_iou_threshold)
                 boxes = [(item['bbox'], item['score']) for item in detections]
                 recognition = detection_message(boxes, name, header)
                 debug_jpegs = {}
                 if tile_scores is not None:
+                    margin = context_margin(self.tile_config.tile_size,
+                                            encoder.model.config.patch_size)
                     views = debug_visualizations(bgr, tile_scores, coords, scores, mask,
-                                                 detections, self.tile_config.tile_size)
+                                                 detections, self.tile_config.tile_size,
+                                                 offset=margin)
                     for view, pixels in views.items():
                         encoded, jpeg = cv2.imencode('.jpg', pixels)
                         if not encoded:
@@ -460,7 +473,7 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</
 <select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
-<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Overlapping tiles are merged before thresholding. Boxes use the full-resolution mask, closing, hole filling and pixel padding.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
+<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Overlapping tiles are merged before thresholding. Final boxes are merged by IoU; the highest-scoring box has a red outline.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
 <section id="debug-section" hidden><h2>Tiling diagnostics</h2><select id="debug-view"><option value="grid">Original + tile grid</option><option value="tiles">Individual tile similarity</option><option value="heatmap">Merged similarity</option><option value="mask">Mask after threshold, closing and hole filling</option><option value="boxes">Final bounding boxes</option></select><p><img id="debug-image" alt="Tiling diagnostic"></p></section>
 <script>
 const el=id=>document.getElementById(id);

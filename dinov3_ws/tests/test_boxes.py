@@ -1,7 +1,8 @@
 from dataclasses import replace
 import numpy as np
 import pytest
-from dinov3_cases.boxes import BoxConfig, clean_mask, extract_boxes, refine_box
+from dinov3_cases.boxes import (BoxConfig, clean_mask, extract_boxes, refine_box,
+                                merge_boxes_by_iou, draw_boxes)
 
 
 def boxes(scores, **kwargs):
@@ -87,8 +88,31 @@ def test_rgb_all_four_outer_edges_and_search_limits():
     assert refine_box(image, (0, 0, 100, 100), BoxConfig()) == (0, 0, 100, 100)
 
 
+def test_iou_merges_transitive_overlaps_and_keeps_best_score():
+    original = [
+        dict(bbox=[0, 0, 10, 10], score=.7, area=30),
+        dict(bbox=[4, 0, 14, 10], score=.9, area=40),
+        dict(bbox=[8, 0, 18, 10], score=.8, area=20),
+        dict(bbox=[30, 0, 40, 10], score=.6, area=50),
+    ]
+    merged = merge_boxes_by_iou(original, .4)
+    assert merged == [dict(bbox=[0, 0, 18, 10], score=.9, area=90), original[3]]
+    assert original[0]['bbox'] == [0, 0, 10, 10]
+    assert merge_boxes_by_iou(original[:2], .5) == original[:2]
+    assert merge_boxes_by_iou([], .4) == []
+
+
+def test_highest_score_box_has_red_outline():
+    image = np.zeros((100, 120, 3), np.uint8)
+    draw_boxes(image, [((10, 30, 30, 60), .6), ((70, 30, 90, 60), .9)])
+    assert image[40, 10].tolist() == [60, 220, 80]
+    assert image[40, 70].tolist() == [0, 0, 255]
+    draw_boxes(np.zeros_like(image), [])
+
+
 @pytest.mark.parametrize('params', [dict(closing_kernel=2), dict(min_component_patches=0),
     dict(padding_patches=float('nan')), dict(rgb_border_fraction=-.1),
+    dict(merge_iou_threshold=0), dict(merge_iou_threshold=float('nan')),
     dict(edge_min_gradient=0), dict(edge_min_support=1.1)])
 def test_invalid_config(params):
     with pytest.raises(ValueError):

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from dinov3_cases.boxes import similarity_to_bboxes
 from dinov3_cases.tiling import (TileConfig, generate_tiles, preprocess_tiles,
     run_dino_batch, compute_similarity_maps, merge_similarity_maps, debug_visualizations,
-    patch_features, inference_dtype)
+    patch_features, inference_dtype, generate_context_tiles, context_margin)
 
 
 def test_inference_precision_avoids_fp16_overflow(monkeypatch):
@@ -205,6 +205,43 @@ def test_overlap_max_and_weighted_center_preference():
     assert .6 < weighted[16, 29] < .8
     torch.testing.assert_close(weighted[:, :16], torch.full((32, 16), .2))
     torch.testing.assert_close(weighted[:, 32:], torch.full((32, 16), .8))
+
+
+@pytest.mark.parametrize('mode', ['max', 'weighted'])
+@pytest.mark.parametrize('shape', [(1, 1), (32, 48), (65, 105)])
+@pytest.mark.parametrize('overlap', [0., .25])
+def test_context_tiles_reject_spurious_tile_border_scores(shape, mode, overlap):
+    margin = 8
+    image = torch.zeros((3, *shape))
+    tiles, coords, padded_shape = generate_context_tiles(image, 32, overlap, margin)
+    assert len(tiles) == len(coords)
+    # A model that spuriously scores every tile edge highly must not create a
+    # false positive, including at the outer edge of the original image.
+    maps = torch.full((len(coords), 32, 32), .2)
+    maps[:, :8, :] = .99
+    maps[:, -8:, :] = .99
+    maps[:, :, :8] = .99
+    maps[:, :, -8:] = .99
+    merged = merge_similarity_maps(maps, coords, padded_shape, mode, 32, margin)
+    original = merged[margin:margin+shape[0], margin:margin+shape[1]]
+    assert torch.isfinite(original).all()
+    torch.testing.assert_close(original, torch.full(shape, .2))
+
+
+@pytest.mark.parametrize('mode', ['max', 'weighted'])
+def test_actual_patch_grid_border_band_is_excluded(mode):
+    margin = context_margin(448, 16)
+    assert margin == 48
+    tiles, coords, padded_shape = generate_context_tiles(torch.zeros((3, 448, 448)),
+                                                          448, .25, margin)
+    maps = torch.full((len(tiles), 28, 28), .2)
+    maps[:, :2, :] = .99
+    maps[:, -2:, :] = .99
+    maps[:, :, :2] = .99
+    maps[:, :, -2:] = .99
+    merged = merge_similarity_maps(maps, coords, padded_shape, mode, 448, margin)
+    original = merged[margin:margin+448, margin:margin+448]
+    torch.testing.assert_close(original, torch.full((448, 448), .2), atol=1e-6, rtol=0)
 
 
 @pytest.mark.parametrize('mode', ['max', 'weighted'])

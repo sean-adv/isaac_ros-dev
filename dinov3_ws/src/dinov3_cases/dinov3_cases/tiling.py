@@ -57,6 +57,22 @@ def generate_tiles(image, tile_size=448, overlap=.25):
     return [image[:, y1:y2, x1:x2] for x1, y1, x2, y2 in coords], coords
 
 
+def context_margin(tile_size, patch_size):
+    """Allow for two border patches and bilinear interpolation into the next."""
+    return min(3 * patch_size, tile_size // 4)
+
+
+def generate_context_tiles(image, tile_size, overlap, margin):
+    """Extend the image so even its outer pixels have tile context."""
+    if not 0 < margin < tile_size / 2:
+        raise ValueError('Context margin must fit inside the tile.')
+    padded = F.pad(image, (margin, margin, margin, margin), mode='replicate')
+    # Interior regions must cover the full image, including when overlap is zero.
+    effective_overlap = max(overlap, 2 * margin / tile_size)
+    tiles, coords = generate_tiles(padded, tile_size, effective_overlap)
+    return tiles, coords, padded.shape[-2:]
+
+
 def preprocess_tiles(tiles, tile_size, processor):
     """Stack one batch of RGB uint8 tiles; pad small images on right/bottom.
 
@@ -127,12 +143,14 @@ def compute_similarity_maps(features, reference_embedding):
 
 @torch.inference_mode()
 def merge_similarity_maps(similarity_maps, tile_coordinates, original_shape,
-                          mode='weighted', tile_size=448):
+                          mode='weighted', tile_size=448, border_pixels=0):
     """Upsample to the padded tile, crop padding, then merge in original pixels."""
     if mode not in ('max', 'weighted'):
         raise ValueError('merge mode must be max or weighted.')
     if similarity_maps.ndim != 3 or len(similarity_maps) != len(tile_coordinates):
         raise ValueError('Expected one patch similarity map per tile coordinate.')
+    if not 0 <= border_pixels < tile_size / 2:
+        raise ValueError('Invalid tile border width.')
     height, width = original_shape
     scores = similarity_maps.new_full((height, width), -torch.inf if mode == 'max' else 0,
                                       dtype=torch.float32)
@@ -147,24 +165,30 @@ def merge_similarity_maps(similarity_maps, tile_coordinates, original_shape,
         tile = F.interpolate(raw[None, None].float(), (tile_size, tile_size),
                              mode='bilinear', align_corners=False)[0, 0, :y2-y1, :x2-x1]
         region = scores[y1:y2, x1:x2]
+        if border_pixels:
+            valid = torch.zeros((y2-y1, x2-x1), dtype=torch.bool, device=scores.device)
+            valid[border_pixels:tile_size-border_pixels,
+                  border_pixels:tile_size-border_pixels] = True
         if weights is None:
-            torch.maximum(region, tile, out=region)
+            torch.maximum(region, tile.masked_fill(~valid, -torch.inf) if border_pixels else tile,
+                          out=region)
         else:
-            weight = window[:y2-y1, :x2-x1]
+            weight = window[:y2-y1, :x2-x1] * valid if border_pixels else window[:y2-y1, :x2-x1]
             region.addcmul_(tile, weight)
             weights[y1:y2, x1:x2].add_(weight)
     if weights is not None:
-        scores.div_(weights)
+        scores.div_(weights.clamp_min(torch.finfo(weights.dtype).tiny))
     return scores
 
 
-def debug_visualizations(bgr, tile_scores, coords, scores, mask, boxes, tile_size):
+def debug_visualizations(bgr, tile_scores, coords, scores, mask, boxes, tile_size,
+                         offset=0):
     """CPU-only optional diagnostics; callers transfer tile scores once."""
     from .boxes import draw_boxes
     grid = bgr.copy()
     for i, (x1, y1, x2, y2) in enumerate(coords):
-        cv2.rectangle(grid, (x1, y1), (x2 - 1, y2 - 1), (80, 220, 255), 1)
-        cv2.putText(grid, str(i), (x1 + 4, y1 + 18), cv2.FONT_HERSHEY_SIMPLEX,
+        cv2.rectangle(grid, (x1-offset, y1-offset), (x2-offset-1, y2-offset-1), (80, 220, 255), 1)
+        cv2.putText(grid, str(i), (max(0, x1-offset+4), max(18, y1-offset+18)), cv2.FONT_HERSHEY_SIMPLEX,
                     .5, (80, 220, 255), 1)
     def color(raw):
         return cv2.applyColorMap((np.clip(raw, 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
@@ -177,7 +201,7 @@ def debug_visualizations(bgr, tile_scores, coords, scores, mask, boxes, tile_siz
         pixels = cv2.resize(raw, (tile_size, tile_size))[:y2-y1, :x2-x1]
         y, x = (i // columns) * (thumb + 24), (i % columns) * thumb
         atlas[y:y+thumb, x:x+thumb] = cv2.resize(color(pixels), (thumb, thumb))
-        cv2.putText(atlas, f'{i}: {x1},{y1}', (x+3, y+thumb+16),
+        cv2.putText(atlas, f'{i}: {x1-offset},{y1-offset}', (x+3, y+thumb+16),
                     cv2.FONT_HERSHEY_SIMPLEX, .4, (255, 255, 255), 1)
     final = bgr.copy()
     draw_boxes(final, [(item['bbox'], item['score']) for item in boxes])

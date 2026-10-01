@@ -13,6 +13,7 @@ class BoxConfig:
     rgb_border_fraction: float = 0.1
     edge_min_gradient: float = 20.0
     edge_min_support: float = 0.6
+    merge_iou_threshold: float = 0.3
 
     def __post_init__(self):
         if self.closing_kernel < 1 or self.closing_kernel % 2 != 1:
@@ -27,6 +28,8 @@ class BoxConfig:
             raise ValueError('edge_min_gradient must be finite and positive.')
         if not 0 < self.edge_min_support <= 1:
             raise ValueError('edge_min_support must be in (0, 1].')
+        if not math.isfinite(self.merge_iou_threshold) or not 0 < self.merge_iou_threshold <= 1:
+            raise ValueError('merge_iou_threshold must be in (0, 1].')
 
 
 def clean_mask(scores, valid, threshold, kernel):
@@ -80,6 +83,46 @@ def similarity_to_bboxes(global_similarity, threshold=.7, min_area=1024,
             box = refine_box(bgr, box, cfg)
         boxes.append(dict(bbox=[int(v) for v in box], score=score, area=int(area)))
     return (boxes, mask) if return_mask else boxes
+
+
+def merge_boxes_by_iou(boxes, threshold=0.3):
+    """Merge connected groups of overlapping half-open boxes after refinement."""
+    if not math.isfinite(threshold) or not 0 < threshold <= 1:
+        raise ValueError('IoU threshold must be in (0, 1].')
+    parent = list(range(len(boxes)))
+
+    def root(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for i, first in enumerate(boxes):
+        ax0, ay0, ax1, ay1 = first['bbox']
+        a_area = (ax1 - ax0) * (ay1 - ay0)
+        for j in range(i + 1, len(boxes)):
+            bx0, by0, bx1, by1 = boxes[j]['bbox']
+            intersection = max(0, min(ax1, bx1) - max(ax0, bx0)) * max(0, min(ay1, by1) - max(ay0, by0))
+            if not intersection:
+                continue
+            b_area = (bx1 - bx0) * (by1 - by0)
+            if intersection / (a_area + b_area - intersection) >= threshold:
+                parent[root(j)] = root(i)
+
+    groups = {}
+    for index, item in enumerate(boxes):
+        group = groups.setdefault(root(index), [])
+        group.append(item)
+    merged = []
+    for group in groups.values():
+        merged.append(dict(
+            bbox=[min(item['bbox'][0] for item in group),
+                  min(item['bbox'][1] for item in group),
+                  max(item['bbox'][2] for item in group),
+                  max(item['bbox'][3] for item in group)],
+            score=max(item['score'] for item in group),
+            area=sum(item['area'] for item in group)))
+    return merged
 
 
 def _edge_position(bgr, positions, start, stop, vertical, origin, cfg):
@@ -174,7 +217,11 @@ def detection_message(boxes, name, header=None):
 
 
 def draw_boxes(image, boxes):
-    for (x0, y0, x1, y1), score in boxes:
-        cv2.rectangle(image, (x0, y0), (x1 - 1, y1 - 1), (60, 220, 80), 2)
+    best = max(range(len(boxes)), key=lambda index: boxes[index][1], default=None)
+    # Draw the highest scoring box last so its red outline stays visible.
+    for index in [i for i in range(len(boxes)) if i != best] + ([best] if best is not None else []):
+        (x0, y0, x1, y1), score = boxes[index]
+        color = (0, 0, 255) if index == best else (60, 220, 80)
+        cv2.rectangle(image, (x0, y0), (x1 - 1, y1 - 1), color, 2)
         cv2.putText(image, f'{score:.2f}', (x0, max(16, y0 - 5)),
-                    cv2.FONT_HERSHEY_SIMPLEX, .5, (60, 220, 80), 1)
+                    cv2.FONT_HERSHEY_SIMPLEX, .5, color, 1)

@@ -37,10 +37,10 @@ with tempfile.TemporaryDirectory() as tmp:
     assert 0 < valid.sum() < 196
     scores, coords, tiles = encoder.similarity_map(picture, features[valid], debug=True)
     assert scores.shape == (96, 192) and np.isfinite(scores).all()
-    assert len(coords) == 8 and tiles.shape == (8, 4, 4)
+    assert len(coords) > 8 and tiles.shape == (len(coords), 4, 4)
     # Corrupt features must never become a partially visible heatmap or a bank.
     for invalid in (float('nan'), float('inf')):
-        bad = torch.full((8, 4, 4, 32), invalid, device=encoder.device)
+        bad = torch.full((len(coords), 4, 4, 32), invalid, device=encoder.device)
         with patch('dinov3_cases.node.run_dino_batch', return_value=iter([bad])):
             try:
                 encoder.similarity_map(picture, features[valid])

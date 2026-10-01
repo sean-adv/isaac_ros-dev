@@ -41,7 +41,7 @@ Reference pictures should be tightly cropped around the desired object. All refe
 
 ## ROS visualization
 
-- `/medicine_recognition/detections`：合併後全圖 mask 的所有合格連通元件，case 名稱與元件內通過 threshold 的 pixel 平均 cosine similarity；無物件時發佈空陣列。ID 僅為單幀元件編號，不是追蹤 ID。
+- `/medicine_recognition/detections`：全圖 mask 產生的合格框經 IoU 合併後輸出；每個合併框的 score 是組內最高的元件平均 cosine similarity。無物件時發佈空陣列。ID 僅為單幀元件編號，不是追蹤 ID。
 - `/medicine_recognition/debug_image`：全圖熱圖與最終 bbox。
 - `/dinov3/heatmap/overlay`: `sensor_msgs/Image`, BGR8; add an Image display in RViz2 and select this topic.
 - `/dinov3/heatmap/similarity`: `sensor_msgs/Image`, 32FC1, raw cosine similarity.
@@ -53,7 +53,7 @@ Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/
 
 Parameters: `cases_dir`, `image_topic`, `model_id`, `image_size` (448; multiple of 16, 224–1024), `inference_hz` (5.0), `max_reference_patches` (8192), `host` (127.0.0.1), `port` (8090).
 
-Reference images retain the existing letterbox preprocessing and exclude padding patches; `image_size` controls references only. Target images use overlapping tiles at original resolution. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed; actual rate depends on inference time. The model and selected bank stay in GPU memory. Reference files stay local; Hugging Face is contacted to download model files.
+Reference images use edge-replicated letterbox padding and exclude both padding and the first two valid patch rows/columns along the content boundary; extremely narrow references without interior patches are rejected. `image_size` controls references only. Target images use overlapping tiles at original resolution with a small replicated context border. Scores from the outer tile margin are excluded before merging, then the context border is cropped away. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed; actual rate depends on inference time. The model and selected bank stay in GPU memory. Reference files stay local; Hugging Face is contacted to download model files.
 
 ## Environment / rebuild
 
@@ -83,9 +83,9 @@ Use the **Cosine threshold** slider below the live preview. Release the slider t
 
 ## Tiling + batch inference → bounding boxes
 
-原始 RGB → overlapping tiles → batch DINOv3 patch features → reference cosine similarity → 每張 tile 放大至 pixel map → overlap 合併 → **全圖** threshold → closing → hole filling → `connectedComponentsWithStats(connectivity=8)` → 面積過濾 → 原圖 bbox + padding → 可選 RGB 外圍微調。
+原始 RGB → overlapping tiles → batch DINOv3 patch features → reference cosine similarity → 每張 tile 放大至 pixel map → overlap 合併 → **全圖** threshold → closing → hole filling → `connectedComponentsWithStats(connectivity=8)` → 面積過濾 → 原圖 bbox + padding → 可選 RGB 外圍微調 → bbox IoU 合併。
 
-目標圖不先縮小。預設 448×448 tile、25% overlap、stride=336，1920×1080 共 18 tiles，以 4、4、4、4、2 張分批。最後一列／排向內貼齊右／下邊界，完整覆蓋原圖；小於 tile 的尺寸在右／下以 replicate 補邊，映射時裁去補邊，不把補邊區縮進原圖。tile_size 必須為模型 patch_size 的倍數；預設 patch_size=16，因此每張 tile 保留 28×28 patch grid，排除 CLS/register tokens。
+目標圖不先縮小。預設 448×448 tile、25% overlap、stride=336；推論前先在整張原圖四周各補 48 pixel 上下文，1920×1080 因此約 24 tiles。合併時忽略每張 tile 最外側 48 pixel 的分數，再裁去整圖補邊，避免 tile 上下緣的高分進入原圖。最後一列／排向內貼齊右／下邊界，完整覆蓋原圖；小於 tile 的尺寸在右／下以 replicate 補邊。tile_size 必須為模型 patch_size 的倍數；預設 patch_size=16，因此每張 tile 保留 28×28 patch grid，排除 CLS/register tokens。
 
 `max` 取 overlap 區域最大 cosine 分數（保留負值）。`weighted` 使用中央較高的 2D Hann 權重，邊界權重保留正值，避免影像外圍除以零；累加分數×權重後除以總權重。所有 tiles 合併後才做 threshold 與連通元件，跨 tile 的同一物件可形成單一 bbox。無額外 detector 或 segmentation neural network。
 
@@ -100,6 +100,7 @@ GPU 上保留原圖 tensor、tile views、batch preprocessing、features、simil
 | `closing_kernel` | 3 | **原圖 pixel** 的奇數 kernel；1 停用 closing，仍填洞 |
 | `min_area` | 1024 | 清理後連通元件的最小面積，單位 pixel² |
 | `bbox_padding` | 8 | bbox 每側向外擴張的原圖 pixel 數 |
+| `merge_iou_threshold` | 0.3 | 最終 bbox 的 IoU 達到此值時合併；取外接框、最高分與元件面積總和 |
 | `debug_visualization` | false | 開啟網頁五種 tiling 除錯視圖 |
 | `rgb_border_fraction` | 0.1 | bbox 外側搜尋帶相對寬／高；0 完全停用，範圍 0–0.25 |
 | `edge_min_gradient` | 20.0 | 8-bit RGB 各通道 Sobel 絕對值最大值，scale=1/4 |
@@ -119,7 +120,7 @@ closing 可能合併相隔很近的區域；需要保留分離時可減小 `clos
 
 開啟 debug 後，網頁的 **Tiling diagnostics** 可切換原圖＋tile grid、逐 tile similarity、合併後完整 heatmap、threshold 後經 closing/填洞的 binary mask、最終 bbox。亦可直接讀取 `/debug/grid.jpg`、`/debug/tiles.jpg`、`/debug/heatmap.jpg`、`/debug/mask.jpg`、`/debug/boxes.jpg`。heatmap 沿用固定 0–1 色階，負分數顯示為最低顏色；原始 ROS similarity topic 保留負值。debug 預設關閉以減少 JPEG 與 CPU 成本。
 
-`GET /api/detections` 回傳 `{"detections": [{"bbox": [x1, y1, x2, y2], "score": 0.85, "area": 1500}]}`。bbox 使用原圖半開座標（右／下界不包含），padding 與可選 RGB 微調皆裁齊原圖；area 是清理後元件面積，不含 bbox padding，score 只平均 threshold 通過的原始分數。ROS Detection2DArray 保持原介面與影像 header。
+`GET /api/detections` 回傳 `{"detections": [{"bbox": [x1, y1, x2, y2], "score": 0.85, "area": 1500}]}`。bbox 使用原圖半開座標（右／下界不包含），padding 與可選 RGB 微調皆裁齊原圖。IoU 達到 `merge_iou_threshold` 的框形成同一組，輸出其外接框；area 是組內清理後元件面積總和，不含 bbox padding，score 是組內最高的元件平均分數。畫面中最高分框以紅線標示，其餘框為綠線。ROS Detection2DArray 保持原介面與影像 header。
 
 驗證（在工作區根目錄，使用既有 venv 與 ROS 環境）：
 
