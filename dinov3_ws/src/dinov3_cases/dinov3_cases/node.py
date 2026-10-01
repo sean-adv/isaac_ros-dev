@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 import rclpy
 import torch
-import torch.nn.functional as F
 from cv_bridge import CvBridge
 from flask import Flask, jsonify, request, Response
 from PIL import Image, ImageOps
@@ -19,7 +18,10 @@ from sensor_msgs.msg import Image as ImageMsg
 from transformers import AutoModel, AutoImageProcessor
 from werkzeug.serving import make_server
 
-from .boxes import BoxConfig, extract_boxes, detection_message, draw_boxes
+from .boxes import BoxConfig, similarity_to_bboxes, detection_message, draw_boxes
+from .tiling import (TileConfig, generate_tiles, run_dino_batch, patch_features,
+                     compute_similarity_maps, merge_similarity_maps, debug_visualizations,
+                     inference_dtype)
 from vision_msgs.msg import Detection2DArray
 
 MODEL = 'facebook/dinov3-vith16plus-pretrain-lvd1689m'
@@ -49,14 +51,17 @@ def render_heatmap(bgr, scores, threshold):
 
 
 class Encoder:
-    def __init__(self, model_id, side):
+    def __init__(self, model_id, side, tiling=None):
         if side < 224 or side > 1024 or side % 16:
             raise ValueError('image_size must be a multiple of 16 between 224 and 1024.')
         self.side = side
+        self.tiling = tiling or TileConfig()
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.dtype = torch.float16 if self.device == 'cuda' else torch.float32
+        self.dtype = inference_dtype(self.device)
         self.processor = AutoImageProcessor.from_pretrained(model_id)
         self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
+        if self.tiling.tile_size % self.model.config.patch_size:
+            raise ValueError('tile_size must be a multiple of the model patch size.')
 
     @torch.inference_mode()
     def encode(self, image):
@@ -69,36 +74,38 @@ class Encoder:
         canvas.paste(image.resize((nw, nh), Image.Resampling.BICUBIC), (left, top))
         inputs = self.processor(images=canvas, do_resize=False, do_center_crop=False, return_tensors='pt')
         inputs = {k: v.to(device=self.device, dtype=self.dtype) for k, v in inputs.items()}
-        outputs = self.model(**inputs).last_hidden_state
-        patches = outputs[0, 1 + self.model.config.num_register_tokens:]
-        grid = self.side // self.model.config.patch_size
-        if patches.shape[0] != grid * grid:
-            raise RuntimeError('Unexpected DINOv3 patch grid.')
-        features = F.normalize(patches.float(), dim=-1)
+        outputs = self.model(**inputs)
+        spatial = patch_features(outputs, self.model, self.side, self.side)
+        grid = spatial.shape[1]
+        features = spatial[0].reshape(grid * grid, -1)
+        if not torch.isfinite(features).all():
+            raise RuntimeError(f'Non-finite DINOv3 reference features with {self.dtype}; reference bank rejected.')
         centers = (torch.arange(grid, device=self.device) + .5) * self.model.config.patch_size
         valid = ((centers[:, None] >= top) & (centers[:, None] < top + nh)
                  & (centers[None, :] >= left) & (centers[None, :] < left + nw)).flatten()
         return features, valid, (left, top, nw, nh, grid)
 
     @torch.inference_mode()
-    def similarity_map(self, image, bank):
-        features, valid, geometry = self.encode(image)
-        grid = geometry[-1]
-        # Bound matrix memory even for a large case bank.
-        score = torch.full((features.shape[0],), -1., device=self.device)
-        for chunk in bank.split(2048):
-            score = torch.maximum(score, (features @ chunk.T).max(dim=1).values)
-        raw = score.reshape(grid, grid).cpu().numpy()
-        return raw, valid.reshape(grid, grid).cpu().numpy(), geometry
+    def similarity_map(self, image, bank, debug=False):
+        # One host -> device transfer. Tiles are views; only a batch is stacked.
+        pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).to(self.device)
+        cfg = self.tiling
+        tiles, coords = generate_tiles(pixels, cfg.tile_size, cfg.overlap)
+        maps = []
+        for features in run_dino_batch(tiles, self.model, cfg.batch_size, cfg.tile_size,
+                                       self.processor, self.dtype):
+            maps.append(compute_similarity_maps(features, bank))
+        tile_scores = torch.cat(maps)
+        merged = merge_similarity_maps(tile_scores, coords, (image.height, image.width),
+                                       cfg.merge_mode, cfg.tile_size)
+        # Only the final map crosses to CPU for OpenCV/ROS. Debug adds one copy.
+        raw = merged.cpu().numpy()
+        if not np.isfinite(raw).all():
+            raise RuntimeError(f'Non-finite DINOv3 similarity with {self.dtype}; heatmap and detections rejected.')
+        return raw, coords, tile_scores.cpu().numpy() if debug else None
 
     def heatmap(self, image, bank):
-        raw, _, geometry = self.similarity_map(image, bank)
-        return self.project_heatmap(raw, geometry, image.size)
-
-    def project_heatmap(self, raw, geometry, image_size):
-        left, top, nw, nh, _ = geometry
-        square = cv2.resize(raw, (self.side, self.side), interpolation=cv2.INTER_LINEAR)
-        return cv2.resize(square[top:top + nh, left:left + nw], image_size, interpolation=cv2.INTER_LINEAR)
+        return self.similarity_map(image, bank)[0]
 
 
 class CaseNode(Node):
@@ -108,7 +115,10 @@ class CaseNode(Node):
                         image_topic='/camera/color/image_raw', model_id=MODEL,
                         image_size=448, port=8090, host='127.0.0.1', inference_hz=5.0,
                         max_reference_patches=8192, cosine_threshold=0.70,
-                        **vars(BoxConfig()))
+                        min_area=1024, bbox_padding=8, debug_visualization=False,
+                        **vars(TileConfig()),
+                        **{k: v for k, v in vars(BoxConfig()).items()
+                           if k not in ('min_component_patches', 'padding_patches')})
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
@@ -120,13 +130,20 @@ class CaseNode(Node):
         self.threshold = float(self.param('cosine_threshold'))
         if not 0 <= self.threshold <= 1:
             raise ValueError('cosine_threshold must be between 0 and 1.')
-        self.box_config = BoxConfig(**{key: self.param(key) for key in vars(BoxConfig())})
+        self.box_config = BoxConfig(**{key: self.param(key) for key in vars(BoxConfig())
+                                       if key not in ('min_component_patches', 'padding_patches')})
+        self.tile_config = TileConfig(**{key: self.param(key) for key in vars(TileConfig())})
+        # Validate pixel post-processing parameters before starting worker threads.
+        similarity_to_bboxes(np.zeros((1, 1), np.float32), self.threshold,
+                             self.param('min_area'), self.param('bbox_padding'), self.box_config.closing_kernel)
         self.selected = '' 
         self.generation = 0
         self.source = 'camera'
         self.frame = None
         self.frame_seq = 0
         self.jpeg = None
+        self.debug_jpegs = {}
+        self.detections = []
         self.preview_jpeg = None
         self.camera_frame = None
         self.camera_seq = 0
@@ -203,7 +220,7 @@ class CaseNode(Node):
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
                                camera_topic=self.param('image_topic'), camera_age=age,
                                camera_connected=age is not None and age < 3,
-                               preview_error=self.preview_error,
+                               preview_error=self.preview_error, debug_visualization=self.param('debug_visualization'),
                                overlay_age=None if self.overlay_at is None else time.monotonic() - self.overlay_at)
 
         @app.post('/api/threshold')
@@ -216,6 +233,8 @@ class CaseNode(Node):
                 self.threshold = float(value)
                 self.generation += 1
                 self.jpeg = None
+                self.debug_jpegs = {}
+                self.detections = []
                 self.overlay_at = None
             return jsonify(ok=True, threshold=self.threshold)
 
@@ -241,6 +260,8 @@ class CaseNode(Node):
                 self.selected = name
                 self.generation += 1
                 self.jpeg = None
+                self.debug_jpegs = {}
+                self.detections = []
                 self.status = 'Building reference features…'
             return jsonify(ok=True, count=len(images))
 
@@ -254,6 +275,8 @@ class CaseNode(Node):
                 self.selected = name
                 self.generation += 1
                 self.jpeg = None
+                self.debug_jpegs = {}
+                self.detections = []
                 self.status = 'Building reference features…'
             return jsonify(ok=True)
 
@@ -276,6 +299,8 @@ class CaseNode(Node):
                 self.frame_seq += 1
                 self.generation += 1
                 self.jpeg = None
+                self.debug_jpegs = {}
+                self.detections = []
             return jsonify(ok=True)
 
         @app.get('/camera.mjpg')
@@ -293,6 +318,20 @@ class CaseNode(Node):
             return Response(frames(), mimetype='multipart/x-mixed-replace; boundary=frame',
                             headers={'Cache-Control': 'no-store'})
 
+        @app.get('/api/detections')
+        def detections():
+            with self.lock:
+                return jsonify(detections=self.detections)
+
+        @app.get('/debug/<view>.jpg')
+        def debug_view(view):
+            if view not in ('grid', 'tiles', 'heatmap', 'mask', 'boxes'):
+                return Response(status=404)
+            with self.lock:
+                data = self.debug_jpegs.get(view)
+            return Response(data or b'', status=200 if data else 204,
+                            mimetype='image/jpeg', headers={'Cache-Control': 'no-store'})
+
         @app.get('/overlay.jpg')
         def overlay():
             with self.lock:
@@ -303,7 +342,7 @@ class CaseNode(Node):
 
     def run_worker(self):
         try:
-            encoder = Encoder(self.param('model_id'), self.param('image_size'))
+            encoder = Encoder(self.param('model_id'), self.param('image_size'), self.tile_config)
         except Exception as e:
             with self.lock:
                 self.status = f'Model load failed: {type(e).__name__}: {e}'
@@ -354,12 +393,23 @@ class CaseNode(Node):
                 else:
                     image = frame
                 start = time.monotonic()
-                patch_scores, valid, geometry = encoder.similarity_map(image, self.bank)
-                scores = encoder.project_heatmap(patch_scores, geometry, image.size)
+                scores, coords, tile_scores = encoder.similarity_map(
+                    image, self.bank, self.param('debug_visualization'))
                 bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-                boxes = extract_boxes(patch_scores, valid, geometry, image.size,
-                                      encoder.model.config.patch_size, threshold, self.box_config, bgr)
+                detections, mask = similarity_to_bboxes(
+                    scores, threshold, self.param('min_area'), self.param('bbox_padding'),
+                    self.box_config.closing_kernel, bgr=bgr, cfg=self.box_config, return_mask=True)
+                boxes = [(item['bbox'], item['score']) for item in detections]
                 recognition = detection_message(boxes, name, header)
+                debug_jpegs = {}
+                if tile_scores is not None:
+                    views = debug_visualizations(bgr, tile_scores, coords, scores, mask,
+                                                 detections, self.tile_config.tile_size)
+                    for view, pixels in views.items():
+                        encoded, jpeg = cv2.imencode('.jpg', pixels)
+                        if not encoded:
+                            raise RuntimeError(f'Could not encode debug view: {view}')
+                        debug_jpegs[view] = jpeg.tobytes()
                 overlay = render_heatmap(bgr, scores, threshold)
                 draw_boxes(overlay, boxes)
                 cv2.putText(overlay, f'{name} | cosine >= {threshold:.2f} | max {scores.max():.2f}',
@@ -371,8 +421,11 @@ class CaseNode(Node):
                     if gen != self.generation:
                         continue
                     self.jpeg = data.tobytes()
+                    self.debug_jpegs = debug_jpegs
+                    self.detections = detections
                     self.overlay_at = time.monotonic()
-                    self.status = f'{name}: {len(paths)} references | {encoder.device} | {time.monotonic()-start:.2f}s inference'
+                    precision = str(encoder.dtype).removeprefix('torch.')
+                    self.status = f'{name}: {len(paths)} references | {len(coords)} tiles / batch {self.tile_config.batch_size} | {encoder.device} {precision} | {time.monotonic()-start:.2f}s inference'
                     out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
                     raw = self.bridge.cv2_to_imgmsg(scores.astype(np.float32), encoding='32FC1')
                     if header is not None:
@@ -393,6 +446,8 @@ class CaseNode(Node):
                 with self.lock:
                     if gen == self.generation:
                         self.jpeg = None
+                        self.debug_jpegs = {}
+                        self.detections = []
                         self.status = f'Error: {type(e).__name__}: {e}'
                 self.get_logger().error(str(e))
                 processed = (gen, seq)
@@ -405,7 +460,8 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</
 <select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
-<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Threshold controls patch-mask boxes and heatmap color. Boxes use mask closing, hole filling and padding; RGB only adjusts outer borders.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
+<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Overlapping tiles are merged before thresholding. Boxes use the full-resolution mask, closing, hole filling and pixel padding.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
+<section id="debug-section" hidden><h2>Tiling diagnostics</h2><select id="debug-view"><option value="grid">Original + tile grid</option><option value="tiles">Individual tile similarity</option><option value="heatmap">Merged similarity</option><option value="mask">Mask after threshold, closing and hole filling</option><option value="boxes">Final bounding boxes</option></select><p><img id="debug-image" alt="Tiling diagnostic"></p></section>
 <script>
 const el=id=>document.getElementById(id);
 let thresholdDirty=false;
@@ -416,7 +472,11 @@ el('upload').onsubmit=e=>{e.preventDefault();send('/api/cases',{method:'POST',bo
 el('select').onclick=()=>send('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case:el('cases').value})});
 el('target').onsubmit=e=>{e.preventDefault();let f=new FormData(e.target);f.set('source','upload');send('/api/source',{method:'POST',body:f});};
 el('camera').onclick=()=>{let f=new FormData();f.set('source','camera');send('/api/source',{method:'POST',body:f});};
-async function refresh(){const r=await fetch('/api/status');const d=await r.json();if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
+async function refresh(){const r=await fetch('/api/status');const d=await r.json();el('debug-section').hidden=!d.debug_visualization;if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
+let debugBusy=false;
+async function refreshDebug(){if(debugBusy||el('debug-section').hidden)return;debugBusy=true;try{const r=await fetch('/debug/'+el('debug-view').value+'.jpg');const im=el('debug-image');if(r.status===200){const old=im.src;im.src=URL.createObjectURL(await r.blob());if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{const old=im.src;im.removeAttribute('src');if(old.startsWith('blob:'))URL.revokeObjectURL(old);}}finally{debugBusy=false;}}
+el('debug-view').onchange=()=>refreshDebug().catch(()=>{});
+setInterval(()=>refreshDebug().catch(()=>{}),1000);
 async function poll(){try{await refresh();}catch(e){el('status').textContent='Connection lost: '+e.message;}setTimeout(poll,250);}poll();
 </script></body></html>'''
 

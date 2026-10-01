@@ -4,12 +4,15 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 import numpy as np
+import torch
 import rclpy
 from PIL import Image
 from transformers import DINOv3ViTConfig, DINOv3ViTModel, DINOv3ViTImageProcessorFast
 from dinov3_cases.node import Encoder, CaseNode, case_path, render_heatmap
-from dinov3_cases.boxes import BoxConfig, extract_boxes, detection_message
+from dinov3_cases.boxes import similarity_to_bboxes, detection_message
+from dinov3_cases.tiling import TileConfig, inference_dtype
 from std_msgs.msg import Header
 
 # Below-threshold pixels stay unchanged; equality is included.
@@ -26,17 +29,35 @@ with tempfile.TemporaryDirectory() as tmp:
     DINOv3ViTModel(DINOv3ViTConfig(hidden_size=32, intermediate_size=64,
         num_hidden_layers=1, num_attention_heads=2, num_register_tokens=4)).save_pretrained(model)
     DINOv3ViTImageProcessorFast().save_pretrained(model)
-    encoder = Encoder(str(model), 224)
+    encoder = Encoder(str(model), 224, TileConfig(tile_size=64, batch_size=4))
+    assert encoder.dtype == inference_dtype(encoder.device)
     picture = Image.fromarray(np.random.default_rng(1).integers(0, 255, (96, 192, 3), dtype=np.uint8))
     features, valid, geo = encoder.encode(picture)
     assert features.shape == (196, 32)
     assert 0 < valid.sum() < 196
-    patch_scores, patch_valid, geometry = encoder.similarity_map(picture, features[valid])
-    assert patch_scores.shape == patch_valid.shape == (14, 14)
-    assert geometry == geo
-    boxes = extract_boxes(patch_scores, patch_valid, geometry, picture.size, 16, .7,
-                          BoxConfig(rgb_border_fraction=0))
-    assert boxes, 'Self-matching patches must produce a box'
+    scores, coords, tiles = encoder.similarity_map(picture, features[valid], debug=True)
+    assert scores.shape == (96, 192) and np.isfinite(scores).all()
+    assert len(coords) == 8 and tiles.shape == (8, 4, 4)
+    # Corrupt features must never become a partially visible heatmap or a bank.
+    for invalid in (float('nan'), float('inf')):
+        bad = torch.full((8, 4, 4, 32), invalid, device=encoder.device)
+        with patch('dinov3_cases.node.run_dino_batch', return_value=iter([bad])):
+            try:
+                encoder.similarity_map(picture, features[valid])
+                raise AssertionError('Non-finite target features accepted')
+            except RuntimeError as error:
+                assert 'Non-finite DINOv3 similarity' in str(error)
+        with patch('dinov3_cases.node.patch_features', return_value=bad[:1]):
+            try:
+                encoder.encode(picture)
+                raise AssertionError('Non-finite reference features accepted')
+            except RuntimeError as error:
+                assert 'Non-finite DINOv3 reference features' in str(error)
+    # Random weights and different target/reference scales cannot guarantee a
+    # semantic threshold. Use the full cosine range to exercise message geometry.
+    result = similarity_to_bboxes(scores, -1., 4, 8)
+    boxes = [(item['bbox'], item['score']) for item in result]
+    assert boxes and boxes[0][0] == [0, 0, 192, 96]
     header = Header()
     header.frame_id = 'test_camera'
     header.stamp.sec = 123
@@ -59,7 +80,8 @@ with tempfile.TemporaryDirectory() as tmp:
     except ValueError:
         pass
     rclpy.init(args=['--ros-args', '-p', f'model_id:={model}', '-p', f'cases_dir:={root / "cases"}',
-                     '-p', 'image_size:=224', '-p', 'port:=0', '-p', 'inference_hz:=10.0'])
+                     '-p', 'image_size:=224', '-p', 'tile_size:=64', '-p', 'batch_size:=4',
+                     '-p', 'debug_visualization:=true', '-p', 'port:=0', '-p', 'inference_hz:=10.0'])
     node = CaseNode()
     client = node.app.test_client()
     def png():
@@ -91,7 +113,13 @@ with tempfile.TemporaryDirectory() as tmp:
         while time.monotonic() < deadline and client.get('/overlay.jpg').status_code != 200:
             time.sleep(.1)
         assert client.get('/overlay.jpg').status_code == 200, client.get('/api/status').json
+        assert client.get('/api/status').json['debug_visualization']
+        for view in ('grid', 'tiles', 'heatmap', 'mask', 'boxes'):
+            assert client.get(f'/debug/{view}.jpg').status_code == 200
+        assert client.get('/debug/invalid.jpg').status_code == 404
+        assert 'detections' in client.get('/api/detections').json
         assert client.post('/api/threshold', json={'threshold':.95}).status_code == 200
+        assert client.get('/debug/grid.jpg').status_code == 204
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline and client.get('/overlay.jpg').status_code != 200:
             time.sleep(.1)
@@ -105,7 +133,7 @@ with tempfile.TemporaryDirectory() as tmp:
         while time.monotonic() < deadline and client.get('/overlay.jpg').status_code != 200:
             time.sleep(.1)
         assert client.get('/overlay.jpg').status_code == 200, client.get('/api/status').json
-        print('PASS: patch extraction, letterbox geometry, upload groups, selection validation, uploaded target and camera callback overlays')
+        print('PASS: reference letterboxing, tiled batch matching, global boxes, debug views, uploads, threshold updates and camera overlays')
     finally:
         node.stop.set()
         node.server.shutdown()

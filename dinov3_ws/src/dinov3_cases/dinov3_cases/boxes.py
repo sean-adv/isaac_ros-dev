@@ -40,6 +40,48 @@ def clean_mask(scores, valid, threshold, kernel):
     return (mask | (1 - flooded[1:-1, 1:-1])) & valid.astype(np.uint8)
 
 
+def _components(scores, valid, threshold, kernel, min_area):
+    mask = clean_mask(scores, valid, threshold, kernel)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    components = []
+    for label in range(1, count):
+        x, y, w, h, area = stats[label]
+        if area < min_area:
+            continue
+        # Filled holes/closed gaps do not invent similarity evidence.
+        region = np.s_[y:y+h, x:x+w]
+        evidence = ((labels[region] == label) & valid[region]
+                    & (scores[region] >= threshold))
+        if evidence.any():
+            components.append((x, y, w, h, area, float(scores[region][evidence].mean())))
+    return mask, components
+
+
+def similarity_to_bboxes(global_similarity, threshold=.7, min_area=1024,
+                         bbox_padding=8, closing_kernel=3, *, bgr=None, cfg=None,
+                         return_mask=False):
+    """Post-process only the merged pixel map; areas are mask pixels, xyxy is half-open."""
+    if not math.isfinite(threshold) or not -1 <= threshold <= 1:
+        raise ValueError('threshold must be between -1 and 1.')
+    if not isinstance(min_area, int) or min_area < 1:
+        raise ValueError('min_area must be a positive integer in pixels.')
+    if not math.isfinite(bbox_padding) or bbox_padding < 0:
+        raise ValueError('bbox_padding must be finite and nonnegative.')
+    if closing_kernel < 1 or closing_kernel % 2 != 1:
+        raise ValueError('closing_kernel must be positive and odd.')
+    valid = np.isfinite(global_similarity)
+    mask, components = _components(global_similarity, valid, threshold, closing_kernel, min_area)
+    height, width = global_similarity.shape
+    boxes = []
+    for x, y, w, h, area, score in components:
+        box = (max(0, math.floor(x - bbox_padding)), max(0, math.floor(y - bbox_padding)),
+               min(width, math.ceil(x + w + bbox_padding)), min(height, math.ceil(y + h + bbox_padding)))
+        if bgr is not None and cfg is not None:
+            box = refine_box(bgr, box, cfg)
+        boxes.append(dict(bbox=[int(v) for v in box], score=score, area=int(area)))
+    return (boxes, mask) if return_mask else boxes
+
+
 def _edge_position(bgr, positions, start, stop, vertical, origin, cfg):
     """Read only an outer strip and a one-pixel Sobel stencil halo."""
     if not len(positions) or stop - start < 3:
@@ -93,13 +135,9 @@ def extract_boxes(scores, valid, geometry, image_size, patch_size, threshold, cf
     width, height = image_size
     if scores.shape != (grid, grid) or valid.shape != scores.shape:
         raise ValueError('Similarity and validity masks must match the native patch grid.')
-    mask = clean_mask(scores, valid, threshold, cfg.closing_kernel)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    _, components = _components(scores, valid, threshold, cfg.closing_kernel, cfg.min_component_patches)
     boxes = []
-    for label in range(1, count):
-        x, y, w, h, area = stats[label]
-        if area < cfg.min_component_patches:
-            continue
+    for x, y, w, h, area, score in components:
         pad = cfg.padding_patches
         x0 = max(0, math.floor(((x - pad) * patch_size - left) * width / nw))
         y0 = max(0, math.floor(((y - pad) * patch_size - top) * height / nh))
@@ -110,9 +148,7 @@ def extract_boxes(scores, valid, geometry, image_size, patch_size, threshold, cf
         box = (x0, y0, x1, y1)
         if bgr is not None:
             box = refine_box(bgr, box, cfg)
-        # Filled holes/closed gaps do not invent similarity evidence.
-        evidence = (labels == label) & valid & (scores >= threshold)
-        boxes.append((box, float(scores[evidence].mean())))
+        boxes.append((box, score))
     return boxes
 
 
