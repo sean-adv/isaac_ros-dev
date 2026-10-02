@@ -18,7 +18,7 @@ Start the Gemini 336 driver in one terminal if it is not already running:
 docker exec -it my_isaac_ros_dev bash /workspaces/isaac_ros-dev/dinov3_ws/run_camera.sh
 ```
 
-此腳本以 640×480、30 FPS 啟動 RGB 與深度，開啟 `depth_registration:=true` 並對齊到 COLOR。保留此終端，在另一個終端啟動 DINOv3（bbox 僅需要 RGB）：
+此腳本以 1280×720、30 FPS 啟動 RGB 與深度，開啟 `depth_registration:=true` 並對齊到 COLOR。保留此終端，在另一個終端啟動 DINOv3（bbox 使用 RGB，最高分框的姿態使用深度）：
 
 ```bash
 docker exec -it my_isaac_ros_dev /workspaces/isaac_ros-dev/dinov3_ws/run.sh
@@ -48,6 +48,12 @@ Reference pictures should be tightly cropped around the desired object. All refe
 - Camera timestamps and frame IDs are preserved.
 
 ## Data and parameters
+
+最高分 bbox 使用框內匹配 mask 的對齊深度估計可見表面姿態，畫面顯示 X 紅、Y 綠、Z 藍三軸（預設長度 5 cm）。位置是有效表面點的平均中心，X 為最長主軸，Z 為朝向相機的表面法線，Y 補成右手座標系。這是幾何表面座標系，不是 CAD 物體中心或具有語義的正反朝向；對稱表面、遮擋及背景混入會限制姿態估計，沒有跨幀追蹤。
+
+有效姿態發布到 `/medicine_recognition/pose`（`geometry_msgs/PoseStamped`），位置單位為公尺，旋轉使用四元數，header 沿用 RGB 的時間及光學座標系。RViz 可使用 Pose display 顯示。`/api/detections` 的最高分項新增 `selected: true` 和 `pose`（含 `position`、`quaternion_xyzw`、以列儲存且各欄為 X/Y/Z 的旋轉矩陣 `axes`、frame/stamp）；失敗時 `pose: null` 並附 `pose_error`。無有效姿態時不發布 PoseStamped；訂閱端應檢查時間戳，勿沿用舊姿態。上傳的單張 RGB 不會搭配即時相機深度。
+
+深度參數：`depth_topic`（`/camera/depth/image_raw`）、`camera_info_topic`（`/camera/color/camera_info`）、`depth_sync_tolerance`（0.05 秒）、`pose_depth_band`（中位深度前後 0.04 公尺）、`axis_length`（0.05 公尺）。深度必須已對齊 RGB，且尺寸與 frame_id 一致；支援 16UC1 毫米或 32FC1 公尺，以及 plumb_bob / rational_polynomial 標定。缺少同步深度、標定、足夠有效點或可辨識主軸時，保留 2D 檢測並顯示原因。
 
 Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/`. You may also create folders and add PNG/JPEG/WebP/BMP files there, then select the case in the browser. Uploaded images are converted to PNG; uploads append to a case. No deletion endpoint is provided. DICOM and volumetric scans are not supported.
 

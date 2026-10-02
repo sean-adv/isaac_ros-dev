@@ -14,6 +14,7 @@ from dinov3_cases.node import Encoder, CaseNode, case_path, render_heatmap
 from dinov3_cases.boxes import similarity_to_bboxes, detection_message
 from dinov3_cases.tiling import TileConfig, inference_dtype
 from std_msgs.msg import Header
+from sensor_msgs.msg import CameraInfo
 
 # Below-threshold pixels stay unchanged; equality is included.
 bgr = np.full((2, 2, 3), 120, dtype=np.uint8)
@@ -90,6 +91,30 @@ with tempfile.TemporaryDirectory() as tmp:
         data.seek(0)
         return data
     try:
+        # Exercise highest-score selection and ROS calibration/depth wiring.
+        pose_rgb = node.bridge.cv2_to_imgmsg(np.zeros((120, 200, 3), np.uint8), encoding='rgb8')
+        pose_rgb.header.frame_id = 'color_optical'
+        pose_rgb.header.stamp.sec = 100
+        depth_msg = node.bridge.cv2_to_imgmsg(np.ones((120, 200), np.float32), encoding='32FC1')
+        depth_msg.header = pose_rgb.header
+        info = CameraInfo()
+        info.header = pose_rgb.header
+        info.width, info.height = 200, 120
+        info.k = [400., 0., 100., 0., 400., 60., 0., 0., 1.]
+        info.distortion_model = 'plumb_bob'
+        info.d = [0.] * 5
+        node.on_depth(depth_msg)
+        node.on_camera_info(info)
+        mask = np.zeros((120, 200), np.uint8)
+        mask[40:80, 20:180] = 1
+        candidates = [dict(bbox=[0, 0, 10, 10], score=.7),
+                      dict(bbox=[20, 40, 180, 80], score=.9)]
+        pose, reason = node.selected_pose(candidates, mask, pose_rgb.header, list(node.depth_frames), node.camera_info)
+        assert pose is not None, reason
+        assert candidates[1]['selected'] and 'selected' not in candidates[0]
+        assert pose['frame_id'] == 'color_optical' and pose['position'][2] == 1.
+        pose, reason = node.selected_pose(candidates, mask, None, list(node.depth_frames), info)
+        assert pose is None and candidates[1]['pose'] is None
         assert client.get('/').status_code == 200
         assert client.post('/api/threshold', json={'threshold':.85}).status_code == 200
         assert client.get('/api/status').json['threshold'] == .85

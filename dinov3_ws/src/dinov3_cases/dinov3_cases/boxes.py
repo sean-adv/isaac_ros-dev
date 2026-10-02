@@ -60,7 +60,7 @@ def _components(scores, valid, threshold, kernel, min_area):
     return mask, components
 
 
-def similarity_to_bboxes(global_similarity, threshold=.7, min_area=1024,
+def similarity_to_bboxes(global_similarity, threshold=.65, min_area=2048,
                          bbox_padding=8, closing_kernel=3, *, bgr=None, cfg=None,
                          return_mask=False):
     """Post-process only the merged pixel map; areas are mask pixels, xyxy is half-open."""

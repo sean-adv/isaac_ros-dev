@@ -2,19 +2,22 @@
 import re
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
 import numpy as np
 import rclpy
 import torch
-from cv_bridge import CvBridge
+from cv_bridge import CvBridge, CvBridgeError
 from flask import Flask, jsonify, request, Response
 from PIL import Image, ImageOps
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image as ImageMsg
+from sensor_msgs.msg import CameraInfo
+from geometry_msgs.msg import PoseStamped
 from transformers import AutoModel, AutoImageProcessor
 from werkzeug.serving import make_server
 
@@ -23,6 +26,7 @@ from .tiling import (TileConfig, generate_tiles, run_dino_batch, patch_features,
                      compute_similarity_maps, merge_similarity_maps, debug_visualizations,
                      inference_dtype, context_margin, generate_context_tiles)
 from vision_msgs.msg import Detection2DArray
+from .pose import closest_depth, estimate_pose, draw_axes
 
 MODEL = 'facebook/dinov3-vith16plus-pretrain-lvd1689m'
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
@@ -122,9 +126,12 @@ class CaseNode(Node):
         super().__init__('dinov3_cases')
         defaults = dict(cases_dir='/workspaces/isaac_ros-dev/dinov3_cases_data',
                         image_topic='/camera/color/image_raw', model_id=MODEL,
-                        image_size=448, port=8090, host='127.0.0.1', inference_hz=5.0,
-                        max_reference_patches=8192, cosine_threshold=0.70,
-                        min_area=1024, bbox_padding=8, debug_visualization=False,
+                        depth_topic='/camera/depth/image_raw',
+                        camera_info_topic='/camera/color/camera_info',
+                        depth_sync_tolerance=0.05, pose_depth_band=0.04, axis_length=0.05,
+                        image_size=448, port=8090, host='127.0.0.1', inference_hz=20.0,
+                        max_reference_patches=8192, cosine_threshold=0.65,
+                        min_area=2048, bbox_padding=8, debug_visualization=False,
                         **vars(TileConfig()),
                         **{k: v for k, v in vars(BoxConfig()).items()
                            if k not in ('min_component_patches', 'padding_patches')})
@@ -134,7 +141,12 @@ class CaseNode(Node):
         self.root = Path(self.param('cases_dir')).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.bridge = CvBridge()
+        for key in ('depth_sync_tolerance', 'pose_depth_band', 'axis_length'):
+            if not np.isfinite(self.param(key)) or self.param(key) <= 0:
+                raise ValueError(f'{key} must be finite and positive.')
         self.lock = threading.Lock()
+        self.depth_frames = deque(maxlen=90)
+        self.camera_info = None
         self.stop = threading.Event()
         self.threshold = float(self.param('cosine_threshold'))
         if not 0 <= self.threshold <= 1:
@@ -166,7 +178,10 @@ class CaseNode(Node):
         self.raw_pub = self.create_publisher(ImageMsg, '/dinov3/heatmap/similarity', 1)
         self.recognition_pub = self.create_publisher(Detection2DArray, '/medicine_recognition/detections', 10)
         self.recognition_debug_pub = self.create_publisher(ImageMsg, '/medicine_recognition/debug_image', 1)
+        self.pose_pub = self.create_publisher(PoseStamped, '/medicine_recognition/pose', 10)
         self.create_subscription(ImageMsg, self.param('image_topic'), self.on_image, qos_profile_sensor_data)
+        self.create_subscription(ImageMsg, self.param('depth_topic'), self.on_depth, qos_profile_sensor_data)
+        self.create_subscription(CameraInfo, self.param('camera_info_topic'), self.on_camera_info, qos_profile_sensor_data)
         self.app = self.make_app()
         self.server = make_server(self.param('host'), self.param('port'), self.app, threaded=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -175,6 +190,41 @@ class CaseNode(Node):
         self.worker = threading.Thread(target=self.run_worker, daemon=True)
         self.worker.start()
         self.get_logger().info(f"Browser: http://{self.param('host')}:{self.param('port')}")
+
+    def on_depth(self, msg):
+        with self.lock:
+            self.depth_frames.append(msg)
+
+    def on_camera_info(self, msg):
+        with self.lock:
+            self.camera_info = msg
+
+    def selected_pose(self, detections, mask, header, depth_frames, info):
+        if not detections:
+            return None, 'No detection'
+        selected = max(detections, key=lambda item: item['score'])
+        selected['selected'] = True
+        selected['pose'] = None
+        try:
+            if header is None:
+                raise ValueError('Uploaded RGB image has no paired depth')
+            depth = closest_depth(depth_frames, header, self.param('depth_sync_tolerance'))
+            if info is None or info.header.frame_id != header.frame_id:
+                raise ValueError('Waiting for RGB camera calibration')
+            if (info.height, info.width) != mask.shape:
+                raise ValueError('Camera calibration dimensions do not match RGB')
+            if info.distortion_model not in ('', 'plumb_bob', 'rational_polynomial'):
+                raise ValueError('Unsupported camera distortion model')
+            pose = estimate_pose(self.bridge.imgmsg_to_cv2(depth, desired_encoding='passthrough'),
+                                 depth.encoding, info.k, info.d, selected['bbox'], mask,
+                                 self.param('pose_depth_band'))
+            pose['frame_id'] = header.frame_id
+            pose['stamp'] = dict(sec=header.stamp.sec, nanosec=header.stamp.nanosec)
+            selected['pose'] = pose
+            return pose, 'Depth surface pose'
+        except (ValueError, cv2.error, CvBridgeError) as error:
+            selected['pose_error'] = str(error)
+            return None, str(error)
 
     def on_image(self, msg):
         with self.lock:
@@ -364,6 +414,7 @@ class CaseNode(Node):
             with self.lock:
                 name, gen, frame, seq = self.selected, self.generation, self.frame, self.frame_seq
                 threshold = self.threshold
+                depth_frames, info = list(self.depth_frames), self.camera_info
             if not name or frame is None:
                 with self.lock:
                     if gen == self.generation:
@@ -409,6 +460,7 @@ class CaseNode(Node):
                     scores, threshold, self.param('min_area'), self.param('bbox_padding'),
                     self.box_config.closing_kernel, bgr=bgr, cfg=self.box_config, return_mask=True)
                 detections = merge_boxes_by_iou(detections, self.box_config.merge_iou_threshold)
+                pose, pose_status = self.selected_pose(detections, mask, header, depth_frames, info)
                 boxes = [(item['bbox'], item['score']) for item in detections]
                 recognition = detection_message(boxes, name, header)
                 debug_jpegs = {}
@@ -425,6 +477,12 @@ class CaseNode(Node):
                         debug_jpegs[view] = jpeg.tobytes()
                 overlay = render_heatmap(bgr, scores, threshold)
                 draw_boxes(overlay, boxes)
+                if pose is not None:
+                    draw_axes(overlay, pose, info.k, info.d, self.param('axis_length'))
+                    x, y, z = pose['position']
+                    pose_status = f'Surface XYZ: {x:.3f}, {y:.3f}, {z:.3f} m'
+                cv2.putText(overlay, pose_status, (12, 52), cv2.FONT_HERSHEY_SIMPLEX,
+                            .5, (255, 255, 255), 1)
                 cv2.putText(overlay, f'{name} | cosine >= {threshold:.2f} | max {scores.max():.2f}',
                             (12, 28), cv2.FONT_HERSHEY_SIMPLEX, .6, (255,255,255), 2)
                 ok, data = cv2.imencode('.jpg', overlay)
@@ -453,6 +511,13 @@ class CaseNode(Node):
                     for detection in recognition.detections:
                         detection.header = out.header
                     self.recognition_pub.publish(recognition)
+                    if pose is not None:
+                        pose_msg = PoseStamped()
+                        pose_msg.header = out.header
+                        pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z = pose['position']
+                        q = pose_msg.pose.orientation
+                        q.x, q.y, q.z, q.w = pose['quaternion_xyzw']
+                        self.pose_pub.publish(pose_msg)
                     self.recognition_debug_pub.publish(out)
                 processed = (gen, seq)
             except Exception as e:

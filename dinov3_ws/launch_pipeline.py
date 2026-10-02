@@ -1,4 +1,4 @@
-"""Run the DINOv3 RGB-only pipeline with the active Python environment."""
+"""Run DINOv3 matching and aligned-depth surface pose estimation."""
 import os
 from pathlib import Path
 import sys

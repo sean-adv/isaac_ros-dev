@@ -19,8 +19,8 @@ def inference_dtype(device):
 @dataclass(frozen=True)
 class TileConfig:
     tile_size: int = 448
-    overlap: float = .25
-    batch_size: int = 4
+    overlap: float = 0.15
+    batch_size: int = 1
     merge_mode: str = 'weighted'
 
     def __post_init__(self):
@@ -59,7 +59,7 @@ def generate_tiles(image, tile_size=448, overlap=.25):
 
 def context_margin(tile_size, patch_size):
     """Allow for two border patches and bilinear interpolation into the next."""
-    return min(3 * patch_size, tile_size // 4)
+    return min(2 * patch_size, tile_size // 4)
 
 
 def generate_context_tiles(image, tile_size, overlap, margin):
