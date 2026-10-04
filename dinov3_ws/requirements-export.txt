@@ -1,0 +1,6 @@
+# Keep the existing ROS/SciPy-compatible NumPy version.
+numpy==1.26.4
+ml_dtypes==0.5.4
+onnx==1.23.1
+onnxscript==0.7.2
+onnx_ir==1.0.0
