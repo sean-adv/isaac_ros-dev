@@ -22,9 +22,8 @@ from transformers import AutoModel, AutoImageProcessor
 from werkzeug.serving import make_server
 
 from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
-from .tiling import (TileConfig, generate_tiles, run_dino_batch, patch_features,
-                     compute_similarity_maps, merge_similarity_maps, debug_visualizations,
-                     inference_dtype, context_margin, generate_context_tiles)
+from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels,
+                      debug_visualizations, inference_dtype)
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
 
@@ -55,67 +54,31 @@ def render_heatmap(bgr, scores, threshold):
 
 
 class Encoder:
-    def __init__(self, model_id, side, tiling=None):
-        if side < 224 or side > 1024 or side % 16:
-            raise ValueError('image_size must be a multiple of 16 between 224 and 1024.')
-        self.side = side
-        self.tiling = tiling or TileConfig()
+    def __init__(self, model_id):
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.dtype = inference_dtype(self.device)
         self.processor = AutoImageProcessor.from_pretrained(model_id)
         self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
-        if self.tiling.tile_size % self.model.config.patch_size:
-            raise ValueError('tile_size must be a multiple of the model patch size.')
+
+    def spatial_features(self, image):
+        pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).to(self.device)
+        return run_dino_image(pixels, self.model, self.processor, self.dtype)
 
     @torch.inference_mode()
     def encode(self, image):
-        # Letterbox without cropping; remove padding patches from reference banks.
-        w, h = image.size
-        scale = self.side / max(w, h)
-        nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-        left, top = (self.side - nw) // 2, (self.side - nh) // 2
-        resized = np.asarray(image.resize((nw, nh), Image.Resampling.BICUBIC))
-        canvas = Image.fromarray(np.pad(resized, ((top, self.side-nh-top),
-                                                  (left, self.side-nw-left), (0, 0)),
-                                         mode='edge'))
-        inputs = self.processor(images=canvas, do_resize=False, do_center_crop=False, return_tensors='pt')
-        inputs = {k: v.to(device=self.device, dtype=self.dtype) for k, v in inputs.items()}
-        outputs = self.model(**inputs)
-        spatial = patch_features(outputs, self.model, self.side, self.side)
-        grid = spatial.shape[1]
-        features = spatial[0].reshape(grid * grid, -1)
-        if not torch.isfinite(features).all():
-            raise RuntimeError(f'Non-finite DINOv3 reference features with {self.dtype}; reference bank rejected.')
-        centers = (torch.arange(grid, device=self.device) + .5) * self.model.config.patch_size
-        patch = self.model.config.patch_size
-        # Border descriptors see artificial padding or truncated context.
-        inset = 2 * patch
-        valid = ((centers[:, None] >= top + inset) & (centers[:, None] < top + nh - inset)
-                 & (centers[None, :] >= left + inset)
-                 & (centers[None, :] < left + nw - inset)).flatten()
-        return features, valid, (left, top, nw, nh, grid)
+        spatial = self.spatial_features(image)
+        return spatial[0].reshape(-1, spatial.shape[-1])
 
     @torch.inference_mode()
     def similarity_map(self, image, bank, debug=False):
-        # One host -> device transfer. Tiles are views; only a batch is stacked.
-        pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).to(self.device)
-        cfg = self.tiling
-        margin = context_margin(cfg.tile_size, self.model.config.patch_size)
-        tiles, coords, padded_shape = generate_context_tiles(pixels, cfg.tile_size,
-                                                              cfg.overlap, margin)
-        maps = []
-        for features in run_dino_batch(tiles, self.model, cfg.batch_size, cfg.tile_size,
-                                       self.processor, self.dtype):
-            maps.append(compute_similarity_maps(features, bank))
-        tile_scores = torch.cat(maps)
-        merged = merge_similarity_maps(tile_scores, coords, padded_shape,
-                                       cfg.merge_mode, cfg.tile_size, margin)
-        merged = merged[margin:margin+image.height, margin:margin+image.width]
-        # Only the final map crosses to CPU for OpenCV/ROS. Debug adds one copy.
-        raw = merged.cpu().numpy()
+        features = self.spatial_features(image)
+        patch_scores = compute_similarity_maps(features, bank)[0]
+        scores = similarity_pixels(patch_scores, (image.height, image.width),
+                                   self.model.config.patch_size)
+        raw = scores.cpu().numpy()
         if not np.isfinite(raw).all():
             raise RuntimeError(f'Non-finite DINOv3 similarity with {self.dtype}; heatmap and detections rejected.')
-        return raw, coords, tile_scores.cpu().numpy() if debug else None
+        return raw, tuple(patch_scores.shape), patch_scores.cpu().numpy() if debug else None
 
     def heatmap(self, image, bank):
         return self.similarity_map(image, bank)[0]
@@ -129,10 +92,9 @@ class CaseNode(Node):
                         depth_topic='/camera/depth/image_raw',
                         camera_info_topic='/camera/color/camera_info',
                         depth_sync_tolerance=0.05, pose_depth_band=0.04, axis_length=0.05,
-                        image_size=448, port=8090, host='127.0.0.1', inference_hz=20.0,
+                        port=8090, host='127.0.0.1', inference_hz=20.0,
                         max_reference_patches=8192, cosine_threshold=0.65,
                         min_area=2048, bbox_padding=8, debug_visualization=False,
-                        **vars(TileConfig()),
                         **{k: v for k, v in vars(BoxConfig()).items()
                            if k not in ('min_component_patches', 'padding_patches')})
         for k, v in defaults.items():
@@ -153,7 +115,6 @@ class CaseNode(Node):
             raise ValueError('cosine_threshold must be between 0 and 1.')
         self.box_config = BoxConfig(**{key: self.param(key) for key in vars(BoxConfig())
                                        if key not in ('min_component_patches', 'padding_patches')})
-        self.tile_config = TileConfig(**{key: self.param(key) for key in vars(TileConfig())})
         # Validate pixel post-processing parameters before starting worker threads.
         similarity_to_bboxes(np.zeros((1, 1), np.float32), self.threshold,
                              self.param('min_area'), self.param('bbox_padding'), self.box_config.closing_kernel)
@@ -384,7 +345,7 @@ class CaseNode(Node):
 
         @app.get('/debug/<view>.jpg')
         def debug_view(view):
-            if view not in ('grid', 'tiles', 'heatmap', 'mask', 'boxes'):
+            if view not in ('grid', 'patches', 'heatmap', 'mask', 'boxes'):
                 return Response(status=404)
             with self.lock:
                 data = self.debug_jpegs.get(view)
@@ -401,7 +362,7 @@ class CaseNode(Node):
 
     def run_worker(self):
         try:
-            encoder = Encoder(self.param('model_id'), self.param('image_size'), self.tile_config)
+            encoder = Encoder(self.param('model_id'))
         except Exception as e:
             with self.lock:
                 self.status = f'Model load failed: {type(e).__name__}: {e}'
@@ -437,10 +398,7 @@ class CaseNode(Node):
                     per_image = max(1, limit // len(paths))
                     banks = []
                     for path in paths:
-                        features, valid, _ = encoder.encode(decode_image(path))
-                        features = features[valid]
-                        if not len(features):
-                            raise ValueError(f'Reference image is too narrow after resizing: {path.name}')
+                        features = encoder.encode(decode_image(path))
                         indices = torch.linspace(0, len(features) - 1, min(per_image, len(features)),
                                                  device=features.device).long()
                         banks.append(features[indices])
@@ -453,7 +411,7 @@ class CaseNode(Node):
                 else:
                     image = frame
                 start = time.monotonic()
-                scores, coords, tile_scores = encoder.similarity_map(
+                scores, patch_grid, patch_scores = encoder.similarity_map(
                     image, self.bank, self.param('debug_visualization'))
                 bgr = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
                 detections, mask = similarity_to_bboxes(
@@ -464,12 +422,9 @@ class CaseNode(Node):
                 boxes = [(item['bbox'], item['score']) for item in detections]
                 recognition = detection_message(boxes, name, header)
                 debug_jpegs = {}
-                if tile_scores is not None:
-                    margin = context_margin(self.tile_config.tile_size,
-                                            encoder.model.config.patch_size)
-                    views = debug_visualizations(bgr, tile_scores, coords, scores, mask,
-                                                 detections, self.tile_config.tile_size,
-                                                 offset=margin)
+                if patch_scores is not None:
+                    views = debug_visualizations(bgr, patch_scores, scores, mask,
+                                                 detections, encoder.model.config.patch_size)
                     for view, pixels in views.items():
                         encoded, jpeg = cv2.imencode('.jpg', pixels)
                         if not encoded:
@@ -496,7 +451,7 @@ class CaseNode(Node):
                     self.detections = detections
                     self.overlay_at = time.monotonic()
                     precision = str(encoder.dtype).removeprefix('torch.')
-                    self.status = f'{name}: {len(paths)} references | {len(coords)} tiles / batch {self.tile_config.batch_size} | {encoder.device} {precision} | {time.monotonic()-start:.2f}s inference'
+                    self.status = f'{name}: {len(paths)} references | {patch_grid[0]}×{patch_grid[1]} patches / batch 1 | {encoder.device} {precision} | {time.monotonic()-start:.2f}s inference'
                     out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
                     raw = self.bridge.cv2_to_imgmsg(scores.astype(np.float32), encoding='32FC1')
                     if header is not None:
@@ -538,8 +493,8 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</
 <select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
-<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Overlapping tiles are merged before thresholding. Final boxes are merged by IoU; the highest-scoring box has a red outline.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
-<section id="debug-section" hidden><h2>Tiling diagnostics</h2><select id="debug-view"><option value="grid">Original + tile grid</option><option value="tiles">Individual tile similarity</option><option value="heatmap">Merged similarity</option><option value="mask">Mask after threshold, closing and hole filling</option><option value="boxes">Final bounding boxes</option></select><p><img id="debug-image" alt="Tiling diagnostic"></p></section>
+<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Original-resolution patch scores are mapped to image pixels before thresholding. Final boxes are merged by IoU; the highest-scoring box has a red outline.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
+<section id="debug-section" hidden><h2>Patch diagnostics</h2><select id="debug-view"><option value="grid">Original + patch grid</option><option value="patches">Patch similarity</option><option value="heatmap">Full-image similarity</option><option value="mask">Mask after threshold, closing and hole filling</option><option value="boxes">Final bounding boxes</option></select><p><img id="debug-image" alt="Patch diagnostic"></p></section>
 <script>
 const el=id=>document.getElementById(id);
 let thresholdDirty=false;

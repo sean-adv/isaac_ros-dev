@@ -12,7 +12,7 @@ from PIL import Image
 from transformers import DINOv3ViTConfig, DINOv3ViTModel, DINOv3ViTImageProcessorFast
 from dinov3_cases.node import Encoder, CaseNode, case_path, render_heatmap
 from dinov3_cases.boxes import similarity_to_bboxes, detection_message
-from dinov3_cases.tiling import TileConfig, inference_dtype
+from dinov3_cases.patches import inference_dtype
 from std_msgs.msg import Header
 from sensor_msgs.msg import CameraInfo
 
@@ -30,31 +30,26 @@ with tempfile.TemporaryDirectory() as tmp:
     DINOv3ViTModel(DINOv3ViTConfig(hidden_size=32, intermediate_size=64,
         num_hidden_layers=1, num_attention_heads=2, num_register_tokens=4)).save_pretrained(model)
     DINOv3ViTImageProcessorFast().save_pretrained(model)
-    encoder = Encoder(str(model), 224, TileConfig(tile_size=64, batch_size=4))
+    encoder = Encoder(str(model))
     assert encoder.dtype == inference_dtype(encoder.device)
     picture = Image.fromarray(np.random.default_rng(1).integers(0, 255, (96, 192, 3), dtype=np.uint8))
-    features, valid, geo = encoder.encode(picture)
-    assert features.shape == (196, 32)
-    assert 0 < valid.sum() < 196
-    scores, coords, tiles = encoder.similarity_map(picture, features[valid], debug=True)
+    features = encoder.encode(picture)
+    assert features.shape == (72, 32)
+    scores, grid, patches = encoder.similarity_map(picture, features, debug=True)
     assert scores.shape == (96, 192) and np.isfinite(scores).all()
-    assert len(coords) > 8 and tiles.shape == (len(coords), 4, 4)
+    assert grid == (6, 12) and patches.shape == (6, 12)
     # Corrupt features must never become a partially visible heatmap or a bank.
     for invalid in (float('nan'), float('inf')):
-        bad = torch.full((len(coords), 4, 4, 32), invalid, device=encoder.device)
-        with patch('dinov3_cases.node.run_dino_batch', return_value=iter([bad])):
-            try:
-                encoder.similarity_map(picture, features[valid])
-                raise AssertionError('Non-finite target features accepted')
-            except RuntimeError as error:
-                assert 'Non-finite DINOv3 similarity' in str(error)
-        with patch('dinov3_cases.node.patch_features', return_value=bad[:1]):
-            try:
-                encoder.encode(picture)
-                raise AssertionError('Non-finite reference features accepted')
-            except RuntimeError as error:
-                assert 'Non-finite DINOv3 reference features' in str(error)
-    # Random weights and different target/reference scales cannot guarantee a
+        bad = torch.full((1, 77, 32), invalid, device=encoder.device)
+        with patch.object(encoder.model, 'forward', return_value=type('Output', (), {'last_hidden_state': bad})()):
+            for operation in (lambda: encoder.similarity_map(picture, features),
+                              lambda: encoder.encode(picture)):
+                try:
+                    operation()
+                    raise AssertionError('Non-finite features accepted')
+                except RuntimeError as error:
+                    assert 'Non-finite DINOv3 features' in str(error)
+    # Random weights cannot guarantee a
     # semantic threshold. Use the full cosine range to exercise message geometry.
     result = similarity_to_bboxes(scores, -1., 4, 8)
     boxes = [(item['bbox'], item['score']) for item in result]
@@ -72,7 +67,7 @@ with tempfile.TemporaryDirectory() as tmp:
         assert detection.bbox.size_x == bounds[2] - bounds[0]
         assert detection.bbox.size_y == bounds[3] - bounds[1]
     assert not detection_message([], 'test_case', header).detections
-    scores = encoder.heatmap(picture, features[valid])
+    scores = encoder.heatmap(picture, features)
     assert scores.shape == (96, 192) and np.isfinite(scores).all()
     assert scores.min() >= -1.001 and scores.max() <= 1.001
     try:
@@ -81,7 +76,6 @@ with tempfile.TemporaryDirectory() as tmp:
     except ValueError:
         pass
     rclpy.init(args=['--ros-args', '-p', f'model_id:={model}', '-p', f'cases_dir:={root / "cases"}',
-                     '-p', 'image_size:=224', '-p', 'tile_size:=64', '-p', 'batch_size:=4',
                      '-p', 'debug_visualization:=true', '-p', 'port:=0', '-p', 'inference_hz:=10.0'])
     node = CaseNode()
     client = node.app.test_client()
@@ -139,7 +133,7 @@ with tempfile.TemporaryDirectory() as tmp:
             time.sleep(.1)
         assert client.get('/overlay.jpg').status_code == 200, client.get('/api/status').json
         assert client.get('/api/status').json['debug_visualization']
-        for view in ('grid', 'tiles', 'heatmap', 'mask', 'boxes'):
+        for view in ('grid', 'patches', 'heatmap', 'mask', 'boxes'):
             assert client.get(f'/debug/{view}.jpg').status_code == 200
         assert client.get('/debug/invalid.jpg').status_code == 404
         assert 'detections' in client.get('/api/detections').json
@@ -158,7 +152,7 @@ with tempfile.TemporaryDirectory() as tmp:
         while time.monotonic() < deadline and client.get('/overlay.jpg').status_code != 200:
             time.sleep(.1)
         assert client.get('/overlay.jpg').status_code == 200, client.get('/api/status').json
-        print('PASS: reference letterboxing, tiled batch matching, global boxes, debug views, uploads, threshold updates and camera overlays')
+        print('PASS: native references, single-image patch matching, global boxes, debug views, uploads, threshold updates and camera overlays')
     finally:
         node.stop.set()
         node.server.shutdown()
