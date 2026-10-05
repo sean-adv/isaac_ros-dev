@@ -66,9 +66,23 @@ Reference pictures should be tightly cropped around the desired object. All refe
 
 Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/`. You may also create folders and add PNG/JPEG/WebP/BMP files there, then select the case in the browser. Uploaded images are converted to PNG; uploads append to a case. No deletion endpoint is provided. DICOM and volumetric scans are not supported.
 
-Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_backend` (`trt` / `torch`, default `trt`), `engine_path`, `inference_hz` (20.0), `max_reference_patches` (8192), `host` (127.0.0.1), `port` (8090).
+Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_backend` (`trt` / `torch`, default `trt`), `engine_path`, `inference_hz` (20.0), `max_reference_patches` (8192), `reference_max_side` (config default 640; 0 disables resizing), `host` (127.0.0.1), `port` (8090).
 
-Reference and target images both retain their original resolution. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No resizing, letterboxing, tiling, overlap, or input padding is applied. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
+Target images retain their original resolution. `reference_max_side` limits the reference long edge while preserving aspect ratio without enlarging small images; set it to 0 to retain reference resolution. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No letterboxing, tiling, overlap, or input padding is applied. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
+
+### Reference 尺寸設定
+
+`reference_max_side` 在 `config/dinov3_cases.yaml` 設定參考圖長邊上限（pixels），目前設定為 `640`；設為 `0` 可保留原始解析度。程式啟動時會自動載入此 config。縮放使用 LANCZOS、維持長寬比且不放大小圖；原始檔案不會被修改，也不影響相機影像、目標圖或其座標。修改 config 後需重啟，reference bank 會重新建立。
+
+```yaml
+dinov3_cases:
+  ros__parameters:
+    reference_max_side: 640
+```
+
+如需臨時覆寫，仍可使用 `./run.sh --ros-args -p reference_max_side:=480`；命令列值優先於 config。
+
+例如在 `reference_max_side: 640` 設定下，800×600 → 640×480、600×900 → 427×640；300×200 維持原尺寸。縮放後任一邊若小於模型步幅（ConvNeXt 為 32），會回報錯誤；請提高上限或調整過於狹長的參考圖。`max_reference_patches` 仍限制縮放後的參考特徵總量。
 
 ## Environment / rebuild
 
@@ -100,7 +114,7 @@ Use the **Cosine threshold** slider below the live preview. Release the slider t
 
 原始 RGB → rescale / normalization → DINOv3 單張全圖 forward → reference cosine similarity → patch 分數映射回原圖 pixel → threshold → closing → hole filling → connected components → 面積過濾 → bbox → 可選 RGB 外圍微調 → bbox IoU 合併。
 
-參考圖與目標圖皆不縮放、不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，ConvNeXt Large 以 32 pixel 的最終特徵步幅產生空間 tokens；全域 token 不參與比對。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
+目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。兩者皆不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，ConvNeXt Large 以 32 pixel 的最終特徵步幅產生空間 tokens；全域 token 不參與比對。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
 
 ConvNeXt Large 的最終 feature grid 為 `H // 32 × W // 32`。例如 1920×1080 會產生 33×60=1980 個空間特徵；最下方 24 pixel 不形成最終特徵。熱圖只將分數插值回完整特徵格覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 32 pixel 時回報錯誤。
 

@@ -14,6 +14,7 @@ from flask import Flask, jsonify, request, Response
 from PIL import Image, ImageOps
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image as ImageMsg
 from sensor_msgs.msg import CameraInfo
@@ -23,7 +24,7 @@ from werkzeug.serving import make_server
 
 from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
 from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels,
-                      debug_visualizations, inference_dtype, feature_stride)
+                      debug_visualizations, inference_dtype, feature_stride, resize_reference)
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
 
@@ -112,7 +113,12 @@ class CaseNode(Node):
                            if k not in ('min_component_patches', 'padding_patches')})
         for k, v in defaults.items():
             self.declare_parameter(k, v)
+        self.declare_parameter('reference_max_side', 0, ParameterDescriptor(
+            read_only=True,
+            description='Reference long-edge limit in pixels; 0 keeps original size. Restart to change.'))
         self.param = lambda k: self.get_parameter(k).value
+        if self.param('reference_max_side') < 0:
+            raise ValueError('reference_max_side must be nonnegative.')
         self.root = Path(self.param('cases_dir')).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.bridge = CvBridge()
@@ -407,7 +413,9 @@ class CaseNode(Node):
                 folder = case_path(self.root, name)
                 paths = sorted(p for p in folder.iterdir() if p.suffix.lower() in EXTENSIONS
                                and p.is_file() and not p.is_symlink())
-                key = (name, tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in paths))
+                reference_max_side = self.param('reference_max_side')
+                key = (name, reference_max_side,
+                       tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in paths))
                 if key != self.bank_key:
                     if not paths:
                         raise ValueError('Selected case has no supported pictures.')
@@ -417,7 +425,9 @@ class CaseNode(Node):
                     per_image = max(1, limit // len(paths))
                     banks = []
                     for path in paths:
-                        features = encoder.encode(decode_image(path))
+                        reference = resize_reference(decode_image(path), reference_max_side,
+                                                     feature_stride(encoder.model))
+                        features = encoder.encode(reference)
                         indices = torch.linspace(0, len(features) - 1, min(per_image, len(features)),
                                                  device=features.device).long()
                         banks.append(features[indices])

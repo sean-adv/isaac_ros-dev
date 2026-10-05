@@ -5,6 +5,21 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
+
+
+def resize_reference(image, max_side, min_side):
+    """Limit the reference long edge without changing its aspect ratio."""
+    if max_side < 0:
+        raise ValueError('reference_max_side must be nonnegative.')
+    result = image.copy()
+    if max_side:
+        result.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    if min(result.size) < min_side:
+        raise ValueError(
+            f'Reference size {result.size} is smaller than feature stride {min_side}; '
+            'increase reference_max_side or use a less narrow reference image.')
+    return result
 
 
 def inference_dtype(device):

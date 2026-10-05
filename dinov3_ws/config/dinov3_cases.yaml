@@ -1,0 +1,5 @@
+dinov3_cases:
+  ros__parameters:
+    # Reference image long-edge limit. 0 keeps the original resolution.
+    # Aspect ratio is preserved and smaller images are not enlarged.
+    reference_max_side: 720
