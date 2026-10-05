@@ -1,4 +1,5 @@
 """Real-GPU TRT integration smoke test; writes a numerical report, not a benchmark."""
+import argparse
 import gc
 import io
 import json
@@ -11,16 +12,21 @@ from PIL import Image
 import rclpy
 import torch
 
-from dinov3_cases.node import Encoder, CaseNode, MODEL
-from dinov3_cases.trt_backend import DEFAULT_ENGINE
+from dinov3_cases.node import Encoder, CaseNode
+from dinov3_cases.trt_backend import DEFAULT_VARIANT, MODEL_VARIANTS, model_variant
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--model', choices=sorted(MODEL_VARIANTS), default=DEFAULT_VARIANT)
+    args = parser.parse_args()
+    spec = model_variant(args.model)
+    model_id, engine_path = spec['model_id'], spec['engine_path']
     workspace = Path(__file__).resolve().parents[2]
     picture = Image.open(workspace / 'dinov3_cases_data/stomach/1790733215386907348_2.png').convert('RGB')
-    trt_encoder = Encoder(MODEL, 'trt', DEFAULT_ENGINE)
-    torch_encoder = Encoder(MODEL, 'torch')
-    report = {'engine': DEFAULT_ENGINE, 'images': []}
+    trt_encoder = Encoder(model_id, 'trt', engine_path)
+    torch_encoder = Encoder(model_id, 'torch')
+    report = {'variant': args.model, 'model_id': model_id, 'engine': engine_path, 'images': []}
     for image in (picture.crop((0, 0, 87, 53)), picture.crop((0, 0, 1280, 720)), picture):
         with torch.inference_mode():
             actual = trt_encoder.spatial_features(image)
@@ -49,7 +55,8 @@ def main():
     # Exercise the actual ROS worker, web uploads, bank rebuild and camera callback.
     with tempfile.TemporaryDirectory() as tmp:
         rclpy.init(args=['--ros-args', '-p', 'inference_backend:=trt',
-                        '-p', f'engine_path:={DEFAULT_ENGINE}', '-p', f'cases_dir:={tmp}',
+                        '-p', f'model_id:={model_id}', '-p', f'engine_path:={engine_path}',
+                        '-p', f'cases_dir:={tmp}',
                         '-p', 'host:=127.0.0.1', '-p', 'port:=0',
                         '-p', 'debug_visualization:=true'])
         node = CaseNode()
@@ -103,7 +110,7 @@ def main():
             node.worker.join(90)
             node.destroy_node()
             rclpy.shutdown()
-    path = Path(DEFAULT_ENGINE).parent / 'integration_dynamic.json'
+    path = Path(engine_path).parent / f'integration_{args.model}.json'
     path.write_text(json.dumps(report, indent=2) + '\n')
     print(f'PASS: native TRT features, case bank rebuild, web/ROS pipeline. Report: {path}', flush=True)
 

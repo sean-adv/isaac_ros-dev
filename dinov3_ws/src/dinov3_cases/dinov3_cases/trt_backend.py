@@ -7,8 +7,38 @@ from types import SimpleNamespace
 import torch
 
 
-MODEL_ID = 'facebook/dinov3-convnext-large-pretrain-lvd1689m'
-DEFAULT_ENGINE = '/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/dinov3_convnext_large_dynamic_bf16.engine'
+ARTIFACTS = Path('/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt')
+DEFAULT_VARIANT = 'vith16plus'
+MODEL_VARIANTS = {
+    'vith16plus': {
+        'model_id': 'facebook/dinov3-vith16plus-pretrain-lvd1689m',
+        'engine_path': str(ARTIFACTS / 'dinov3_dynamic_bf16.engine'),
+        'patch_size': 16, 'num_register_tokens': 4, 'hidden_size': 1280,
+    },
+    'vitb16': {
+        'model_id': 'facebook/dinov3-vitb16-pretrain-lvd1689m',
+        'engine_path': str(ARTIFACTS / 'dinov3_vitb16_dynamic_bf16.engine'),
+        'patch_size': 16, 'num_register_tokens': 4, 'hidden_size': 768,
+    },
+}
+MODEL_ID = MODEL_VARIANTS[DEFAULT_VARIANT]['model_id']
+DEFAULT_ENGINE = MODEL_VARIANTS[DEFAULT_VARIANT]['engine_path']
+
+
+def model_variant(variant):
+    try:
+        return MODEL_VARIANTS[variant]
+    except KeyError as error:
+        choices = ', '.join(MODEL_VARIANTS)
+        raise ValueError(f'Unknown model variant {variant!r}; choose one of: {choices}.') from error
+
+
+def model_spec_for_id(model_id):
+    for variant, spec in MODEL_VARIANTS.items():
+        if spec['model_id'] == model_id:
+            return variant, spec
+    supported = ', '.join(spec['model_id'] for spec in MODEL_VARIANTS.values())
+    raise ValueError(f'Unsupported TRT model_id={model_id!r}; supported: {supported}.')
 
 
 def validate_shape(shape, minimum, maximum):
@@ -21,8 +51,7 @@ def validate_shape(shape, minimum, maximum):
 
 class TRTBackbone:
     def __init__(self, engine_path, model_id):
-        if model_id != MODEL_ID:
-            raise ValueError(f'TRT engine requires model_id={MODEL_ID}.')
+        variant, spec = model_spec_for_id(model_id)
         path = Path(engine_path).expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(f'TRT engine not found: {path}; run build_dinov3_dynamic_trt.sh.')
@@ -30,14 +59,19 @@ class TRTBackbone:
             raise RuntimeError('TensorRT requires a CUDA GPU; no CPU fallback is performed.')
         import tensorrt as trt
         self.device = torch.device('cuda', torch.cuda.current_device())
-        self.config = SimpleNamespace(model_type='dinov3_convnext', hidden_size=1536)
-        self.description = 'TensorRT (FP32 I/O)'
+        self.config = SimpleNamespace(
+            model_type='dinov3_vit', patch_size=spec['patch_size'],
+            num_register_tokens=spec['num_register_tokens'], hidden_size=spec['hidden_size'])
+        self.description = f'TensorRT {variant} (FP32 I/O)'
         metadata = path.with_suffix('.json')
         if metadata.is_file():
             info = json.loads(metadata.read_text())
             if info['model_id'] != model_id:
                 raise ValueError('Engine metadata model_id mismatch.')
-            self.description = f"TensorRT {info['precision']}"
+            for key in ('patch_size', 'num_register_tokens', 'hidden_size'):
+                if info.get(key) != spec[key]:
+                    raise ValueError(f'Engine metadata {key} mismatch.')
+            self.description = f"TensorRT {variant} {info['precision']}"
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.runtime = trt.Runtime(self.logger)
         self.engine = self.runtime.deserialize_cuda_engine(path.read_bytes())
@@ -73,7 +107,10 @@ class TRTBackbone:
             if not self.context.set_input_shape('pixel_values', shape):
                 raise RuntimeError(f'TRT rejected input shape {shape}.')
             output_shape = tuple(self.context.get_tensor_shape('last_hidden_state'))
-            expected = (1, (shape[2] // 32) * (shape[3] // 32) + 1, 1536)
+            patch = self.config.patch_size
+            prefix = 1 + self.config.num_register_tokens
+            expected = (1, (shape[2] // patch) * (shape[3] // patch) + prefix,
+                        self.config.hidden_size)
             if output_shape != expected:
                 raise RuntimeError(f'TRT output shape {output_shape}, expected {expected}.')
             y = torch.empty(output_shape, device=self.device, dtype=torch.float32)

@@ -1,10 +1,10 @@
 # DINOv3 case heatmaps in my_isaac_ros_dev
 
-ROS 2 Jazzy node using `facebook/dinov3-convnext-large-pretrain-lvd1689m` on NVIDIA Thor.
+ROS 2 Jazzy node with selectable DINOv3 ViT-H+/16 and ViT-B/16 TensorRT backbones on NVIDIA Thor.
 
 預設使用 **TensorRT 動態 BF16 engine**，參考圖與目標圖皆維持原解析度、batch 1。
 engine 支援高、寬各 32–2560 像素（不需為 16 倍數），範圍外會明確報錯。
-`/api/status` 的 `inference_backend` / `backend_description` 顯示目前後端。
+`/api/status` 的 `model_id`、`inference_backend` 與 `backend_description` 顯示目前模型及後端。
 詳細建置、驗證及產物位置見 [TENSORRT.md](TENSORRT.md)。
 
 切回 PyTorch：`./run.sh --ros-args -p inference_backend:=torch`。
@@ -13,7 +13,8 @@ engine 支援高、寬各 32–2560 像素（不需為 16 倍數），範圍外�
 
 ## First: Hugging Face access
 
-Accept/request access at https://huggingface.co/facebook/dinov3-convnext-large-pretrain-lvd1689m using your own account. Then log in interactively inside the container (do not put your token in source code or chat):
+Accept/request access to `facebook/dinov3-vith16plus-pretrain-lvd1689m` and
+`facebook/dinov3-vitb16-pretrain-lvd1689m` using your own Hugging Face account. Then log in interactively inside the container (do not put your token in source code or chat):
 
 ```bash
 docker exec -it my_isaac_ros_dev /workspaces/isaac_ros-dev/dinov3_venv/bin/hf auth login
@@ -33,7 +34,18 @@ docker exec -it my_isaac_ros_dev bash /workspaces/isaac_ros-dev/dinov3_ws/run_ca
 docker exec -it my_isaac_ros_dev /workspaces/isaac_ros-dev/dinov3_ws/run.sh
 ```
 
-`run.sh` 直接啟動 DINOv3，訂閱 `/camera/color/image_raw`，不再啟動或依賴 RGB-D proposal。既有 `--ros-args -p ...` 會傳給 DINOv3，例如 `--ros-args -p port:=8091`。
+預設啟動 ViT-H+；使用 `--model` 在啟動時選擇權重與相符的 TensorRT engine：
+
+```bash
+# ViT-H+/16，1280 維特徵（預設）
+./run.sh --model vith16plus
+
+# ViT-B/16，768 維特徵
+./run.sh --model vitb16
+```
+
+切換模型會在新程序中重建 reference bank，兩種模型的 reference features 不會混用。
+`run.sh` 訂閱 `/camera/color/image_raw`，不再啟動或依賴 RGB-D proposal。既有 `--ros-args -p ...` 仍會傳給 DINOv3，例如 `./run.sh --model vitb16 --ros-args -p port:=8091`。
 
 更新後重建 `dinov3_cases` 即可；舊的 RGB-D build/install 產物不再使用。相機腳本仍接受 launch 參數覆寫，例如 `color_fps:=15 depth_fps:=15`。
 
@@ -82,7 +94,7 @@ dinov3_cases:
 
 如需臨時覆寫，仍可使用 `./run.sh --ros-args -p reference_max_side:=480`；命令列值優先於 config。
 
-例如在 `reference_max_side: 640` 設定下，800×600 → 640×480、600×900 → 427×640；300×200 維持原尺寸。縮放後任一邊若小於模型步幅（ConvNeXt 為 32），會回報錯誤；請提高上限或調整過於狹長的參考圖。`max_reference_patches` 仍限制縮放後的參考特徵總量。
+例如在 `reference_max_side: 640` 設定下，800×600 → 640×480、600×900 → 427×640；300×200 維持原尺寸。縮放後任一邊若小於 ViT patch size 16，會回報錯誤；請提高上限或調整過於狹長的參考圖。`max_reference_patches` 仍限制縮放後的參考特徵總量。
 
 ## Environment / rebuild
 
@@ -114,9 +126,9 @@ Use the **Cosine threshold** slider below the live preview. Release the slider t
 
 原始 RGB → rescale / normalization → DINOv3 單張全圖 forward → reference cosine similarity → patch 分數映射回原圖 pixel → threshold → closing → hole filling → connected components → 面積過濾 → bbox → 可選 RGB 外圍微調 → bbox IoU 合併。
 
-目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。兩者皆不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，ConvNeXt Large 以 32 pixel 的最終特徵步幅產生空間 tokens；全域 token 不參與比對。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
+目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。兩者皆不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，ViT-H+ 與 ViT-B 都以 16×16 pixel patch 產生空間 tokens；CLS 與 4 個 register tokens 不參與比對。ViT-H+ 每個特徵為 1280 維，ViT-B 為 768 維。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
 
-ConvNeXt Large 的最終 feature grid 為 `H // 32 × W // 32`。例如 1920×1080 會產生 33×60=1980 個空間特徵；最下方 24 pixel 不形成最終特徵。熱圖只將分數插值回完整特徵格覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 32 pixel 時回報錯誤。
+兩個模型的 feature grid 都是 `H // 16 × W // 16`。例如 1920×1080 會產生 67×120=8040 個空間特徵；最下方 8 pixel 不形成 patch。熱圖只將分數插值回完整 patch grid 覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 16 pixel 時回報錯誤。
 
 整張圖在同一次 forward 中參與 attention。全圖解析度越高，GPU 記憶體與推論時間可能大幅增加。CUDA 支援 BF16 時使用 BF16，其他情況使用 FP32；similarity 使用 FP32，檢查 features 與輸出是否含 NaN/Inf。網頁顯示 patch grid、batch 1 與實際精度。
 

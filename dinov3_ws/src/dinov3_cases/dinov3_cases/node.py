@@ -25,10 +25,10 @@ from werkzeug.serving import make_server
 from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
 from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels,
                       debug_visualizations, inference_dtype, feature_stride, resize_reference)
+from .trt_backend import DEFAULT_ENGINE, MODEL_ID as MODEL
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
 
-MODEL = 'facebook/dinov3-convnext-large-pretrain-lvd1689m'
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
 
 
@@ -99,7 +99,6 @@ class Encoder:
 class CaseNode(Node):
     def __init__(self):
         super().__init__('dinov3_cases')
-        from .trt_backend import DEFAULT_ENGINE
         defaults = dict(cases_dir='/workspaces/isaac_ros-dev/dinov3_cases_data',
                         image_topic='/camera/color/image_raw', model_id=MODEL,
                         inference_backend='trt', engine_path=DEFAULT_ENGINE,
@@ -259,6 +258,7 @@ class CaseNode(Node):
                 age = None if self.camera_received_at is None else time.monotonic() - self.camera_received_at
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
                                inference_backend=self.param('inference_backend'),
+                               model_id=self.param('model_id'),
                                backend_description=self.backend_description,
                                camera_topic=self.param('image_topic'), camera_age=age,
                                camera_connected=age is not None and age < 3,

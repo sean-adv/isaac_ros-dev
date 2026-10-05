@@ -7,7 +7,7 @@ import torch
 from transformers import AutoModel
 
 
-MODEL_ID = "facebook/dinov3-convnext-large-pretrain-lvd1689m"
+MODEL_ID = "facebook/dinov3-vith16plus-pretrain-lvd1689m"
 OUTPUT = Path(__file__).resolve().parent / "artifacts" / "tensorrt"
 
 
@@ -18,6 +18,7 @@ class ExportModel(torch.nn.Module):
             MODEL_ID,
             local_files_only=True,
             dtype=torch.float32,
+            attn_implementation="eager",
         ).eval()
 
     def forward(self, pixel_values):
@@ -30,7 +31,7 @@ def main():
     OUTPUT.mkdir(parents=True, exist_ok=True)
     model = ExportModel().eval()
     dummy = torch.randn(1, 3, 448, 448)
-    path = OUTPUT / "dinov3_convnext_large.onnx"
+    path = OUTPUT / "dinov3.onnx"
     with torch.inference_mode():
         torch.onnx.export(
             model,
@@ -49,12 +50,12 @@ def main():
         "revision": model.model.config._commit_hash,
         "torch": torch.__version__,
         "input_shape": [1, 3, 448, 448],
-        "output_shape": [1, 197, 1536],
+        "output_shape": [1, 789, 1280],
         "onnx_opsets": {x.domain: x.version for x in graph.opset_import},
         "preprocessing": "External; retain the existing AutoImageProcessor normalization.",
-        "output": "Full tokens, including one global token; no L2 normalization.",
+        "output": "Full tokens, including CLS and 4 register tokens; no L2 normalization.",
     }
-    (OUTPUT / "dinov3_convnext_large_export.json").write_text(
+    (OUTPUT / "export.json").write_text(
         json.dumps(info, indent=2) + "\n")
     print(f"Exported and checked: {path}", flush=True)
 

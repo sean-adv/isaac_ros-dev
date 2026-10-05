@@ -52,13 +52,14 @@ def main():
     pixels = processor(images=canvas, do_resize=False, do_center_crop=False,
                        return_tensors="pt")["pixel_values"].cuda().contiguous()
     model = AutoModel.from_pretrained(MODEL_ID, local_files_only=True,
-                                      dtype=torch.float32).cuda().eval()
+                dtype=torch.float32, attn_implementation="eager").cuda().eval()
     expected = model(pixel_values=pixels).last_hidden_state.cpu()
     assert torch.isfinite(expected).all()
-    prefix = 1  # DINOv3 ConvNeXt prepends one global token.
+    prefix = 1 + model.config.num_register_tokens
     expected_patches = F.normalize(expected[:, prefix:].float(), dim=-1)
     # Existing application selects BF16 on Thor.
     model = model.to(dtype=torch.bfloat16)
+    model.set_attn_implementation("sdpa")
     current = model(pixel_values=pixels.to(torch.bfloat16)).last_hidden_state.float().cpu()
     assert torch.isfinite(current).all()
     current_patches = F.normalize(current[:, prefix:], dim=-1)
@@ -70,7 +71,7 @@ def main():
               "scope": "Single reference image; not end-to-end case matching validation.",
               "engines": {}}
     for precision in ("fp32", "bf16"):
-        actual = run_engine(OUTPUT / f"dinov3_convnext_large_{precision}.engine", pixels)
+        actual = run_engine(OUTPUT / f"dinov3_{precision}.engine", pixels)
         assert actual.shape == expected.shape
         assert torch.isfinite(actual).all(), f"Non-finite output from {precision}"
         error = (actual - expected).abs()

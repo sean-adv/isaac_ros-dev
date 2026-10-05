@@ -1,12 +1,17 @@
 # DINOv3 TensorRT 推論接入
 
-目前 backbone 是 `facebook/dinov3-convnext-large-pretrain-lvd1689m`，預設使用
-`dinov3_convnext_large_dynamic_bf16.engine`，維持整張原圖推論。舊的 ViT-H+
-engine 與新模型不相容；新產物使用不同檔名，避免誤載。
+目前可在啟動時選擇兩個 backbone：
+
+| `--model` | Hugging Face 權重 | TensorRT engine | 特徵維度 |
+| --- | --- | --- | ---: |
+| `vith16plus`（預設） | `facebook/dinov3-vith16plus-pretrain-lvd1689m` | `dinov3_dynamic_bf16.engine` | 1280 |
+| `vitb16` | `facebook/dinov3-vitb16-pretrain-lvd1689m` | `dinov3_vitb16_dynamic_bf16.engine` | 768 |
+
+兩者皆使用 patch size 16、1 個 CLS 與 4 個 register tokens，維持整張原圖推論。
 
 ## 動態 engine 建立與啟動
 
-在 `/workspaces/isaac_ros-dev`、既有 `dinov3_venv` 執行：
+ViT-H+ 在 `/workspaces/isaac_ros-dev`、既有 `dinov3_venv` 執行：
 
 ```bash
 source dinov3_venv/bin/activate
@@ -18,15 +23,26 @@ python -m colcon build --symlink-install --packages-select dinov3_cases
 ./run.sh
 ```
 
-動態產物位於 `artifacts/tensorrt/`：`dinov3_convnext_large_dynamic.onnx` 與 `.onnx.data`、
-`dinov3_convnext_large_dynamic_bf16.engine`、同名 `.json` metadata，以及匯出／建置／整合驗證日誌。
+ViT-B 使用獨立產物，不覆蓋 ViT-H+：
+
+```bash
+source dinov3_venv/bin/activate
+python dinov3_ws/export_dinov3_vitb_dynamic.py
+bash dinov3_ws/build_dinov3_vitb_trt.sh
+cd dinov3_ws
+./run.sh --model vitb16
+```
+
+動態產物位於 `artifacts/tensorrt/`：`dinov3_dynamic.onnx` 與 `.onnx.data`、
+`dinov3_dynamic_bf16.engine`、同名 `.json` metadata，以及匯出／建置／整合驗證日誌。
 engine 僅在節點啟動時載入一次，支援 FP32 `[1,3,H,W]`，高寬各 32–2560，
-最佳化尺寸為 720×1280；輸出 FP32 `[1, floor(H/32)*floor(W/32)+1, 1536]`。
-不縮放、不切圖、不補邊；不滿 32 像素的右／下緣仍沿用既有 -1 分數規則。
+最佳化尺寸為 720×1280；輸出 token 數皆為 `floor(H/16)*floor(W/16)+5`，
+ViT-H+ 最後一維為 1280，ViT-B 為 768。
+不縮放、不切圖、不補邊；不滿 16 像素的右／下緣仍沿用既有 -1 分數規則。
 範圍外輸入會報錯，需擴大 profile 後重建或明確選擇 PyTorch。
 
-建置允許 BF16、停用 TF32，I/O 維持 FP32。ConvNeXt 沒有 ViT 的 RoPE，
-因此不再套用 `trt_rope_precision.py` 約束。
+建置允許 BF16、停用 TF32，I/O 維持 FP32，並透過 `trt_rope_precision.py`
+保留 RoPE 所需的 FP32 layer 精度約束。
 
 `trt_backend.py` 使用 GPU tensor 位址與 CUDA stream 執行 TRT，鎖住共用 context 並等待完成，
 讓輸入 buffer 生命週期與形狀切換安全；輸出保留在 GPU。
@@ -46,13 +62,29 @@ engine 僅在節點啟動時載入一次，支援 FP32 `[1,3,H,W]`，高寬各 3
 source /opt/ros/jazzy/setup.bash
 PYTHONPATH="dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
   dinov3_venv/bin/python dinov3_ws/tests/check_trt_integration.py
+
+# 驗證 ViT-B
+PYTHONPATH="dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
+  dinov3_venv/bin/python dinov3_ws/tests/check_trt_integration.py --model vitb16
 ```
 
 測試包含 87×53、1280×720、1403×2464 原圖、有限值、超出 profile 拒絕、
 參考庫重新建立、上傳、閾值更新、debug views、detections 及模擬相機回呼。
 此整合測試不代表真實相機／深度姿態的現場精度驗證。
 
-## ConvNeXt Large 接入驗證（2026-10-05）
+## ViT-B 動態 engine 接入驗證（2026-10-05）
+
+ViT-B BF16 TensorRT 已通過 PyTorch 特徵對照與 ROS/web 端到端測試：
+
+| 圖片寬×高 | 平均 cosine | 最低 cosine |
+| --- | ---: | ---: |
+| 87×53 | 0.998845 | 0.997893 |
+| 1280×720 | 0.999689 | 0.990141 |
+| 1403×2464 | 0.999556 | 0.980200 |
+
+均無 NaN/Inf，reference bank 重建、上傳、heatmap、debug views 與 detections 通過。
+
+## 舊 ConvNeXt Large 接入驗證（2026-10-05，目前不使用）
 
 42 項單元測試、PyTorch CPU/GPU 離線 ROS／網頁測試，以及 TensorRT 真實 GPU
 整合測試通過。三種輸入對 PyTorch BF16 的空間特徵 cosine 如下（不是偵測機率）：
@@ -65,7 +97,7 @@ PYTHONPATH="dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
 
 均無 NaN/Inf。更換 backbone 後仍應以實際目標重新校準 cosine threshold。
 
-## 舊 ViT-H+ 接入驗證（2026-10-04，不適用於 ConvNeXt）
+## ViT-H+ 動態 engine 接入驗證（2026-10-04）
 
 41 項單元測試、PyTorch CPU 離線 ROS／網頁測試，以及 TRT 真實 GPU 整合測試通過。
 本次三種輸入對既有 PyTorch BF16 的 patch cosine 如下（不是偵測機率）：
@@ -80,7 +112,7 @@ PYTHONPATH="dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
 1280×720 的 trtexec 短測 GPU 平均約 99.5 ms，只是 backbone 合成輸入量測，
 不是完整 ROS 流程 FPS，也不與先前 448×448 的 17.8 ms 直接比較。
 
-## 舊版 ViT-H+ 固定 448×448 產物（2026-10-03，不適用於 ConvNeXt）
+## 舊版 ViT-H+ 固定 448×448 產物（2026-10-03）
 
 Model: `facebook/dinov3-vith16plus-pretrain-lvd1689m`, using the local Hugging Face cache.
 
