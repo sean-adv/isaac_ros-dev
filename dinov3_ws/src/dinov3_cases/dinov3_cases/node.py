@@ -54,11 +54,22 @@ def render_heatmap(bgr, scores, threshold):
 
 
 class Encoder:
-    def __init__(self, model_id):
+    def __init__(self, model_id, backend='torch', engine_path=''):
+        if backend not in ('torch', 'trt'):
+            raise ValueError('inference_backend must be torch or trt.')
+        self.backend = backend
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.dtype = inference_dtype(self.device)
-        self.processor = AutoImageProcessor.from_pretrained(model_id)
-        self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
+        if backend == 'trt':
+            from .trt_backend import TRTBackbone
+            self.model = TRTBackbone(engine_path, model_id)
+            self.device = str(self.model.device)
+            self.dtype = torch.float32  # Engine BF16 compute still has FP32 I/O.
+            self.description = self.model.description
+        else:
+            self.dtype = inference_dtype(self.device)
+            self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
+            self.description = f'PyTorch {str(self.dtype).removeprefix("torch.")}'
+        self.processor = AutoImageProcessor.from_pretrained(model_id, local_files_only=backend == 'trt')
 
     def spatial_features(self, image):
         pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).to(self.device)
@@ -87,8 +98,10 @@ class Encoder:
 class CaseNode(Node):
     def __init__(self):
         super().__init__('dinov3_cases')
+        from .trt_backend import DEFAULT_ENGINE
         defaults = dict(cases_dir='/workspaces/isaac_ros-dev/dinov3_cases_data',
                         image_topic='/camera/color/image_raw', model_id=MODEL,
+                        inference_backend='trt', engine_path=DEFAULT_ENGINE,
                         depth_topic='/camera/depth/image_raw',
                         camera_info_topic='/camera/color/camera_info',
                         depth_sync_tolerance=0.05, pose_depth_band=0.04, axis_length=0.05,
@@ -133,6 +146,7 @@ class CaseNode(Node):
         self.preview_error = None
         self.overlay_at = None
         self.status = 'Loading DINOv3 model…'
+        self.backend_description = None
         self.bank = None
         self.bank_key = None
         self.pub = self.create_publisher(ImageMsg, '/dinov3/heatmap/overlay', 1)
@@ -238,6 +252,8 @@ class CaseNode(Node):
             with self.lock:
                 age = None if self.camera_received_at is None else time.monotonic() - self.camera_received_at
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
+                               inference_backend=self.param('inference_backend'),
+                               backend_description=self.backend_description,
                                camera_topic=self.param('image_topic'), camera_age=age,
                                camera_connected=age is not None and age < 3,
                                preview_error=self.preview_error, debug_visualization=self.param('debug_visualization'),
@@ -362,14 +378,17 @@ class CaseNode(Node):
 
     def run_worker(self):
         try:
-            encoder = Encoder(self.param('model_id'))
+            encoder = Encoder(self.param('model_id'), self.param('inference_backend'),
+                              self.param('engine_path'))
         except Exception as e:
             with self.lock:
                 self.status = f'Model load failed: {type(e).__name__}: {e}'
             self.get_logger().error(self.status)
             return
         with self.lock:
-            self.status = f'Model ready on {encoder.device}. Upload or select a case.'
+            self.backend_description = encoder.description
+            self.status = f'{encoder.description} ready on {encoder.device}. Upload or select a case.'
+        self.get_logger().info(self.status)
         processed = None
         while not self.stop.wait(1 / max(.1, self.param('inference_hz'))):
             with self.lock:
@@ -450,8 +469,7 @@ class CaseNode(Node):
                     self.debug_jpegs = debug_jpegs
                     self.detections = detections
                     self.overlay_at = time.monotonic()
-                    precision = str(encoder.dtype).removeprefix('torch.')
-                    self.status = f'{name}: {len(paths)} references | {patch_grid[0]}×{patch_grid[1]} patches / batch 1 | {encoder.device} {precision} | {time.monotonic()-start:.2f}s inference'
+                    self.status = f'{name}: {len(paths)} references | {patch_grid[0]}×{patch_grid[1]} patches / batch 1 | {encoder.device} {encoder.description} | {time.monotonic()-start:.2f}s inference'
                     out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
                     raw = self.bridge.cv2_to_imgmsg(scores.astype(np.float32), encoding='32FC1')
                     if header is not None:

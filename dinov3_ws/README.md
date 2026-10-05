@@ -2,6 +2,15 @@
 
 ROS 2 Jazzy node using `facebook/dinov3-vith16plus-pretrain-lvd1689m` on NVIDIA Thor.
 
+預設使用 **TensorRT 動態 BF16 engine**，參考圖與目標圖皆維持原解析度、batch 1。
+engine 支援高、寬各 32–2560 像素（不需為 16 倍數），範圍外會明確報錯。
+`/api/status` 的 `inference_backend` / `backend_description` 顯示目前後端。
+詳細建置、驗證及產物位置見 [TENSORRT.md](TENSORRT.md)。
+
+切回 PyTorch：`./run.sh --ros-args -p inference_backend:=torch`。
+使用其他相容 engine：`./run.sh --ros-args -p engine_path:=/absolute/path/model.engine`。
+缺少 engine 或 CUDA 時不會默默切換後端；重啟後選擇 case 即以所選後端重建參考庫。
+
 ## First: Hugging Face access
 
 Accept/request access at https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m using your own account. Then log in interactively inside the container (do not put your token in source code or chat):
@@ -57,7 +66,7 @@ Reference pictures should be tightly cropped around the desired object. All refe
 
 Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/`. You may also create folders and add PNG/JPEG/WebP/BMP files there, then select the case in the browser. Uploaded images are converted to PNG; uploads append to a case. No deletion endpoint is provided. DICOM and volumetric scans are not supported.
 
-Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_hz` (5.0), `max_reference_patches` (8192), `host` (127.0.0.1), `port` (8090).
+Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_backend` (`trt` / `torch`, default `trt`), `engine_path`, `inference_hz` (20.0), `max_reference_patches` (8192), `host` (127.0.0.1), `port` (8090).
 
 Reference and target images both retain their original resolution. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No resizing, letterboxing, tiling, overlap, or input padding is applied. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
 
