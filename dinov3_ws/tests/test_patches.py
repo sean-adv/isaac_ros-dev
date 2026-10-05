@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 
 from dinov3_cases.patches import (inference_dtype, patch_features, preprocess_image,
-    run_dino_image, compute_similarity_maps, similarity_pixels, debug_visualizations)
+    run_dino_image, compute_similarity_maps, similarity_pixels, debug_visualizations,
+    feature_stride, prefix_tokens)
 from dinov3_cases.boxes import similarity_to_bboxes
 
 
@@ -58,6 +59,19 @@ def test_actual_dino_patch_order_rectangular_grid():
     torch.testing.assert_close(actual, F.normalize(expected, dim=-1))
 
 
+def test_convnext_large_geometry_and_global_token():
+    from transformers import DINOv3ConvNextConfig, DINOv3ConvNextModel
+    model = DINOv3ConvNextModel(DINOv3ConvNextConfig(
+        depths=[1, 1, 1, 1], hidden_sizes=[8, 16, 24, 32])).eval()
+    image = torch.randn(3, 65, 97)
+    processor = SimpleNamespace(do_rescale=False, do_normalize=False)
+    actual = run_dino_image(image, model, processor)
+    assert feature_stride(model) == 32 and prefix_tokens(model) == 1
+    assert actual.shape == (1, 2, 3, 32)
+    torch.testing.assert_close(torch.linalg.vector_norm(actual, dim=-1),
+                               torch.ones((1, 2, 3)))
+
+
 
 @pytest.mark.parametrize('shape', [(48, 80), (53, 87), (16, 16)])
 def test_original_pixels_batch_one_and_patch_geometry(shape):
@@ -83,7 +97,7 @@ def test_original_pixels_batch_one_and_patch_geometry(shape):
 
 @pytest.mark.parametrize('shape', [(1, 32), (32, 15)])
 def test_too_small_image_is_not_padded(shape):
-    with pytest.raises(ValueError, match='at least patch_size'):
+    with pytest.raises(ValueError, match='at least feature_stride'):
         run_dino_image(torch.zeros((3, *shape)), SpatialProbe(), None)
 
 

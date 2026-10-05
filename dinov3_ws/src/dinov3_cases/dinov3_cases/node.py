@@ -23,11 +23,11 @@ from werkzeug.serving import make_server
 
 from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
 from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels,
-                      debug_visualizations, inference_dtype)
+                      debug_visualizations, inference_dtype, feature_stride)
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
 
-MODEL = 'facebook/dinov3-vith16plus-pretrain-lvd1689m'
+MODEL = 'facebook/dinov3-convnext-large-pretrain-lvd1689m'
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
 
 
@@ -85,7 +85,7 @@ class Encoder:
         features = self.spatial_features(image)
         patch_scores = compute_similarity_maps(features, bank)[0]
         scores = similarity_pixels(patch_scores, (image.height, image.width),
-                                   self.model.config.patch_size)
+                                   feature_stride(self.model))
         raw = scores.cpu().numpy()
         if not np.isfinite(raw).all():
             raise RuntimeError(f'Non-finite DINOv3 similarity with {self.dtype}; heatmap and detections rejected.')
@@ -443,7 +443,7 @@ class CaseNode(Node):
                 debug_jpegs = {}
                 if patch_scores is not None:
                     views = debug_visualizations(bgr, patch_scores, scores, mask,
-                                                 detections, encoder.model.config.patch_size)
+                                                 detections, feature_stride(encoder.model))
                     for view, pixels in views.items():
                         encoded, jpeg = cv2.imencode('.jpg', pixels)
                         if not encoded:

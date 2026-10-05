@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 
 def inference_dtype(device):
-    """DINOv3 ViT-H+ activations can overflow FP16 even for valid RGB inputs."""
+    """Prefer BF16 on CUDA; DINOv3 activations can overflow FP16."""
     if torch.device(device).type == 'cuda' and torch.cuda.is_bf16_supported():
         return torch.bfloat16
     return torch.float32
@@ -28,11 +28,26 @@ def preprocess_image(image, processor):
     return batch
 
 
+def feature_stride(model):
+    """Return the input-pixel stride of the model's final spatial features."""
+    config = model.config
+    if getattr(config, 'model_type', None) == 'dinov3_convnext':
+        return 32
+    if hasattr(config, 'patch_size'):
+        return config.patch_size
+    raise ValueError(f'Unsupported DINOv3 architecture: {type(config).__name__}.')
+
+
+def prefix_tokens(model):
+    """Return the number of non-spatial tokens preceding the feature grid."""
+    return 1 + getattr(model.config, 'num_register_tokens', 0)
+
+
 def patch_features(outputs, model, height, width):
-    """Discard CLS/register tokens and retain [B, H_patch, W_patch, C]."""
-    patch = model.config.patch_size
-    tokens = outputs.last_hidden_state[:, 1 + model.config.num_register_tokens:]
-    gh, gw = height // patch, width // patch
+    """Discard global/register tokens and retain [B, H_grid, W_grid, C]."""
+    stride = feature_stride(model)
+    tokens = outputs.last_hidden_state[:, prefix_tokens(model):]
+    gh, gw = height // stride, width // stride
     if tokens.shape[1] != gh * gw:
         raise RuntimeError('Unexpected DINOv3 patch grid.')
     return F.normalize(tokens.float(), dim=-1).reshape(tokens.shape[0], gh, gw, -1)
@@ -40,10 +55,10 @@ def patch_features(outputs, model, height, width):
 
 @torch.inference_mode()
 def run_dino_image(image, model, processor, dtype=torch.float32):
-    """One original image per forward; the model creates nonoverlapping patches."""
-    patch = model.config.patch_size
-    if min(image.shape[-2:]) < patch:
-        raise ValueError(f'Image width and height must each be at least patch_size={patch}.')
+    """Run one original image and return its final spatial feature grid."""
+    stride = feature_stride(model)
+    if min(image.shape[-2:]) < stride:
+        raise ValueError(f'Image width and height must each be at least feature_stride={stride}.')
     batch = preprocess_image(image, processor)
     amp = (torch.autocast('cuda', dtype=dtype)
            if batch.is_cuda and dtype in (torch.float16, torch.bfloat16) else nullcontext())

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import rclpy
 from PIL import Image
-from transformers import DINOv3ViTConfig, DINOv3ViTModel, DINOv3ViTImageProcessorFast
+from transformers import DINOv3ConvNextConfig, DINOv3ConvNextModel, DINOv3ViTImageProcessorFast
 from dinov3_cases.node import Encoder, CaseNode, case_path, render_heatmap
 from dinov3_cases.boxes import similarity_to_bboxes, detection_message
 from dinov3_cases.patches import inference_dtype
@@ -27,20 +27,20 @@ assert np.array_equal(render_heatmap(bgr, values, 1), bgr)
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     model = root / 'model'
-    DINOv3ViTModel(DINOv3ViTConfig(hidden_size=32, intermediate_size=64,
-        num_hidden_layers=1, num_attention_heads=2, num_register_tokens=4)).save_pretrained(model)
+    DINOv3ConvNextModel(DINOv3ConvNextConfig(
+        depths=[1, 1, 1, 1], hidden_sizes=[8, 16, 24, 32])).save_pretrained(model)
     DINOv3ViTImageProcessorFast().save_pretrained(model)
     encoder = Encoder(str(model))
     assert encoder.dtype == inference_dtype(encoder.device)
     picture = Image.fromarray(np.random.default_rng(1).integers(0, 255, (96, 192, 3), dtype=np.uint8))
     features = encoder.encode(picture)
-    assert features.shape == (72, 32)
+    assert features.shape == (18, 32)
     scores, grid, patches = encoder.similarity_map(picture, features, debug=True)
     assert scores.shape == (96, 192) and np.isfinite(scores).all()
-    assert grid == (6, 12) and patches.shape == (6, 12)
+    assert grid == (3, 6) and patches.shape == (3, 6)
     # Corrupt features must never become a partially visible heatmap or a bank.
     for invalid in (float('nan'), float('inf')):
-        bad = torch.full((1, 77, 32), invalid, device=encoder.device)
+        bad = torch.full((1, 19, 32), invalid, device=encoder.device)
         with patch.object(encoder.model, 'forward', return_value=type('Output', (), {'last_hidden_state': bad})()):
             for operation in (lambda: encoder.similarity_map(picture, features),
                               lambda: encoder.encode(picture)):

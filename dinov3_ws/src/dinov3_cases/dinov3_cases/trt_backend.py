@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import torch
 
 
-MODEL_ID = 'facebook/dinov3-vith16plus-pretrain-lvd1689m'
-DEFAULT_ENGINE = '/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/dinov3_dynamic_bf16.engine'
+MODEL_ID = 'facebook/dinov3-convnext-large-pretrain-lvd1689m'
+DEFAULT_ENGINE = '/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/dinov3_convnext_large_dynamic_bf16.engine'
 
 
 def validate_shape(shape, minimum, maximum):
@@ -30,7 +30,7 @@ class TRTBackbone:
             raise RuntimeError('TensorRT requires a CUDA GPU; no CPU fallback is performed.')
         import tensorrt as trt
         self.device = torch.device('cuda', torch.cuda.current_device())
-        self.config = SimpleNamespace(patch_size=16, num_register_tokens=4, hidden_size=1280)
+        self.config = SimpleNamespace(model_type='dinov3_convnext', hidden_size=1536)
         self.description = 'TensorRT (FP32 I/O)'
         metadata = path.with_suffix('.json')
         if metadata.is_file():
@@ -73,7 +73,7 @@ class TRTBackbone:
             if not self.context.set_input_shape('pixel_values', shape):
                 raise RuntimeError(f'TRT rejected input shape {shape}.')
             output_shape = tuple(self.context.get_tensor_shape('last_hidden_state'))
-            expected = (1, (shape[2] // 16) * (shape[3] // 16) + 5, 1280)
+            expected = (1, (shape[2] // 32) * (shape[3] // 32) + 1, 1536)
             if output_shape != expected:
                 raise RuntimeError(f'TRT output shape {output_shape}, expected {expected}.')
             y = torch.empty(output_shape, device=self.device, dtype=torch.float32)

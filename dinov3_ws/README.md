@@ -1,6 +1,6 @@
 # DINOv3 case heatmaps in my_isaac_ros_dev
 
-ROS 2 Jazzy node using `facebook/dinov3-vith16plus-pretrain-lvd1689m` on NVIDIA Thor.
+ROS 2 Jazzy node using `facebook/dinov3-convnext-large-pretrain-lvd1689m` on NVIDIA Thor.
 
 預設使用 **TensorRT 動態 BF16 engine**，參考圖與目標圖皆維持原解析度、batch 1。
 engine 支援高、寬各 32–2560 像素（不需為 16 倍數），範圍外會明確報錯。
@@ -13,7 +13,7 @@ engine 支援高、寬各 32–2560 像素（不需為 16 倍數），範圍外�
 
 ## First: Hugging Face access
 
-Accept/request access at https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m using your own account. Then log in interactively inside the container (do not put your token in source code or chat):
+Accept/request access at https://huggingface.co/facebook/dinov3-convnext-large-pretrain-lvd1689m using your own account. Then log in interactively inside the container (do not put your token in source code or chat):
 
 ```bash
 docker exec -it my_isaac_ros_dev /workspaces/isaac_ros-dev/dinov3_venv/bin/hf auth login
@@ -100,13 +100,13 @@ Use the **Cosine threshold** slider below the live preview. Release the slider t
 
 原始 RGB → rescale / normalization → DINOv3 單張全圖 forward → reference cosine similarity → patch 分數映射回原圖 pixel → threshold → closing → hole filling → connected components → 面積過濾 → bbox → 可選 RGB 外圍微調 → bbox IoU 合併。
 
-參考圖與目標圖皆不縮放、不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，模型依自身的 `config.patch_size` 產生非重疊 patch tokens；CLS/register tokens 不參與比對。參考圖保留全部完整 patches，之後仍由 `max_reference_patches` 限制 bank 大小。
+參考圖與目標圖皆不縮放、不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，ConvNeXt Large 以 32 pixel 的最終特徵步幅產生空間 tokens；全域 token 不參與比對。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
 
-與 [DINOv3 官方 PatchEmbed](https://github.com/facebookresearch/dinov3/blob/main/dinov3/layers/patch_embed.py) 相同，patch grid 為 `H // patch_size × W // patch_size`。例如 1920×1080、patch_size=16 會產生 67×120=8040 patches；最下方 8 pixel 不形成 token。熱圖只將分數插值回完整 patches 覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於一個 patch 時回報錯誤。
+ConvNeXt Large 的最終 feature grid 為 `H // 32 × W // 32`。例如 1920×1080 會產生 33×60=1980 個空間特徵；最下方 24 pixel 不形成最終特徵。熱圖只將分數插值回完整特徵格覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 32 pixel 時回報錯誤。
 
 整張圖在同一次 forward 中參與 attention。全圖解析度越高，GPU 記憶體與推論時間可能大幅增加。CUDA 支援 BF16 時使用 BF16，其他情況使用 FP32；similarity 使用 FP32，檢查 features 與輸出是否含 NaN/Inf。網頁顯示 patch grid、batch 1 與實際精度。
 
-已移除 `image_size`、`tile_size`、`overlap`、`merge_mode`、`batch_size` ROS 參數，請從啟動命令刪除。模型的 `patch_size` 由預訓練權重設定決定。`bbox_padding` 仍是推論後的框擴張量，與輸入影像補邊無關。
+已移除 `image_size`、`tile_size`、`overlap`、`merge_mode`、`batch_size` ROS 參數，請從啟動命令刪除。`bbox_padding` 仍是推論後的框擴張量，與輸入影像補邊無關。
 
 | ROS 啟動參數 | 預設 | 說明 |
 | --- | --- | --- |
