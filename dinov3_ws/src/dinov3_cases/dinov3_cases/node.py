@@ -28,6 +28,7 @@ from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels
 from .trt_backend import DEFAULT_ENGINE, MODEL_ID as MODEL
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
+from .image_manager import register_image_manager
 
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
 
@@ -241,6 +242,18 @@ class CaseNode(Node):
     def make_app(self):
         app = Flask(__name__)
         app.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024
+
+        def images_changed(group):
+            with self.lock:
+                if group == self.selected:
+                    self.generation += 1
+                    self.jpeg = None
+                    self.debug_jpegs = {}
+                    self.detections = []
+                    self.overlay_at = None
+                    self.status = 'Building reference features…'
+
+        register_image_manager(app, self.root, images_changed)
 
         @app.errorhandler(ValueError)
         def bad_request(error):
@@ -516,7 +529,7 @@ class CaseNode(Node):
 
 PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</title>
 <style>body{font:16px system-ui;background:#101821;color:#e7eef8;max-width:1150px;margin:32px auto;padding:0 20px}section{background:#1b2836;padding:20px;border-radius:12px;margin:16px 0}button,input,select{padding:10px;margin:6px;border-radius:6px}button{background:#8ddcc4;cursor:pointer}img{max-width:100%;border-radius:10px}small{color:#b0becd}</style></head><body>
-<h1>DINOv3 · Case similarity</h1><p>Choose a case to highlight visually similar patches in a camera frame or target picture.</p>
+<h1>DINOv3 · Case similarity</h1><p><a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a></p><p>Choose a case to highlight visually similar patches in a camera frame or target picture.</p>
 <section><h2>1. Reference groups</h2><form id="upload"><input name="case" placeholder="Case name, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}"><input name="images" type="file" accept="image/*" multiple required><button>Add pictures to case</button></form>
 <select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>

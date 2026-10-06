@@ -76,7 +76,7 @@ Reference pictures should be tightly cropped around the desired object. All refe
 
 深度參數：`depth_topic`（`/camera/depth/image_raw`）、`camera_info_topic`（`/camera/color/camera_info`）、`depth_sync_tolerance`（0.05 秒）、`pose_depth_band`（中位深度前後 0.04 公尺）、`axis_length`（0.05 公尺）。深度必須已對齊 RGB，且尺寸與 frame_id 一致；支援 16UC1 毫米或 32FC1 公尺，以及 plumb_bob / rational_polynomial 標定。缺少同步深度、標定、足夠有效點或可辨識主軸時，保留 2D 檢測並顯示原因。
 
-Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/`. You may also create folders and add PNG/JPEG/WebP/BMP files there, then select the case in the browser. Uploaded images are converted to PNG; uploads append to a case. No deletion endpoint is provided. DICOM and volumetric scans are not supported.
+Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/`. You may also create folders and add PNG/JPEG/WebP/BMP files there, then select the case in the browser. Uploaded images are converted to PNG; uploads append to a case. 圖片可在 `/images` 頁面確認後刪除。 DICOM and volumetric scans are not supported.
 
 Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_backend` (`trt` / `torch`, default `trt`), `engine_path`, `inference_hz` (20.0), `max_reference_patches` (8192), `reference_max_side` (config default 640; 0 disables resizing), `host` (127.0.0.1), `port` (8090).
 
@@ -171,3 +171,28 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
 ```
 
 單元測試使用 CPU tensor 與可記錄 batch 呼叫的模型；離線整合測試使用小型隨機權重 DINOv3，驗證 ROS／網頁流程，並非正式權重準確度或 Jetson GPU 效能量測。
+
+## 本機圖片管理與 HSV 去背
+
+既有 DINOv3 服務啟動後，開啟 <http://localhost:8090/images>，或從首頁點選「圖片管理／HSV 去背／標籤分類」。同樣使用 `cases_dir` 下的 case 資料夾作為標籤。
+
+如只需要整理圖片與去背，可獨立啟動，不需 ROS、相機或載入 DINOv3 模型。獨立服務預設使用 8091，避免佔用原本 DINOv3 的 8090；開啟 <http://localhost:8091/images>：
+
+```bash
+cd /workspaces/isaac_ros-dev/dinov3_ws
+./run_image_manager.sh
+# 如需指定另一個連接埠：
+./run_image_manager.sh --port 8092
+# 自訂圖片資料夾：
+./run_image_manager.sh --cases-dir /path/to/cases --port 8091
+```
+
+1. 上傳圖片到標籤，或選擇既有標籤中的圖片。標籤限 1–80 個英文字母、數字、底線、連字號。
+2. 在原圖上點選背景色。調整 H 色相容差（角度）、S 飽和度容差與 V 亮度容差（0–255）；頁面自動更新透明預覽。
+3. 預設只去除與取色位置連通的相近顏色，避免刪除物體內部斷開的同色區域；取消勾選則套用於全圖。可設定 0–10 px 邊緣柔化。
+4. 指定新圖片的標籤並儲存透明 PNG，或下載預覽。儲存會新增檔案並保留原圖；可再選取新圖，重複去除其他背景區域。
+5. 「刪除此圖片」會先要求確認，確認後永久刪除該檔案。空的標籤資料夾保留。
+
+圖片與處理結果均留在本機；單次上傳上限 64 MB，單張上限 2500 萬像素。影像的 EXIF 方向會正規化，既有透明度會保留。色相差採環狀計算，灰白背景主要由 S/V 判斷。HSV 適合顏色較均勻的背景，物體與背景同色時仍可能誤刪，請先檢查預覽。
+
+DINOv3 服務會在目前標籤的圖片新增或刪除後重新建立參考特徵。DINOv3 輸入仍是 RGB：透明區域並非特徵遮罩，本工具將完全透明區域的隱藏 RGB 清為黑色，避免原背景在 RGB 轉換時重新出現；黑色背景仍可能產生匹配。原圖保留在原標籤時也仍會參與匹配，可將去背結果存到另一個標籤並選用該標籤。
