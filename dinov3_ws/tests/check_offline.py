@@ -133,6 +133,8 @@ with tempfile.TemporaryDirectory() as tmp:
             time.sleep(.1)
         assert client.get('/overlay.jpg').status_code == 200, client.get('/api/status').json
         assert client.get('/api/status').json['debug_visualization']
+        assert client.get('/api/status').json['target_padding'] == 64
+        assert client.get('/api/status').json['target_padding_mode'] == 'reflect'
         for view in ('grid', 'patches', 'heatmap', 'mask', 'boxes'):
             assert client.get(f'/debug/{view}.jpg').status_code == 200
         assert client.get('/debug/invalid.jpg').status_code == 404

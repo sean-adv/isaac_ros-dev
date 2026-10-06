@@ -2,8 +2,12 @@ package.xml
 setup.cfg
 setup.py
 dinov3_cases/__init__.py
+dinov3_cases/boxes.py
+dinov3_cases/image_manager.py
 dinov3_cases/node.py
-dinov3_cases/proposals.py
+dinov3_cases/patches.py
+dinov3_cases/pose.py
+dinov3_cases/trt_backend.py
 dinov3_cases.egg-info/PKG-INFO
 dinov3_cases.egg-info/SOURCES.txt
 dinov3_cases.egg-info/dependency_links.txt

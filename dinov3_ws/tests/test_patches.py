@@ -156,3 +156,66 @@ def test_pixel_postprocessing_empty_holes_noise_and_evidence():
     assert boxes[0]['bbox'] == [8, 5, 40, 25]
     assert boxes[0]['area'] == 640
     assert boxes[0]['score'] == pytest.approx(.9)
+
+
+@pytest.mark.parametrize('padding', [0, 16, 64])
+@pytest.mark.parametrize('mode', ['reflect', 'replicate'])
+def test_target_padding_preserves_original_patch_coordinates(padding, mode):
+    from PIL import Image
+    from dinov3_cases.node import Encoder
+    from dinov3_cases.patches import pad_target_image
+    # Uneven dimensions expose crop offsets and bottom/right remainder handling.
+    pixels = np.zeros((53, 87, 3), dtype=np.uint8)
+    pixels[..., 0] = np.arange(87)[None, :] + 1
+    pixels[..., 1] = np.arange(53)[:, None] + 1
+    pixels[..., 2] = 1
+    image = Image.fromarray(pixels)
+    padded = pad_target_image(image, padding, mode, 16)
+    assert padded.size == (87 + 2 * padding, 53 + 2 * padding)
+    assert np.array_equal(np.asarray(padded)[padding:padding+53, padding:padding+87], pixels)
+    if padding:
+        y = padding % 104
+        x = padding % 172
+        expected_corner = pixels[min(y, 104-y) if mode == 'reflect' else 0,
+                                 min(x, 172-x) if mode == 'reflect' else 0]
+        np.testing.assert_array_equal(np.asarray(padded)[0, 0], expected_corner)
+    encoder = Encoder.__new__(Encoder)
+    encoder.model = SpatialProbe()
+    encoder.processor = SimpleNamespace(do_rescale=False, do_normalize=False)
+    encoder.device, encoder.dtype, encoder.backend = 'cpu', torch.float32, 'torch'
+    encoder.target_padding, encoder.target_padding_mode = padding, mode
+    reference = encoder.encode(image)
+    assert reference.shape == (15, 3)  # References receive no target padding.
+    calls = []
+    encoder.model.register_forward_pre_hook(
+        lambda module, args, kwargs: calls.append(tuple(kwargs['pixel_values'].shape)),
+        with_kwargs=True)
+    raw, grid, patches = encoder.similarity_map(image, torch.eye(3), debug=True)
+    expected_features = F.normalize(F.avg_pool2d(torch.from_numpy(pixels.copy()).permute(2,0,1)[None].float(),16)
+                                    .permute(0,2,3,1), dim=-1)
+    expected_patches = expected_features[0].amax(-1)
+    assert calls == [(1, 3, 53+2*padding, 87+2*padding)]
+    assert grid == (3, 5) and raw.shape == (53, 87)
+    np.testing.assert_allclose(patches, expected_patches.numpy(), atol=1e-6)
+    np.testing.assert_allclose(raw, similarity_pixels(expected_patches, (53,87),16).numpy(), atol=1e-6)
+    assert (raw[48:] == -1).all() and (raw[:,80:] == -1).all()
+
+
+@pytest.mark.parametrize('padding,mode', [(-16,'reflect'), (1,'reflect'),
+    (True,'reflect'), (16.0,'reflect'), (16,'black')])
+def test_target_padding_rejects_invalid_settings(padding, mode):
+    from dinov3_cases.patches import validate_target_padding
+    with pytest.raises(ValueError, match='target_padding'):
+        validate_target_padding(padding, mode, 16)
+
+
+def test_target_padding_profile_error_precedes_encoding():
+    from PIL import Image
+    from dinov3_cases.node import Encoder
+    encoder = Encoder.__new__(Encoder)
+    encoder.model = SimpleNamespace(config=SimpleNamespace(patch_size=16),
+        minimum=(1,3,32,32), maximum=(1,3,2560,2560))
+    encoder.backend, encoder.target_padding, encoder.target_padding_mode = 'trt', 64, 'reflect'
+    # No device/model forward is needed to detect an oversized padded input.
+    with pytest.raises(ValueError, match='reduce target_padding'):
+        encoder.similarity_map(Image.new('RGB',(2500,720)), torch.eye(3))

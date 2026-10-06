@@ -2,7 +2,7 @@
 
 ROS 2 Jazzy node with selectable DINOv3 ViT-H+/16 and ViT-B/16 TensorRT backbones on NVIDIA Thor.
 
-預設使用 **TensorRT 動態 BF16 engine**，參考圖與目標圖皆維持原解析度、batch 1。
+預設使用 **TensorRT 動態 BF16 engine**，參考圖依設定限制長邊；目標圖維持原解析度、batch 1，預設推論前四周 reflect 補 64 pixels。
 engine 支援高、寬各 32–2560 像素（不需為 16 倍數），範圍外會明確報錯。
 `/api/status` 的 `model_id`、`inference_backend` 與 `backend_description` 顯示目前模型及後端。
 詳細建置、驗證及產物位置見 [TENSORRT.md](TENSORRT.md)。
@@ -80,7 +80,26 @@ Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/
 
 Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_backend` (`trt` / `torch`, default `trt`), `engine_path`, `inference_hz` (20.0), `max_reference_patches` (8192), `reference_max_side` (config default 640; 0 disables resizing), `host` (127.0.0.1), `port` (8090).
 
-Target images retain their original resolution. `reference_max_side` limits the reference long edge while preserving aspect ratio without enlarging small images; set it to 0 to retain reference resolution. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No letterboxing, tiling, overlap, or input padding is applied. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
+Target images retain their original resolution. `reference_max_side` limits the reference long edge while preserving aspect ratio without enlarging small images; set it to 0 to retain reference resolution. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No letterboxing or tiling is applied. Targets receive configurable context padding before inference; their features are cropped back to the original patch grid before matching. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
+
+### Target padding 設定
+
+為降低影像外框的位置相關高分，預設 `target_padding: 64`、`target_padding_mode: reflect`。相機與上傳 target 在單次 forward 前四周補邊，reference bank 維持既有流程。輸出先裁回原圖的完整 patch grid，再匹配、插值、產生 bbox 與姿態，因此輸出影像尺寸與原圖座標一致；不足一個 patch 的右／下條帶仍為 -1。
+
+`target_padding` 必須為模型 feature stride 的倍數（目前 ViT 為 16），設為 `0` 可關閉；模式可用 `reflect`（鏡射）或 `replicate`（複製邊緣）。兩者都是啟動參數，修改後需重啟；`/api/status` 顯示設定。
+
+```bash
+# 預設：每側補 64 pixels
+./run.sh
+# 比較每側補 128 pixels
+./run.sh --ros-args -p target_padding:=128
+# 比較複製邊緣
+./run.sh --ros-args -p target_padding_mode:=replicate
+# 關閉以比較原始結果
+./run.sh --ros-args -p target_padding:=0
+```
+
+TRT 的 2560×2560 上限包含補邊：每側 64 時，原圖每邊上限為 2432。超出 profile 會明確報錯，可減少 padding、改用 PyTorch 或重建 engine。補邊增加 token 數與計算量；控制圖實驗已確認位置效應下降，實際物體匹配效果仍需以原始大圖比較。此功能不改動 RoPE 或 cosine 的固定色階。
 
 ### Reference 尺寸設定
 
@@ -124,9 +143,9 @@ Use the **Cosine threshold** slider below the live preview. Release the slider t
 
 ## 原始解析度、batch 1 patch inference → bounding boxes
 
-原始 RGB → rescale / normalization → DINOv3 單張全圖 forward → reference cosine similarity → patch 分數映射回原圖 pixel → threshold → closing → hole filling → connected components → 面積過濾 → bbox → 可選 RGB 外圍微調 → bbox IoU 合併。
+原始 RGB → target context padding → rescale / normalization → DINOv3 單張全圖 forward → 裁回原圖 patch grid → reference cosine similarity → patch 分數映射回原圖 pixel → threshold → closing → hole filling → connected components → 面積過濾 → bbox → 可選 RGB 外圍微調 → bbox IoU 合併。
 
-目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。兩者皆不裁切、不做 letterbox 或 padding、不拆 tiles。固定 batch size 為 1，ViT-H+ 與 ViT-B 都以 16×16 pixel patch 產生空間 tokens；CLS 與 4 個 register tokens 不參與比對。ViT-H+ 每個特徵為 1280 維，ViT-B 為 768 維。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
+目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。目標圖預設四周 reflect 補 64 pixels，forward 後先裁回原圖 patch grid，再計算 similarity；reference 不補邊。兩者不做 letterbox、不拆 tiles。固定 batch size 為 1，ViT-H+ 與 ViT-B 都以 16×16 pixel patch 產生空間 tokens；CLS 與 4 個 register tokens 不參與比對。ViT-H+ 每個特徵為 1280 維，ViT-B 為 768 維。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
 
 兩個模型的 feature grid 都是 `H // 16 × W // 16`。例如 1920×1080 會產生 67×120=8040 個空間特徵；最下方 8 pixel 不形成 patch。熱圖只將分數插值回完整 patch grid 覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 16 pixel 時回報錯誤。
 

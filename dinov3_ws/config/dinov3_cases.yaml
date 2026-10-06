@@ -3,3 +3,7 @@ dinov3_cases:
     # Reference image long-edge limit. 0 keeps the original resolution.
     # Aspect ratio is preserved and smaller images are not enlarged.
     reference_max_side: 640
+    # Add target context before inference; crop features back to original coordinates.
+    # Padding must be a multiple of the model feature stride; 0 disables it.
+    target_padding: 96
+    target_padding_mode: reflect

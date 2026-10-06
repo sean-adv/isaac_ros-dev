@@ -22,6 +22,29 @@ def resize_reference(image, max_side, min_side):
     return result
 
 
+def validate_target_padding(padding, mode, stride=None):
+    """Padding must preserve the original feature-grid origin."""
+    if isinstance(padding, bool) or not isinstance(padding, int) or padding < 0:
+        raise ValueError('target_padding must be a nonnegative integer.')
+    if mode not in ('reflect', 'replicate'):
+        raise ValueError('target_padding_mode must be reflect or replicate.')
+    if stride is not None and padding % stride:
+        raise ValueError(f'target_padding must be a multiple of feature_stride={stride}.')
+
+
+def pad_target_image(image, padding, mode, stride):
+    """Add context without resizing or shifting the original patch alignment."""
+    validate_target_padding(padding, mode, stride)
+    if min(image.size) < stride:
+        raise ValueError(f'Image width and height must each be at least feature_stride={stride}.')
+    if not padding:
+        return image
+    pixels = np.asarray(image.convert('RGB'))
+    padded = np.pad(pixels, ((padding, padding), (padding, padding), (0, 0)),
+                    mode='reflect' if mode == 'reflect' else 'edge')
+    return Image.fromarray(padded)
+
+
 def inference_dtype(device):
     """Prefer BF16 on CUDA; DINOv3 activations can overflow FP16."""
     if torch.device(device).type == 'cuda' and torch.cuda.is_bf16_supported():

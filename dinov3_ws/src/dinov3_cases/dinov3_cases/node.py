@@ -24,7 +24,8 @@ from werkzeug.serving import make_server
 
 from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
 from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels,
-                      debug_visualizations, inference_dtype, feature_stride, resize_reference)
+                      debug_visualizations, inference_dtype, feature_stride, resize_reference,
+                      pad_target_image, validate_target_padding)
 from .trt_backend import DEFAULT_ENGINE, MODEL_ID as MODEL
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
@@ -56,7 +57,8 @@ def render_heatmap(bgr, scores, threshold):
 
 
 class Encoder:
-    def __init__(self, model_id, backend='torch', engine_path=''):
+    def __init__(self, model_id, backend='torch', engine_path='',
+                 target_padding=0, target_padding_mode='reflect'):
         if backend not in ('torch', 'trt'):
             raise ValueError('inference_backend must be torch or trt.')
         self.backend = backend
@@ -71,6 +73,9 @@ class Encoder:
             self.dtype = inference_dtype(self.device)
             self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
             self.description = f'PyTorch {str(self.dtype).removeprefix("torch.")}'
+        validate_target_padding(target_padding, target_padding_mode, feature_stride(self.model))
+        self.target_padding = target_padding
+        self.target_padding_mode = target_padding_mode
         self.processor = AutoImageProcessor.from_pretrained(model_id, local_files_only=backend == 'trt')
 
     def spatial_features(self, image):
@@ -84,10 +89,29 @@ class Encoder:
 
     @torch.inference_mode()
     def similarity_map(self, image, bank, debug=False):
-        features = self.spatial_features(image)
+        stride = feature_stride(self.model)
+        padding = self.target_padding
+        # Validate the TRT profile before allocating a padded image. Never resize
+        # or silently disable padding to accommodate an out-of-profile target.
+        if self.backend == 'trt':
+            from .trt_backend import validate_shape
+            try:
+                validate_shape((1, 3, image.height + 2 * padding, image.width + 2 * padding),
+                               self.model.minimum, self.model.maximum)
+            except ValueError as error:
+                raise ValueError(
+                    f'Target {image.size} with target_padding={padding} is outside the TRT profile; '
+                    'reduce target_padding (0 disables it), rebuild the engine profile, '
+                    'or select inference_backend:=torch.') from error
+        padded = pad_target_image(image, padding, self.target_padding_mode, stride)
+        features = self.spatial_features(padded)
+        offset = padding // stride
+        gh, gw = image.height // stride, image.width // stride
+        # Crop BEFORE matching/interpolation: padding tokens never enter output,
+        # and incomplete bottom/right strips retain the existing -1 behavior.
+        features = features[:, offset:offset + gh, offset:offset + gw]
         patch_scores = compute_similarity_maps(features, bank)[0]
-        scores = similarity_pixels(patch_scores, (image.height, image.width),
-                                   feature_stride(self.model))
+        scores = similarity_pixels(patch_scores, (image.height, image.width), stride)
         raw = scores.cpu().numpy()
         if not np.isfinite(raw).all():
             raise RuntimeError(f'Non-finite DINOv3 similarity with {self.dtype}; heatmap and detections rejected.')
@@ -116,7 +140,13 @@ class CaseNode(Node):
         self.declare_parameter('reference_max_side', 0, ParameterDescriptor(
             read_only=True,
             description='Reference long-edge limit in pixels; 0 keeps original size. Restart to change.'))
+        self.declare_parameter('target_padding', 64, ParameterDescriptor(
+            read_only=True, description='Target context padding per side in pixels; '
+            'must be a feature-stride multiple. 0 disables it. Restart to change.'))
+        self.declare_parameter('target_padding_mode', 'reflect', ParameterDescriptor(
+            read_only=True, description='Target padding: reflect or replicate. Restart to change.'))
         self.param = lambda k: self.get_parameter(k).value
+        validate_target_padding(self.param('target_padding'), self.param('target_padding_mode'))
         if self.param('reference_max_side') < 0:
             raise ValueError('reference_max_side must be nonnegative.')
         self.root = Path(self.param('cases_dir')).expanduser().resolve()
@@ -272,6 +302,8 @@ class CaseNode(Node):
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
                                inference_backend=self.param('inference_backend'),
                                model_id=self.param('model_id'),
+                               target_padding=self.param('target_padding'),
+                               target_padding_mode=self.param('target_padding_mode'),
                                backend_description=self.backend_description,
                                camera_topic=self.param('image_topic'), camera_age=age,
                                camera_connected=age is not None and age < 3,
@@ -398,7 +430,8 @@ class CaseNode(Node):
     def run_worker(self):
         try:
             encoder = Encoder(self.param('model_id'), self.param('inference_backend'),
-                              self.param('engine_path'))
+                              self.param('engine_path'), self.param('target_padding'),
+                              self.param('target_padding_mode'))
         except Exception as e:
             with self.lock:
                 self.status = f'Model load failed: {type(e).__name__}: {e}'
