@@ -8,3 +8,4 @@
 /orbbec_sdk
 /CutLER
 /detectron2
+__pycache__/
