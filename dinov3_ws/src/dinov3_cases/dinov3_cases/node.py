@@ -107,7 +107,7 @@ class CaseNode(Node):
                         depth_sync_tolerance=0.05, pose_depth_band=0.04, axis_length=0.05,
                         port=8090, host='127.0.0.1', inference_hz=20.0,
                         max_reference_patches=8192, cosine_threshold=0.65,
-                        min_area=2048, bbox_padding=8, debug_visualization=False,
+                        min_area=2048, bbox_padding=1, debug_visualization=False,
                         **{k: v for k, v in vars(BoxConfig()).items()
                            if k not in ('min_component_patches', 'padding_patches')})
         for k, v in defaults.items():
