@@ -1,4 +1,4 @@
-"""Run DINOv3 matching and aligned-depth surface pose estimation."""
+"""Run text-guided object detection and DINOv3 gallery recognition."""
 import argparse
 import os
 from pathlib import Path
@@ -8,7 +8,7 @@ from dinov3_cases.trt_backend import DEFAULT_VARIANT, MODEL_VARIANTS
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run DINOv3 reference matching.')
+    parser = argparse.ArgumentParser(description='Run Grounding DINO and DINOv3 object recognition.')
     parser.add_argument('--model', choices=sorted(MODEL_VARIANTS), default=DEFAULT_VARIANT,
                         help='DINOv3 TensorRT model variant (default: %(default)s).')
     options, extra_args = parser.parse_known_args()

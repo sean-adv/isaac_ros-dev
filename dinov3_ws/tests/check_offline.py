@@ -81,7 +81,7 @@ with tempfile.TemporaryDirectory() as tmp:
         raise AssertionError('Traversal accepted')
     except ValueError:
         pass
-    rclpy.init(args=['--ros-args', '-p', 'inference_backend:=torch', '-p', f'model_id:={model}', '-p', f'cases_dir:={root / "cases"}',
+    rclpy.init(args=['--ros-args', '-p', 'pipeline:=heatmap', '-p', 'inference_backend:=torch', '-p', f'model_id:={model}', '-p', f'cases_dir:={root / "cases"}',
                      '-p', 'debug_visualization:=true', '-p', 'port:=0', '-p', 'inference_hz:=10.0'])
     node = CaseNode()
     client = node.app.test_client()

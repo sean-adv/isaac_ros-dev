@@ -1,0 +1,226 @@
+"""Object identity, rejection, duplicate proposals, and gallery lifecycle contracts."""
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+from PIL import Image
+
+from dinov3_cases.grounded import (ObjectGallery, GroundingDetector, clean_proposals,
+    prepare_object, recognize_objects, validate_settings, recognition_message, object_debug_views,
+    ObjectVisualizationSnapshot)
+
+
+class ColorEncoder:
+    def encode(self, image):
+        vector = torch.tensor(np.asarray(image).mean(axis=(0, 1)), dtype=torch.float32)
+        return torch.nn.functional.normalize(vector, dim=0).repeat(
+            image.width // 16 * (image.height // 16), 1)
+
+
+def test_clip_suppress_duplicates_without_merging_adjacent_objects():
+    boxes = [[-1.2, 2.2, 30.1, 40.8], [0, 2, 31, 41], [31, 2, 60, 41],
+             [70, 70, 80, 80], [float('nan'), 0, 10, 10], [9, 9, 8, 8]]
+    result = clean_proposals(boxes, [.9, .8, .7, .6, .5, .4], ['bottle']*6, (60, 50))
+    assert [r['bbox'] for r in result] == [[0, 2, 31, 41], [31, 2, 60, 41]]
+    assert result[0]['detection_score'] == .9
+    assert len(clean_proposals(boxes, [.9]*6, ['box']*6, (60, 50), limit=1)) == 1
+    assert clean_proposals([], [], [], (60, 50)) == []
+
+
+def test_object_preprocessing_handles_small_and_thin_crops():
+    for size in [(1, 1), (1, 1000), (1000, 1), (77, 151)]:
+        result = prepare_object(Image.new('RGB', size, 'red'), 224, 16)
+        assert min(result.size) >= 32
+        assert max(result.size) == 224
+        assert all(n % 16 == 0 for n in result.size)
+        assert result.getpixel((result.width-1, result.height-1)) == (255, 0, 0)
+
+
+def test_gallery_multi_class_unknown_and_filesystem_updates(tmp_path):
+    for name, color in [('red', 'red'), ('blue', 'blue')]:
+        folder = tmp_path / name
+        folder.mkdir()
+        Image.new('RGB', (32, 48), color).save(folder / 'one.png')
+    gallery = ObjectGallery()
+    assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
+    assert not gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
+    red = gallery.classify(torch.tensor([1., 0., 0.]), .75, .05)
+    assert red['label'] == 'red' and red['margin'] == 1.
+    assert gallery.classify(torch.tensor([0., 1., 0.]), .75, .05)['reason'] == 'low_similarity'
+    shared = torch.nn.functional.normalize(torch.tensor([1., 0., 1.]), dim=0)
+    assert gallery.classify(shared, .6, .05)['reason'] == 'ambiguous'
+    # Additional views of the same class must not occupy both top-two slots.
+    Image.new('RGB', (32, 48), 'red').save(tmp_path / 'red/two.png')
+    assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
+    assert gallery.classify(torch.tensor([1., 0., 0.]), .75, .05)['label'] == 'red'
+    (tmp_path / 'blue/one.png').unlink()
+    assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
+    assert gallery.classify(torch.tensor([1., 0., 0.]), .75, .05)['margin'] is None
+    for path in (tmp_path / 'red').iterdir():
+        path.unlink()
+    assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
+    assert gallery.classify(shared, .75, .05)['reason'] == 'empty_gallery'
+
+
+def test_roi_coordinates_identity_and_ros_header(tmp_path):
+    from std_msgs.msg import Header
+    encoder = ColorEncoder()
+    for label, color in [('a', 'red'), ('b', 'blue')]:
+        (tmp_path / label).mkdir()
+        Image.new('RGB', (40, 40), color).save(tmp_path / label / 'one.png')
+    gallery = ObjectGallery()
+    gallery.refresh(tmp_path, encoder, 64, 16)
+    image = Image.new('RGB', (100, 50), 'red')
+    image.paste(Image.new('RGB', (50, 50), 'blue'), (50, 0))
+    proposals = clean_proposals([[0, 0, 50, 50], [50, 0, 100, 50]], [.9, .8], ['box', 'bottle'], image.size)
+    result = recognize_objects(image, proposals, encoder, gallery, 64, 16, .75, .05)
+    assert [item['label'] for item in result] == ['a', 'b']
+    assert [item['bbox'] for item in result] == [p['bbox'] for p in proposals]
+    assert all(item['pose'] is None for item in result)
+    header = Header(frame_id='camera')
+    header.stamp.sec = 123
+    msg = recognition_message(result, header)
+    assert msg.header == header
+    assert [d.results[0].hypothesis.class_id for d in msg.detections] == ['a', 'b']
+    assert [d.id for d in msg.detections] == ['0', '1']
+    assert all(d.header == header and d.bbox.size_x == 50 for d in msg.detections)
+    assert recognition_message([], header).detections == []
+
+
+@pytest.mark.parametrize('key,value', [('prompt', ''), ('prompt', '...'), ('prompt', None), ('prompt', 'a'*1001),
+    ('box_threshold', True), ('text_threshold', float('nan')), ('margin', -1),
+    ('recognition_threshold', float('inf'))])
+def test_invalid_runtime_settings(key, value):
+    settings = dict(prompt='bottle. box', box_threshold=.3, text_threshold=.25,
+                    recognition_threshold=.75, margin=.05)
+    settings[key] = value
+    with pytest.raises(ValueError):
+        validate_settings(**settings)
+
+
+def test_detector_uses_original_image_size_and_text_labels():
+    class Inputs(dict):
+        input_ids = torch.ones((1, 4), dtype=torch.long)
+        def to(self, device):
+            return self
+    class Processor:
+        def __call__(self, **kwargs):
+            assert kwargs['text'] == 'bottle.'
+            return Inputs()
+        def post_process_grounded_object_detection(self, outputs, ids, **kwargs):
+            assert kwargs['target_sizes'] == [(50, 100)]
+            assert kwargs['threshold'] == .3
+            return [dict(boxes=torch.tensor([[10., 5., 90., 45.]]), scores=torch.tensor([.9]),
+                         text_labels=['bottle'])]
+    class Model:
+        config = SimpleNamespace(max_text_len=256)
+        def __call__(self, **kwargs):
+            return None
+    detector = GroundingDetector.__new__(GroundingDetector)
+    detector.processor, detector.model, detector.device = Processor(), Model(), 'cpu'
+    result = detector.detect(Image.new('RGB', (100, 50)), 'bottle.', .3, .25, .5, 20)
+    assert result[0]['bbox'] == [10, 5, 90, 45]
+
+
+def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
+    class CountingEncoder(ColorEncoder):
+        calls = 0
+        def encode(self, image):
+            self.calls += 1
+            return super().encode(image)
+    encoder = CountingEncoder()
+    (tmp_path / 'red').mkdir()
+    Image.new('RGB', (32, 48), 'red').save(tmp_path / 'red/one.png')
+    gallery = ObjectGallery()
+    gallery.refresh(tmp_path, encoder, 64, 16)
+    # The pixels displayed as reference must be the same cached input used for encoding.
+    (tmp_path / 'red/one.png').unlink()
+    encoder.calls = 0
+    roi = Image.new('RGB', (43, 79), 'red')
+    proposals = clean_proposals([[0, 0, 43, 79]], [.9], ['bottle'], roi.size)
+    diagnostics = []
+    result = recognize_objects(roi, proposals, encoder, gallery, 64, 16, .75, .05, diagnostics)
+    assert encoder.calls == 1
+    assert result[0]['reference'] == dict(case='red', name='one.png')
+    assert '_reference_index' not in result[0]
+    views, metadata = diagnostics[0]['views'], diagnostics[0]['metadata']
+    assert set(views) == {'crop', 'grid', 'patches', 'heatmap', 'similarity', 'reference'}
+    assert views['heatmap'].shape == (79, 43, 3)
+    assert views['grid'].shape == (64, 48, 3)
+    assert metadata['content_size'] == [35, 64]
+    assert metadata['patch_grid'] == [4, 3]
+    assert metadata['similarity_min'] == pytest.approx(1.)
+
+
+def test_heatmap_removes_right_padding_before_mapping_back_to_roi():
+    roi = Image.new('RGB', (16, 32))
+    prepared = prepare_object(roi, 32, 16)
+    # Actual content is the left patch column. The right column is minimum-size padding.
+    features = torch.tensor([[1., 0.], [0., 1.], [1., 0.], [0., 1.]])
+    views, metadata = object_debug_views(roi, prepared, features, torch.tensor([[1., 0.]]), 32, 16)
+    assert metadata['content_size'] == [16, 32] and metadata['input_size'] == [32, 32]
+    assert views['heatmap'].shape == (32, 16, 3)
+    # Last valid pixel interpolates at the edge; ROI must not include the zero-score padding column.
+    assert metadata['similarity_min'] > .5
+    assert metadata['similarity_max'] == pytest.approx(1.)
+
+
+def test_empty_gallery_and_large_crop_visualizations():
+    roi = Image.new('RGB', (1500, 3000), 'blue')
+    diagnostics = []
+    proposal = dict(bbox=[0, 0, 1500, 3000], detection_score=.9, detection_label='box')
+    result = recognize_objects(roi, [proposal], ColorEncoder(), ObjectGallery(), 64, 16, .75, .05, diagnostics)
+    assert result[0]['reason'] == 'empty_gallery'
+    assert set(diagnostics[0]['views']) == {'crop', 'grid'}
+    assert diagnostics[0]['views']['crop'].shape == (640, 320, 3)
+    assert not diagnostics[0]['metadata']['heatmap_available']
+
+
+def test_selected_label_compares_every_object_and_all_reference_images_without_forward(tmp_path):
+    class PatchEncoder:
+        calls = 0
+        def encode(self, image):
+            self.calls += 1
+            pixels = np.asarray(image)
+            features = [pixels[y:y+16, x:x+16].mean(axis=(0, 1))
+                        for y in range(0, image.height, 16) for x in range(0, image.width, 16)]
+            return torch.nn.functional.normalize(torch.tensor(np.array(features), dtype=torch.float32), dim=1)
+    encoder = PatchEncoder()
+    for label, name, color in [('mix', 'red.png', 'red'), ('mix', 'blue.png', 'blue'),
+                               ('green', 'one.png', (0, 255, 0))]:
+        (tmp_path / label).mkdir(exist_ok=True)
+        Image.new('RGB', (32, 32), color).save(tmp_path / label / name)
+    gallery = ObjectGallery()
+    gallery.refresh(tmp_path, encoder, 32, 16)
+    mixed = Image.new('RGB', (32, 32), 'red')
+    mixed.paste(Image.new('RGB', (16, 32), 'blue'), (16, 0))
+    target = Image.new('RGB', (64, 32), (0, 255, 0))
+    target.paste(mixed, (0, 0))
+    proposals = clean_proposals([[0, 0, 32, 32], [32, 0, 64, 32]], [.9, .8], ['box']*2, target.size)
+    diagnostics = []
+    results = recognize_objects(target, proposals, encoder, gallery, 32, 16, .6, .05, diagnostics)
+    snapshot = ObjectVisualizationSnapshot(results, diagnostics, gallery, 32, 16)
+    calls = encoder.calls
+    automatic, _ = snapshot.render()
+    selected, images = snapshot.render('mix')
+    assert encoder.calls == calls
+    assert len(selected) == 2
+    assert [item['label'] for item in selected] == [item['label'] for item in automatic] == ['mix', 'green']
+    assert [item['comparison_case'] for item in selected] == ['mix', 'mix']
+    assert all(item['comparison_reference_count'] == 2 for item in selected)
+    assert selected[0]['similarity_min'] == pytest.approx(1.)
+    assert automatic[0]['similarity_min'] < .5
+    assert selected[1]['similarity_max'] == pytest.approx(0.)
+    assert automatic[1]['similarity_min'] == pytest.approx(1.)
+    assert selected[1]['comparison_score'] == pytest.approx(0.)
+    assert selected[1]['score'] == pytest.approx(1.)
+    assert len(images) == 12
+    with pytest.raises(ValueError):
+        snapshot.render('missing')
+    # Gallery changes cannot replace the reference features in an existing frame snapshot.
+    for path in (tmp_path / 'mix').iterdir():
+        path.unlink()
+    gallery.refresh(tmp_path, encoder, 32, 16)
+    assert snapshot.render('mix')[0][0]['comparison_reference_count'] == 2
+    assert gallery.best_reference(torch.tensor([1., 0., 0.]), 'mix') == (None, None)

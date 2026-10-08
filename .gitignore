@@ -3,6 +3,7 @@
 /build
 /dinov3_cases_data
 /dinov3_venv
+/dinov3_ws/artifacts/grounding_dino/
 /isaac_ros_assets
 log/
 /orbbec_sdk

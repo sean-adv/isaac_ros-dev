@@ -31,6 +31,8 @@ from .trt_backend import DEFAULT_ENGINE, MODEL_ID as MODEL
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
 from .image_manager import register_image_manager, image_path
+from .grounded import (DEFAULT_PROMPT, GroundingDetector, ObjectGallery, validate_settings,
+                       recognize_objects, recognition_message, prepare_object, ObjectVisualizationSnapshot)
 
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
 
@@ -126,6 +128,12 @@ class CaseNode(Node):
     def __init__(self):
         super().__init__('dinov3_cases')
         defaults = dict(cases_dir='/workspaces/isaac_ros-dev/dinov3_cases_data',
+                        pipeline='grounded', grounding_model_id='IDEA-Research/grounding-dino-tiny',
+                        grounding_cache_dir='/workspaces/isaac_ros-dev/dinov3_ws/artifacts/grounding_dino',
+                        grounding_prompt=DEFAULT_PROMPT, grounding_box_threshold=0.3,
+                        grounding_text_threshold=0.25, grounding_nms_iou=0.5,
+                        grounding_max_detections=20, recognition_threshold=0.75,
+                        recognition_margin=0.05, object_max_side=224,
                         image_topic='/camera/color/image_raw', model_id=MODEL,
                         inference_backend='trt', engine_path=DEFAULT_ENGINE,
                         depth_topic='/camera/depth/image_raw',
@@ -147,6 +155,19 @@ class CaseNode(Node):
         self.declare_parameter('target_padding_mode', 'reflect', ParameterDescriptor(
             read_only=True, description='Target padding: reflect or replicate. Restart to change.'))
         self.param = lambda k: self.get_parameter(k).value
+        if self.param('pipeline') not in ('grounded', 'heatmap'):
+            raise ValueError('pipeline must be grounded or heatmap.')
+        self.grounding_settings = dict(
+            prompt=self.param('grounding_prompt'), box_threshold=self.param('grounding_box_threshold'),
+            text_threshold=self.param('grounding_text_threshold'),
+            recognition_threshold=self.param('recognition_threshold'), margin=self.param('recognition_margin'))
+        self.grounding_settings['prompt'] = validate_settings(**self.grounding_settings)
+        if not 0 <= self.param('grounding_nms_iou') <= 1:
+            raise ValueError('grounding_nms_iou must be between 0 and 1.')
+        if not 1 <= self.param('grounding_max_detections') <= 100:
+            raise ValueError('grounding_max_detections must be between 1 and 100.')
+        if not 32 <= self.param('object_max_side') <= 2048:
+            raise ValueError('object_max_side must be between 32 and 2048.')
         validate_target_padding(self.param('target_padding'), self.param('target_padding_mode'))
         if self.param('reference_max_side') < 0:
             raise ValueError('reference_max_side must be nonnegative.')
@@ -175,6 +196,7 @@ class CaseNode(Node):
         self.frame_seq = 0
         self.jpeg = None
         self.debug_jpegs = {}
+        self.clear_object_debug()
         self.detections = []
         self.preview_jpeg = None
         self.camera_frame = None
@@ -277,10 +299,11 @@ class CaseNode(Node):
 
         def images_changed(group):
             with self.lock:
-                if group == self.selected:
+                if self.param('pipeline') == 'grounded' or group == self.selected:
                     self.generation += 1
                     self.jpeg = None
                     self.debug_jpegs = {}
+                    self.clear_object_debug()
                     self.detections = []
                     self.overlay_at = None
                     self.status = 'Building reference features…'
@@ -302,6 +325,9 @@ class CaseNode(Node):
             with self.lock:
                 age = None if self.camera_received_at is None else time.monotonic() - self.camera_received_at
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
+                               pipeline=self.param('pipeline'), grounding=self.grounding_settings,
+                               grounding_model_id=self.param('grounding_model_id'),
+                               object_max_side=self.param('object_max_side'),
                                reference_revision=self.generation, reference_stride=self.reference_stride,
                                inference_backend=self.param('inference_backend'),
                                model_id=self.param('model_id'),
@@ -330,7 +356,9 @@ class CaseNode(Node):
                 item = dict(name=path.name, version=f'{path.stat().st_mtime_ns}-{path.stat().st_size}')
                 try:
                     original = decode_image(path)
-                    reference = prepare_reference(original, self.param('reference_max_side'), stride)
+                    reference = (prepare_object(original, self.param('object_max_side'), stride)
+                                 if self.param('pipeline') == 'grounded' else
+                                 prepare_reference(original, self.param('reference_max_side'), stride))
                     item.update(original_size=list(original.size), size=list(reference.size),
                                 rows=reference.height // stride, columns=reference.width // stride)
                 except (ValueError, OSError, Image.DecompressionBombError) as error:
@@ -345,10 +373,29 @@ class CaseNode(Node):
                 stride = self.reference_stride
             if stride is None:
                 return jsonify(error='模型載入中。'), 503
-            reference = prepare_reference(decode_image(path), self.param('reference_max_side'), stride)
+            reference = (prepare_object(decode_image(path), self.param('object_max_side'), stride)
+                         if self.param('pipeline') == 'grounded' else
+                         prepare_reference(decode_image(path), self.param('reference_max_side'), stride))
             data = BytesIO()
             reference_grid_image(reference, stride).save(data, format='PNG')
             return Response(data.getvalue(), mimetype='image/png', headers={'Cache-Control': 'no-store'})
+
+        @app.post('/api/grounding')
+        def grounding_settings():
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or not payload or set(payload) - set(self.grounding_settings):
+                raise ValueError('Expected prompt and/or grounding/recognition thresholds.')
+            with self.lock:
+                settings = {**self.grounding_settings, **payload}
+                settings['prompt'] = validate_settings(**settings)
+                self.grounding_settings = settings
+                self.generation += 1
+                self.jpeg = None
+                self.debug_jpegs = {}
+                self.clear_object_debug()
+                self.detections = []
+                self.overlay_at = None
+            return jsonify(ok=True, grounding=settings)
 
         @app.post('/api/threshold')
         def threshold():
@@ -361,6 +408,7 @@ class CaseNode(Node):
                 self.generation += 1
                 self.jpeg = None
                 self.debug_jpegs = {}
+                self.clear_object_debug()
                 self.detections = []
                 self.overlay_at = None
             return jsonify(ok=True, threshold=self.threshold)
@@ -388,6 +436,7 @@ class CaseNode(Node):
                 self.generation += 1
                 self.jpeg = None
                 self.debug_jpegs = {}
+                self.clear_object_debug()
                 self.detections = []
                 self.status = 'Building reference features…'
             return jsonify(ok=True, count=len(images))
@@ -400,11 +449,14 @@ class CaseNode(Node):
                 raise ValueError('Case does not exist.')
             with self.lock:
                 self.selected = name
-                self.generation += 1
-                self.jpeg = None
-                self.debug_jpegs = {}
-                self.detections = []
-                self.status = 'Building reference features…'
+                # Gallery selection is a preview action in the all-class pipeline.
+                if self.param('pipeline') == 'heatmap':
+                    self.generation += 1
+                    self.jpeg = None
+                    self.debug_jpegs = {}
+                    self.clear_object_debug()
+                    self.detections = []
+                    self.status = 'Building reference features…'
             return jsonify(ok=True)
 
         @app.post('/api/source')
@@ -427,6 +479,7 @@ class CaseNode(Node):
                 self.generation += 1
                 self.jpeg = None
                 self.debug_jpegs = {}
+                self.clear_object_debug()
                 self.detections = []
             return jsonify(ok=True)
 
@@ -450,6 +503,32 @@ class CaseNode(Node):
             with self.lock:
                 return jsonify(detections=self.detections)
 
+        @app.get('/api/object_visualizations')
+        def object_visualizations():
+            reference_case = request.args.get('reference_case', '')
+            with self.lock:
+                revision, snapshot = self.object_debug_revision, self.object_debug_snapshot
+            if snapshot is None:
+                return jsonify(revision=revision, objects=[], reference_cases=[], reference_case='', ready=False)
+            try:
+                items, _ = snapshot.render(reference_case)
+            except ValueError as error:
+                return jsonify(error=str(error), reference_cases=snapshot.reference_cases), 400
+            return jsonify(revision=revision, objects=items, reference_cases=snapshot.reference_cases,
+                           reference_case=reference_case, ready=True)
+
+        @app.get('/debug/objects/<int:revision>/<int:index>/<view>.jpg')
+        def object_debug_view(revision, index, view):
+            with self.lock:
+                snapshot = next((snapshot for version, snapshot in self.object_debug_history
+                                 if version == revision), None)
+                if snapshot is None:
+                    return Response(status=410)
+            _, images = snapshot.render(request.args.get('reference_case', ''))
+            data = images.get((index, view))
+            return Response(data or b'', status=200 if data else 404, mimetype='image/jpeg',
+                            headers={'Cache-Control': 'no-store'})
+
         @app.get('/debug/<view>.jpg')
         def debug_view(view):
             if view not in ('grid', 'patches', 'heatmap', 'mask', 'boxes'):
@@ -468,6 +547,9 @@ class CaseNode(Node):
         return app
 
     def run_worker(self):
+        if self.param('pipeline') == 'grounded':
+            self.run_grounded_worker()
+            return
         try:
             encoder = Encoder(self.param('model_id'), self.param('inference_backend'),
                               self.param('engine_path'), self.param('target_padding'),
@@ -595,26 +677,159 @@ class CaseNode(Node):
                     if gen == self.generation:
                         self.jpeg = None
                         self.debug_jpegs = {}
+                        self.clear_object_debug()
                         self.detections = []
                         self.status = f'Error: {type(e).__name__}: {e}'
                 self.get_logger().error(str(e))
                 processed = (gen, seq)
 
+    def clear_object_debug(self):
+        self.object_debug_revision = getattr(self, 'object_debug_revision', 0) + 1
+        self.object_debug_items = []
+        self.object_debug_jpegs = {}
+        self.object_debug_snapshot = None
+        self.object_debug_history = deque(maxlen=3)
+
+    def run_grounded_worker(self):
+        try:
+            encoder = Encoder(self.param('model_id'), self.param('inference_backend'),
+                              self.param('engine_path'), 0, self.param('target_padding_mode'))
+            stride = feature_stride(encoder.model)
+            with self.lock:
+                self.reference_stride = stride
+                self.backend_description = encoder.description
+                self.status = 'Loading Grounding DINO model…'
+            detector = GroundingDetector(self.param('grounding_model_id'), encoder.device,
+                                         self.param('grounding_cache_dir') or None)
+        except Exception as error:
+            with self.lock:
+                self.status = f'Model load failed: {type(error).__name__}: {error}'
+            self.get_logger().error(self.status)
+            return
+        gallery = ObjectGallery()
+        processed = None
+        next_gallery_scan = 0.
+        gallery_revision = 0
+        max_side = self.param('object_max_side')
+        while not self.stop.wait(1 / max(.1, self.param('inference_hz'))):
+            with self.lock:
+                gen, frame, seq = self.generation, self.frame, self.frame_seq
+                settings = dict(self.grounding_settings)
+            try:
+                # Include filesystem changes even with an uploaded, otherwise static target.
+                if time.monotonic() >= next_gallery_scan or processed is None or processed[0] != gen:
+                    if gallery.refresh(self.root, encoder, max_side, stride):
+                        gallery_revision += 1
+                    next_gallery_scan = time.monotonic() + 1.
+                if frame is None:
+                    with self.lock:
+                        if gen == self.generation:
+                            self.status = f'Ready: {len(set(gallery.labels))} classes. Waiting for target image…'
+                    continue
+                if processed == (gen, seq, gallery_revision):
+                    continue
+                start = time.monotonic()
+                header = None
+                if isinstance(frame, ImageMsg):
+                    image = Image.fromarray(self.bridge.imgmsg_to_cv2(frame, desired_encoding='rgb8'))
+                    header = frame.header
+                else:
+                    image = frame
+                proposals = detector.detect(image, settings['prompt'], settings['box_threshold'],
+                                            settings['text_threshold'], self.param('grounding_nms_iou'),
+                                            self.param('grounding_max_detections'))
+                diagnostics = []
+                detections = recognize_objects(image, proposals, encoder, gallery, max_side, stride,
+                                               settings['recognition_threshold'], settings['margin'],
+                                               diagnostics=diagnostics)
+                object_snapshot = ObjectVisualizationSnapshot(detections, diagnostics, gallery, max_side, stride)
+                object_items, object_jpegs = object_snapshot.render()
+                overlay = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+                for index, item in enumerate(detections):
+                    x0, y0, x1, y1 = item['bbox']
+                    color = (0, 190, 255) if item['label'] == 'unknown' else (60, 220, 80)
+                    cv2.rectangle(overlay, (x0, y0), (x1-1, y1-1), color, 2)
+                    score = '--' if item['score'] is None else f"{item['score']:.2f}"
+                    label = f"#{index+1} {item['label']} | {item['detection_label']} | det {item['detection_score']:.2f} sim {score}"
+                    font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, .8, 2
+                    (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                    origin = (max(4, min(x0, overlay.shape[1]-text_width-4)),
+                              max(text_height+6, y0-8))
+                    cv2.putText(overlay, label, origin, font, font_scale, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(overlay, label, origin, font, font_scale, color, thickness, cv2.LINE_AA)
+                ok, jpeg = cv2.imencode('.jpg', overlay)
+                if not ok:
+                    raise RuntimeError('JPEG encoding failed.')
+                out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
+                if header is not None:
+                    out.header = header
+                else:
+                    out.header.stamp = self.get_clock().now().to_msg()
+                recognition = recognition_message(detections, out.header)
+                with self.lock:
+                    if gen != self.generation:
+                        continue
+                    self.jpeg = jpeg.tobytes()
+                    self.debug_jpegs = {'boxes': self.jpeg}
+                    self.object_debug_revision += 1
+                    self.object_debug_items = object_items
+                    self.object_debug_jpegs = object_jpegs
+                    self.object_debug_snapshot = object_snapshot
+                    self.object_debug_history.append((self.object_debug_revision, object_snapshot))
+                    self.detections = detections
+                    self.overlay_at = time.monotonic()
+                    self.status = (f'Grounding DINO → {encoder.description} | {len(detections)} objects | '
+                                   f'{len(set(gallery.labels))} classes / {len(gallery.labels)} references | '
+                                   f'{time.monotonic()-start:.2f}s inference')
+                    self.pub.publish(out)
+                    self.recognition_debug_pub.publish(out)
+                    self.recognition_pub.publish(recognition)
+                processed = (gen, seq, gallery_revision)
+            except Exception as error:
+                with self.lock:
+                    if gen == self.generation:
+                        self.jpeg = None
+                        self.debug_jpegs = {}
+                        self.clear_object_debug()
+                        self.detections = []
+                        self.overlay_at = None
+                        self.status = f'Error: {type(error).__name__}: {error}'
+                self.get_logger().error(str(error))
+                # Retry failed files/model calls at a bounded rate, including static uploads.
+                self.stop.wait(1.)
+
 
 PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</title>
 <style>body{font:16px system-ui;background:#101821;color:#e7eef8;max-width:1150px;margin:32px auto;padding:0 20px}section{background:#1b2836;padding:20px;border-radius:12px;margin:16px 0}button,input,select{padding:10px;margin:6px;border-radius:6px}button{background:#8ddcc4;cursor:pointer}img{max-width:100%;border-radius:10px}small{color:#b0becd}.reference-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:16px}.reference-card{margin:0;padding:12px;background:#101821;border-radius:8px;overflow-wrap:anywhere}.reference-card img{display:block;width:100%;image-rendering:pixelated}.reference-card figcaption{margin-top:10px}</style></head><body>
-<h1>DINOv3 · Case similarity</h1><p><a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a></p><p>Choose a case to highlight visually similar patches in a camera frame or target picture.</p>
+<h1>Grounding DINO → DINOv3 物體辨識</h1><p><a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a></p><p id="pipeline-help">先透過文字找出物體，再與所有商品參考圖比對。每個 case 代表一個商品身分。</p>
+<section id="grounding-section"><h2>偵測與辨識設定</h2><form id="grounding-form">
+<label>文字提示 <input id="prompt" name="prompt" maxlength="1000" required style="width:min(600px,85%)"></label><br>
+<label>偵測門檻 <input name="box_threshold" type="number" min="0" max="1" step="0.01" required></label>
+<label>文字門檻 <input name="text_threshold" type="number" min="0" max="1" step="0.01" required></label><br>
+<label>辨識相似度門檻 <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required></label>
+<label>前兩名最小差距 <input name="margin" type="number" min="0" max="2" step="0.01" required></label>
+<button>套用設定</button></form><small>英文類別以句點分隔，例如 medicine bottle. medicine box. bottle. box.。門檻或差距不足時顯示 unknown。</small></section>
 <section><h2>1. Reference groups</h2><form id="upload"><input name="case" placeholder="Case name, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}"><input name="images" type="file" accept="image/*" multiple required><button>Add pictures to case</button></form>
-<select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
+<select id="cases"><option value="">Select case</option></select><button id="select">檢視此圖庫</button><p><small>每個 case 放同一商品的多角度近距離照片。兩階段模式會比對所有圖庫；這裡的選擇僅切換參考圖預覽。</small></p></section>
 <section><h2>範例照片 · Patch 分割示意圖</h2><p id="reference-status" role="status">請選擇 case 以查看每張範例照片。</p><p><small>黃色線為模型輸入的 patch 網格；右側與底部不足一格時，自動複製邊緣像素補齊。</small></p><div id="reference-gallery" class="reference-gallery"></div></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
-<section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Original-resolution patch scores are mapped to image pixels before thresholding. Final boxes are merged by IoU; the highest-scoring box has a red outline.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
+<section><h2>辨識結果</h2><div id="legacy-threshold"><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"></div><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="物體框選與辨識結果"><p><small>det 為 Grounding DINO 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small></p><div id="recognition-list"></div></section>
 <section id="debug-section" hidden><h2>Patch diagnostics</h2><select id="debug-view"><option value="grid">Original + patch grid</option><option value="patches">Patch similarity</option><option value="heatmap">Full-image similarity</option><option value="mask">Mask after threshold, closing and hole filling</option><option value="boxes">Final bounding boxes</option></select><p><img id="debug-image" alt="Patch diagnostic"></p></section>
+<section id="object-section" hidden><h2>逐物體 DINOv3 視覺化</h2>
+<label>比對 reference 標籤 <select id="object-reference"><option value="">自動最佳參考圖</option></select></label>
+<label>顯示內容 <select id="object-view"><option value="heatmap">ROI 相似度熱圖疊加</option><option value="crop">Grounding bbox 裁切原圖</option><option value="grid">模型輸入與 patch 網格</option><option value="patches">逐 patch 相似度</option><option value="similarity">純相似度熱圖</option><option value="reference">最佳參考圖</option></select></label>
+<div id="object-scale" style="max-width:320px"><div style="height:12px;background:linear-gradient(to right,#30123b,#466be3,#1ae4b6,#a4fc3b,#f9ba38,#e3440a,#7a0403);border-radius:4px"></div><small style="display:flex;justify-content:space-between"><span>0</span><span>0.5</span><span>1</span></small></div>
+<p id="object-help"></p><p><small>自動模式使用各物體的最佳參考圖；指定標籤時，每個 Grounding object 都與該標籤所有圖片的 patch 比對。最佳參考圖視圖顯示該標籤內對各物體最相似的圖片。局部 patch 相似度與整體商品辨識分數不同。網格內藍框為縮放後 ROI 範圍，外側為補邊。</small></p>
+<p id="object-status" role="status">等待物體偵測結果…</p><div id="object-gallery" class="reference-gallery"></div></section>
 <script>
 const el=id=>document.getElementById(id);
 let thresholdDirty=false;
 let referenceKey='',referenceVersion=0;
+let groundingLoaded=false;
+el('grounding-form').onsubmit=e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));for(const key of Object.keys(values)){if(key!=='prompt')values[key]=Number(values[key]);}send('/api/grounding',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(values)});};
+function updateGrounding(d){const active=d.pipeline==='grounded';el('grounding-section').hidden=!active;el('legacy-threshold').hidden=active;el('debug-section').hidden=active||!d.debug_visualization;el('object-section').hidden=!active;if(!active){el('pipeline-help').textContent='全圖 DINOv3 熱圖模式：選擇一個 case 進行 patch 比對。';el('select').textContent='Use selected case';}if(!groundingLoaded&&d.grounding){for(const [key,value] of Object.entries(d.grounding))el('grounding-form').elements.namedItem(key).value=value;groundingLoaded=true;}}
+async function refreshDetections(){const r=await fetch('/api/detections');if(!r.ok)return;const data=await r.json();const list=el('recognition-list');list.replaceChildren();for(const item of data.detections){if(!item.label)continue;const row=document.createElement('p');row.textContent=item.label+' · '+item.detection_label+' · det '+item.detection_score.toFixed(2)+' · sim '+(item.score===null?'—':item.score.toFixed(3))+' · '+item.reason+(item.label==='unknown'&&item.candidate?' · 最接近 '+item.candidate:'')+(item.margin===null?'':' · 差距 '+item.margin.toFixed(3));list.append(row);}}
 async function refreshReferences(group,revision,stride){
  const key=JSON.stringify([group,revision,stride]);if(key===referenceKey)return;referenceKey=key;const version=++referenceVersion;
  el('reference-gallery').replaceChildren();el('reference-status').textContent=group?'載入 '+group+' 的範例照片…':'請選擇 case 以查看每張範例照片。';if(!group)return;
@@ -632,12 +847,48 @@ el('upload').onsubmit=e=>{e.preventDefault();send('/api/cases',{method:'POST',bo
 el('select').onclick=()=>send('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case:el('cases').value})});
 el('target').onsubmit=e=>{e.preventDefault();let f=new FormData(e.target);f.set('source','upload');send('/api/source',{method:'POST',body:f});};
 el('camera').onclick=()=>{let f=new FormData();f.set('source','camera');send('/api/source',{method:'POST',body:f});};
-async function refresh(){const r=await fetch('/api/status');const d=await r.json();el('debug-section').hidden=!d.debug_visualization;if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}refreshReferences(s.value||d.selected,d.reference_revision,d.reference_stride);const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
+async function refresh(){const r=await fetch('/api/status');const d=await r.json();updateGrounding(d);if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}refreshReferences(s.value||d.selected,d.reference_revision,d.reference_stride);const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
 let debugBusy=false;
 async function refreshDebug(){if(debugBusy||el('debug-section').hidden)return;debugBusy=true;try{const r=await fetch('/debug/'+el('debug-view').value+'.jpg');const im=el('debug-image');if(r.status===200){const old=im.src;im.src=URL.createObjectURL(await r.blob());if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{const old=im.src;im.removeAttribute('src');if(old.startsWith('blob:'))URL.revokeObjectURL(old);}}finally{debugBusy=false;}}
 el('debug-view').onchange=()=>refreshDebug().catch(()=>{});
 setInterval(()=>refreshDebug().catch(()=>{}),1000);
-async function poll(){try{await refresh();}catch(e){el('status').textContent='Connection lost: '+e.message;}setTimeout(poll,250);}poll();
+const objectHelp={heatmap:'ROI 原圖疊加局部 patch 相似度。固定色階：0（深藍）→ 0.5（綠）→ 1（紅）；負值顯示深藍。',crop:'Grounding DINO 在原圖座標中找到的物體裁切，保持原長寬比。',grid:'實際 DINOv3 模型輸入：黃色為 patch 邊界，藍框外為右側／底部補邊。',patches:'每個 ROI patch 與最佳參考圖所有 patch 的最高 cosine similarity；顯示完整模型網格（含補邊）。',similarity:'移除補邊並映射回 ROI 的純相似度圖。固定色階 0–1；負值顯示深藍。',reference:'整體商品特徵比對分數最高的那張參考圖，使用與辨識相同的縮放與補邊。'};
+let objectBusy=false,objectKey='',objectUrls=[];
+function clearObjectUrls(){for(const url of objectUrls)URL.revokeObjectURL(url);objectUrls=[];}
+function updateObjectReferences(cases){const select=el('object-reference');const list=JSON.stringify(cases);if(select.dataset.list===list)return;const selected=select.value;select.replaceChildren(new Option('自動最佳參考圖',''),...cases.map(name=>new Option(name,name)));select.value=cases.includes(selected)?selected:'';select.dataset.list=list;}
+async function refreshObjects(){
+ if(objectBusy||el('object-section').hidden)return;objectBusy=true;
+ const view=el('object-view').value;el('object-help').textContent=objectHelp[view];
+ const referenceCase=el('object-reference').value;const comparisonQuery=referenceCase?'?reference_case='+encodeURIComponent(referenceCase):'';
+ if(referenceCase)el('object-help').textContent='比對標籤 '+referenceCase+' 的全部參考圖片。'+objectHelp[view].replace('最佳參考圖所有 patch','指定標籤全部參考圖的 patch');
+ el('object-scale').hidden=!['heatmap','patches','similarity'].includes(view);
+ try{
+  const response=await fetch('/api/object_visualizations'+comparisonQuery);const data=await response.json();if(data.ready||!response.ok&&data.reference_cases)updateObjectReferences(data.reference_cases);if(!response.ok)throw Error(data.error||'無法讀取物體視覺化');
+  const key=JSON.stringify([data.revision,view,referenceCase]);if(key===objectKey)return;
+  if(!data.objects.length){clearObjectUrls();el('object-gallery').replaceChildren();el('object-status').textContent='目前沒有物體結果；請提供目標影像並檢查文字提示與偵測門檻。';objectKey=key;return;}
+  const images=await Promise.all(data.objects.map(async item=>{
+   if(!item.views.includes(view))return null;
+   const image=await fetch('/debug/objects/'+data.revision+'/'+item.index+'/'+view+'.jpg'+comparisonQuery);
+   if(image.status===410)throw Error('結果已更新，正在取得最新視覺化…');if(!image.ok)throw Error('物體 '+(item.index+1)+' 視覺化讀取失敗');return image.blob();
+  }));
+  if(view!==el('object-view').value||referenceCase!==el('object-reference').value)return;
+  clearObjectUrls();const gallery=el('object-gallery');gallery.replaceChildren();
+  data.objects.forEach((item,index)=>{
+   const card=document.createElement('figure');card.className='reference-card';
+   const title=document.createElement('figcaption');title.textContent='#'+(item.index+1)+' · '+item.label+' · '+item.detection_label;card.append(title);
+   const detail=document.createElement('p');detail.textContent='bbox ['+item.bbox.join(', ')+'] · ROI '+item.roi_size.join(' × ')+' → 輸入 '+item.input_size.join(' × ')+' · '+item.patch_grid.join(' × ')+' patches';card.append(detail);
+   const score=document.createElement('p');score.textContent='det '+item.detection_score.toFixed(3)+' · 商品 sim '+(item.score===null?'—':item.score.toFixed(3))+' · '+item.reason;card.append(score);
+   const comparison=document.createElement('p');comparison.textContent=item.comparison_reference?'比對 '+item.comparison_case+' · 標籤 sim '+item.comparison_score.toFixed(3)+' · '+item.comparison_reference_count+' 張參考圖 · 最佳 '+item.comparison_reference.name:'沒有可用參考圖';card.append(comparison);
+   if(images[index]){const image=document.createElement('img');image.alt=title.textContent+' '+objectHelp[view];const url=URL.createObjectURL(images[index]);objectUrls.push(url);image.src=url;card.append(image);}else{const empty=document.createElement('p');empty.textContent='沒有參考圖庫，無法計算相似度；可切換裁切原圖或 patch 網格。';card.append(empty);}
+   if(item.heatmap_available){const range=document.createElement('small');range.textContent='ROI 局部 cosine 範圍 '+item.similarity_min.toFixed(3)+'–'+item.similarity_max.toFixed(3);card.append(range);}gallery.append(card);
+  });
+  el('object-status').textContent=data.objects.length+' 個物體 · '+(referenceCase?'比對 '+referenceCase:'自動最佳參考圖')+' · 同一幀結果 #'+data.revision;objectKey=key;
+ }catch(error){el('object-status').textContent=error.message;}finally{objectBusy=false;}
+}
+el('object-view').onchange=()=>{objectKey='';refreshObjects();};
+el('object-reference').onchange=()=>{objectKey='';clearObjectUrls();el('object-gallery').replaceChildren();el('object-status').textContent='正在更新標籤熱圖…';refreshObjects();};
+setInterval(refreshObjects,1000);
+async function poll(){try{await refresh();await refreshDetections();}catch(e){el('status').textContent='Connection lost: '+e.message;}setTimeout(poll,250);}poll();
 </script></body></html>'''
 
 

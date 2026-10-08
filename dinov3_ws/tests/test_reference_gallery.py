@@ -32,7 +32,7 @@ def gallery(tmp_path):
     Image.new('RGB', (64, 32), 'blue').save(folder / 'two.png')
     (folder / 'broken.png').write_bytes(b'broken')
     (folder / 'link.png').symlink_to(folder / 'one.png')
-    params = {'reference_max_side': 64}
+    params = {'reference_max_side': 64, 'pipeline': 'heatmap'}
     node = SimpleNamespace(root=tmp_path, lock=threading.Lock(), reference_stride=16,
                            param=params.__getitem__)
     app = CaseNode.make_app(node)
