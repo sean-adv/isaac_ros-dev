@@ -4,7 +4,7 @@
 /dinov3_cases_data
 /dinov3_venv
 /isaac_ros_assets
-/log
+log/
 /orbbec_sdk
 /CutLER
 /detectron2

@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 def resize_reference(image, max_side, min_side):
@@ -20,6 +20,19 @@ def resize_reference(image, max_side, min_side):
             f'Reference size {result.size} is smaller than feature stride {min_side}; '
             'increase reference_max_side or use a less narrow reference image.')
     return result
+
+
+def prepare_reference(image, max_side, stride):
+    """Resize, then replicate bottom/right edges to complete the patch grid."""
+    if isinstance(stride, bool) or not isinstance(stride, int) or stride <= 0:
+        raise ValueError('Patch stride must be a positive integer.')
+    reference = resize_reference(image, max_side, stride)
+    right, bottom = (-reference.width) % stride, (-reference.height) % stride
+    if not (right or bottom):
+        return reference
+    pixels = np.asarray(reference)
+    padding = ((0, bottom), (0, right)) + ((0, 0),) * (pixels.ndim - 2)
+    return Image.fromarray(np.pad(pixels, padding, mode='edge'))
 
 
 def validate_target_padding(padding, mode, stride=None):
@@ -158,3 +171,22 @@ def debug_visualizations(bgr, patch_scores, scores, mask, boxes, patch_size):
                          interpolation=cv2.INTER_NEAREST)
     return dict(grid=grid, patches=patches, heatmap=color(scores),
                 mask=cv2.cvtColor(mask * 255, cv2.COLOR_GRAY2BGR), boxes=final)
+
+
+def reference_grid_image(image, stride):
+    """Draw model-input patch boundaries without rescaling."""
+    if not isinstance(stride, int) or isinstance(stride, bool) or stride <= 0:
+        raise ValueError('Patch stride must be a positive integer.')
+    if min(image.size) < stride:
+        raise ValueError('Reference is smaller than one patch.')
+    grid = image.convert('RGB').copy()
+    width, height = grid.size
+    covered_w, covered_h = width // stride * stride, height // stride * stride
+    draw = ImageDraw.Draw(grid)
+    for x in range(0, covered_w, stride):
+        draw.line((x, 0, x, covered_h - 1), fill=(255, 220, 80))
+    for y in range(0, covered_h, stride):
+        draw.line((0, y, covered_w - 1, y), fill=(255, 220, 80))
+    draw.line((covered_w - 1, 0, covered_w - 1, covered_h - 1), fill=(255, 220, 80))
+    draw.line((0, covered_h - 1, covered_w - 1, covered_h - 1), fill=(255, 220, 80))
+    return grid

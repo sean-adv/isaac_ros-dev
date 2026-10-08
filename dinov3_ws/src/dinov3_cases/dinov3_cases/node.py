@@ -1,5 +1,6 @@
 """Local ROS 2 / browser interface for grouped DINOv3 reference matching."""
 import re
+from io import BytesIO
 import threading
 import time
 from collections import deque
@@ -24,12 +25,12 @@ from werkzeug.serving import make_server
 
 from .boxes import BoxConfig, similarity_to_bboxes, merge_boxes_by_iou, detection_message, draw_boxes
 from .patches import (run_dino_image, compute_similarity_maps, similarity_pixels,
-                      debug_visualizations, inference_dtype, feature_stride, resize_reference,
-                      pad_target_image, validate_target_padding)
+                      debug_visualizations, inference_dtype, feature_stride, prepare_reference,
+                      pad_target_image, validate_target_padding, reference_grid_image)
 from .trt_backend import DEFAULT_ENGINE, MODEL_ID as MODEL
 from vision_msgs.msg import Detection2DArray
 from .pose import closest_depth, estimate_pose, draw_axes
-from .image_manager import register_image_manager
+from .image_manager import register_image_manager, image_path
 
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp'}
 
@@ -183,6 +184,7 @@ class CaseNode(Node):
         self.overlay_at = None
         self.status = 'Loading DINOv3 model…'
         self.backend_description = None
+        self.reference_stride = None
         self.bank = None
         self.bank_key = None
         self.pub = self.create_publisher(ImageMsg, '/dinov3/heatmap/overlay', 1)
@@ -300,6 +302,7 @@ class CaseNode(Node):
             with self.lock:
                 age = None if self.camera_received_at is None else time.monotonic() - self.camera_received_at
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
+                               reference_revision=self.generation, reference_stride=self.reference_stride,
                                inference_backend=self.param('inference_backend'),
                                model_id=self.param('model_id'),
                                target_padding=self.param('target_padding'),
@@ -309,6 +312,43 @@ class CaseNode(Node):
                                camera_connected=age is not None and age < 3,
                                preview_error=self.preview_error, debug_visualization=self.param('debug_visualization'),
                                overlay_age=None if self.overlay_at is None else time.monotonic() - self.overlay_at)
+
+        @app.get('/api/references')
+        def references():
+            name = request.args.get('case', '')
+            folder = case_path(self.root, name)
+            if not folder.is_dir():
+                raise ValueError('Case does not exist.')
+            with self.lock:
+                stride = self.reference_stride
+            if stride is None:
+                return jsonify(error='模型載入中，稍後顯示 patch 網格。'), 503
+            items = []
+            for path in sorted(folder.iterdir()):
+                if path.suffix.lower() not in EXTENSIONS or not path.is_file() or path.is_symlink():
+                    continue
+                item = dict(name=path.name, version=f'{path.stat().st_mtime_ns}-{path.stat().st_size}')
+                try:
+                    original = decode_image(path)
+                    reference = prepare_reference(original, self.param('reference_max_side'), stride)
+                    item.update(original_size=list(original.size), size=list(reference.size),
+                                rows=reference.height // stride, columns=reference.width // stride)
+                except (ValueError, OSError, Image.DecompressionBombError) as error:
+                    item['error'] = str(error)
+                items.append(item)
+            return jsonify(case=name, patch_size=stride, images=items)
+
+        @app.get('/api/references/grid/<group>/<filename>')
+        def reference_grid(group, filename):
+            path = image_path(self.root, group, filename)
+            with self.lock:
+                stride = self.reference_stride
+            if stride is None:
+                return jsonify(error='模型載入中。'), 503
+            reference = prepare_reference(decode_image(path), self.param('reference_max_side'), stride)
+            data = BytesIO()
+            reference_grid_image(reference, stride).save(data, format='PNG')
+            return Response(data.getvalue(), mimetype='image/png', headers={'Cache-Control': 'no-store'})
 
         @app.post('/api/threshold')
         def threshold():
@@ -439,6 +479,7 @@ class CaseNode(Node):
             return
         with self.lock:
             self.backend_description = encoder.description
+            self.reference_stride = feature_stride(encoder.model)
             self.status = f'{encoder.description} ready on {encoder.device}. Upload or select a case.'
         self.get_logger().info(self.status)
         processed = None
@@ -471,7 +512,7 @@ class CaseNode(Node):
                     per_image = max(1, limit // len(paths))
                     banks = []
                     for path in paths:
-                        reference = resize_reference(decode_image(path), reference_max_side,
+                        reference = prepare_reference(decode_image(path), reference_max_side,
                                                      feature_stride(encoder.model))
                         features = encoder.encode(reference)
                         indices = torch.linspace(0, len(features) - 1, min(per_image, len(features)),
@@ -561,10 +602,11 @@ class CaseNode(Node):
 
 
 PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</title>
-<style>body{font:16px system-ui;background:#101821;color:#e7eef8;max-width:1150px;margin:32px auto;padding:0 20px}section{background:#1b2836;padding:20px;border-radius:12px;margin:16px 0}button,input,select{padding:10px;margin:6px;border-radius:6px}button{background:#8ddcc4;cursor:pointer}img{max-width:100%;border-radius:10px}small{color:#b0becd}</style></head><body>
+<style>body{font:16px system-ui;background:#101821;color:#e7eef8;max-width:1150px;margin:32px auto;padding:0 20px}section{background:#1b2836;padding:20px;border-radius:12px;margin:16px 0}button,input,select{padding:10px;margin:6px;border-radius:6px}button{background:#8ddcc4;cursor:pointer}img{max-width:100%;border-radius:10px}small{color:#b0becd}.reference-gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:16px}.reference-card{margin:0;padding:12px;background:#101821;border-radius:8px;overflow-wrap:anywhere}.reference-card img{display:block;width:100%;image-rendering:pixelated}.reference-card figcaption{margin-top:10px}</style></head><body>
 <h1>DINOv3 · Case similarity</h1><p><a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a></p><p>Choose a case to highlight visually similar patches in a camera frame or target picture.</p>
 <section><h2>1. Reference groups</h2><form id="upload"><input name="case" placeholder="Case name, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}"><input name="images" type="file" accept="image/*" multiple required><button>Add pictures to case</button></form>
 <select id="cases"><option value="">Select case</option></select><button id="select">Use selected case</button><p><small>Use tightly cropped reference pictures of the object of interest. Backgrounds in reference pictures can also match.</small></p></section>
+<section><h2>範例照片 · Patch 分割示意圖</h2><p id="reference-status" role="status">請選擇 case 以查看每張範例照片。</p><p><small>黃色線為模型輸入的 patch 網格；右側與底部不足一格時，自動複製邊緣像素補齊。</small></p><div id="reference-gallery" class="reference-gallery"></div></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
 <section><h2>Latest heatmap result</h2><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"><p><small>Original-resolution patch scores are mapped to image pixels before thresholding. Final boxes are merged by IoU; the highest-scoring box has a red outline.</small></p><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="Heatmap appears after a case and target are available"><p><small>Fixed cosine similarity scale: 0 (dark blue) → 0.5 (green) → 1 (red). Similarity is not a detection probability.</small></p></section>
@@ -572,6 +614,17 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</
 <script>
 const el=id=>document.getElementById(id);
 let thresholdDirty=false;
+let referenceKey='',referenceVersion=0;
+async function refreshReferences(group,revision,stride){
+ const key=JSON.stringify([group,revision,stride]);if(key===referenceKey)return;referenceKey=key;const version=++referenceVersion;
+ el('reference-gallery').replaceChildren();el('reference-status').textContent=group?'載入 '+group+' 的範例照片…':'請選擇 case 以查看每張範例照片。';if(!group)return;
+ try{const r=await fetch('/api/references?case='+encodeURIComponent(group));const d=await r.json();if(version!==referenceVersion)return;if(!r.ok)throw Error(d.error||r.statusText);
+ el('reference-status').textContent=d.case+' · '+d.images.length+' 張範例照片 · 每格 '+d.patch_size+' × '+d.patch_size+' 像素';
+ for(const item of d.images){const card=document.createElement('figure');card.className='reference-card';const caption=document.createElement('figcaption');caption.textContent=item.name;
+ if(item.error){const error=document.createElement('p');error.textContent=item.error;card.append(error);}else{const image=document.createElement('img');image.loading='lazy';image.alt=item.name+' 的 patch 分割示意圖';image.src='/api/references/grid/'+encodeURIComponent(group)+'/'+encodeURIComponent(item.name)+'?v='+encodeURIComponent(item.version);image.onerror=()=>{if(version===referenceVersion)caption.textContent+=' · 示意圖載入失敗';};card.append(image);const details=document.createElement('p');details.textContent='原圖 '+item.original_size.join(' × ')+' → 模型輸入 '+item.size.join(' × ')+' · '+item.rows+' 列 × '+item.columns+' 欄（'+item.rows*item.columns+' patches）';card.append(details);}card.append(caption);el('reference-gallery').append(card);}
+ }catch(e){if(version===referenceVersion){el('reference-status').textContent=e.message;referenceKey='';}}
+}
+el('cases').onchange=()=>{referenceKey='';refresh().catch(()=>{});};
 el('threshold').oninput=()=>{thresholdDirty=true;el('threshold-value').textContent=Number(el('threshold').value).toFixed(2);};
 el('threshold').onchange=async()=>{await send('/api/threshold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({threshold:Number(el('threshold').value)})});thresholdDirty=false;};
 async function send(url, options){el('error').textContent='';try{const r=await fetch(url,options);const d=await r.json();if(!r.ok)throw Error(d.error||r.statusText);await refresh();}catch(e){el('error').textContent=e.message;}}
@@ -579,7 +632,7 @@ el('upload').onsubmit=e=>{e.preventDefault();send('/api/cases',{method:'POST',bo
 el('select').onclick=()=>send('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case:el('cases').value})});
 el('target').onsubmit=e=>{e.preventDefault();let f=new FormData(e.target);f.set('source','upload');send('/api/source',{method:'POST',body:f});};
 el('camera').onclick=()=>{let f=new FormData();f.set('source','camera');send('/api/source',{method:'POST',body:f});};
-async function refresh(){const r=await fetch('/api/status');const d=await r.json();el('debug-section').hidden=!d.debug_visualization;if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
+async function refresh(){const r=await fetch('/api/status');const d=await r.json();el('debug-section').hidden=!d.debug_visualization;if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}refreshReferences(s.value||d.selected,d.reference_revision,d.reference_stride);const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
 let debugBusy=false;
 async function refreshDebug(){if(debugBusy||el('debug-section').hidden)return;debugBusy=true;try{const r=await fetch('/debug/'+el('debug-view').value+'.jpg');const im=el('debug-image');if(r.status===200){const old=im.src;im.src=URL.createObjectURL(await r.blob());if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{const old=im.src;im.removeAttribute('src');if(old.startsWith('blob:'))URL.revokeObjectURL(old);}}finally{debugBusy=false;}}
 el('debug-view').onchange=()=>refreshDebug().catch(()=>{});

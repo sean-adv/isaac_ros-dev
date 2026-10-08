@@ -2,8 +2,9 @@ dinov3_cases:
   ros__parameters:
     # Reference image long-edge limit. 0 keeps the original resolution.
     # Aspect ratio is preserved and smaller images are not enlarged.
-    reference_max_side: 720
+    # Can not to big (640) or the border will be cropped and the recognize will be wrong.
+    reference_max_side: 192
     # Add target context before inference; crop features back to original coordinates.
     # Padding must be a multiple of the model feature stride; 0 disables it.
-    target_padding: 128
+    target_padding: 0
     target_padding_mode: reflect

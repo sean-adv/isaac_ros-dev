@@ -12,7 +12,7 @@ from PIL import Image
 from transformers import DINOv3ConvNextConfig, DINOv3ConvNextModel, DINOv3ViTImageProcessorFast
 from dinov3_cases.node import Encoder, CaseNode, case_path, render_heatmap
 from dinov3_cases.boxes import similarity_to_bboxes, detection_message
-from dinov3_cases.patches import inference_dtype
+from dinov3_cases.patches import inference_dtype, prepare_reference
 from std_msgs.msg import Header
 from sensor_msgs.msg import CameraInfo
 
@@ -35,6 +35,12 @@ with tempfile.TemporaryDirectory() as tmp:
     picture = Image.fromarray(np.random.default_rng(1).integers(0, 255, (96, 192, 3), dtype=np.uint8))
     features = encoder.encode(picture)
     assert features.shape == (18, 32)
+    # Bottom/right remainders enter complete patches in the real encoder.
+    partial = picture.crop((0, 0, 191, 95))
+    padded_reference = prepare_reference(partial, 0, 32)
+    assert padded_reference.size == (192, 96)
+    assert encoder.encode(padded_reference).shape == (18, 32)
+    np.testing.assert_array_equal(np.asarray(padded_reference)[:95, :191], partial)
     scores, grid, patches = encoder.similarity_map(picture, features, debug=True)
     assert scores.shape == (96, 192) and np.isfinite(scores).all()
     assert grid == (3, 6) and patches.shape == (3, 6)

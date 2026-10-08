@@ -52,7 +52,7 @@ docker exec -it my_isaac_ros_dev /workspaces/isaac_ros-dev/dinov3_ws/run.sh
 Open http://localhost:8090 on the Jetson. For remote use, forward port 8090 over SSH. The service binds to loopback by default. `-p host:=0.0.0.0` exposes the unauthenticated interface and should only be used on a trusted network.
 
 1. Enter a case name and select multiple pictures, then click **Add pictures to case**. Repeat for additional cases.
-2. Select a case and click **Use selected case**.
+2. Select a case and click **Use selected case**. 選擇 case 後，「範例照片 · Patch 分割示意圖」會顯示每張照片依 `reference_max_side` 縮放並補齊後的實際模型輸入網格、尺寸與 patch 數量。黃色線為 patch 邊界；此功能不需開啟 debug，也不需相機或目標圖。
 3. Use the default ROS camera, or upload a target picture.
 4. 相機預覽獨立顯示原始 RGB，選擇 case 後結果影像顯示 similarity heatmap 與所有合格連通區的 bbox。紅色表示較高 cosine similarity，並非偵測機率。
 
@@ -80,7 +80,7 @@ Reference groups persist in `/workspaces/isaac_ros-dev/dinov3_cases_data/<case>/
 
 Parameters: `cases_dir`, `image_topic`, `model_id`, `inference_backend` (`trt` / `torch`, default `trt`), `engine_path`, `inference_hz` (20.0), `max_reference_patches` (8192), `reference_max_side` (config default 640; 0 disables resizing), `host` (127.0.0.1), `port` (8090).
 
-Target images retain their original resolution. `reference_max_side` limits the reference long edge while preserving aspect ratio without enlarging small images; set it to 0 to retain reference resolution. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No letterboxing or tiling is applied. Targets receive configurable context padding before inference; their features are cropped back to the original patch grid before matching. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
+Target images retain their original resolution. `reference_max_side` limits the reference long edge while preserving aspect ratio without enlarging small images; set it to 0 to retain reference resolution. References replicate bottom/right edge pixels after resizing to complete the model patch grid. Each model forward takes one image, normalized with the model processor's rescale/mean/std settings. No letterboxing or tiling is applied. Targets receive configurable context padding before inference; their features are cropped back to the original patch grid before matching. The reference feature bank is bounded and rebuilt when switching to changed case data. Only the latest camera frame is processed. Reference files stay local; Hugging Face is contacted to download model files.
 
 ### Target padding 設定
 
@@ -113,7 +113,7 @@ dinov3_cases:
 
 如需臨時覆寫，仍可使用 `./run.sh --ros-args -p reference_max_side:=480`；命令列值優先於 config。
 
-例如在 `reference_max_side: 640` 設定下，800×600 → 640×480、600×900 → 427×640；300×200 維持原尺寸。縮放後任一邊若小於 ViT patch size 16，會回報錯誤；請提高上限或調整過於狹長的參考圖。`max_reference_patches` 仍限制縮放後的參考特徵總量。
+例如在 `reference_max_side: 640` 設定下，800×600 → 640×480、600×900 → 427×640；300×200 維持原尺寸。縮放後任一邊若小於 ViT patch size 16，會回報錯誤；請提高上限或調整過於狹長的參考圖。縮放後右側、底部不足一格時會自動複製邊緣像素 padding，保留原有像素和 patch 起點；padding 後尺寸最多比縮放尺寸多 15 像素（ViT stride 16）。`max_reference_patches` 仍限制補齊後的參考特徵總量。
 
 ## Environment / rebuild
 
@@ -145,9 +145,9 @@ Use the **Cosine threshold** slider below the live preview. Release the slider t
 
 原始 RGB → target context padding → rescale / normalization → DINOv3 單張全圖 forward → 裁回原圖 patch grid → reference cosine similarity → patch 分數映射回原圖 pixel → threshold → closing → hole filling → connected components → 面積過濾 → bbox → 可選 RGB 外圍微調 → bbox IoU 合併。
 
-目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。目標圖預設四周 reflect 補 64 pixels，forward 後先裁回原圖 patch grid，再計算 similarity；reference 不補邊。兩者不做 letterbox、不拆 tiles。固定 batch size 為 1，ViT-H+ 與 ViT-B 都以 16×16 pixel patch 產生空間 tokens；CLS 與 4 個 register tokens 不參與比對。ViT-H+ 每個特徵為 1280 維，ViT-B 為 768 維。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
+目標圖不縮放；參考圖依 `reference_max_side` 等比例縮小。目標圖預設四周 reflect 補 64 pixels，forward 後先裁回原圖 patch grid，再計算 similarity；reference 在縮放後僅於右側、底部複製邊緣像素，補齊至 feature stride 的整數倍。兩者不做 letterbox、不拆 tiles。固定 batch size 為 1，ViT-H+ 與 ViT-B 都以 16×16 pixel patch 產生空間 tokens；CLS 與 4 個 register tokens 不參與比對。ViT-H+ 每個特徵為 1280 維，ViT-B 為 768 維。參考圖保留全部空間特徵，之後仍由 `max_reference_patches` 限制 bank 大小。
 
-兩個模型的 feature grid 都是 `H // 16 × W // 16`。例如 1920×1080 會產生 67×120=8040 個空間特徵；最下方 8 pixel 不形成 patch。熱圖只將分數插值回完整 patch grid 覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 16 pixel 時回報錯誤。
+範例照片會先補齊到 16 的整數倍，所有原有邊緣像素都會進入完整 patch。目標圖的兩個模型 feature grid 都是 `H // 16 × W // 16`。例如 1920×1080 會產生 67×120=8040 個空間特徵；最下方 8 pixel 不形成 patch。熱圖只將分數插值回完整 patch grid 覆蓋的區域，其餘右／下側像素記為 -1（未覆蓋），不拉伸分數去填補。寬或高小於 16 pixel 時回報錯誤。
 
 整張圖在同一次 forward 中參與 attention。全圖解析度越高，GPU 記憶體與推論時間可能大幅增加。CUDA 支援 BF16 時使用 BF16，其他情況使用 FP32；similarity 使用 FP32，檢查 features 與輸出是否含 NaN/Inf。網頁顯示 patch grid、batch 1 與實際精度。
 
