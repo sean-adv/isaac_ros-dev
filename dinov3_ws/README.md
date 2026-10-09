@@ -7,18 +7,37 @@
 ```bash
 cd /workspaces/isaac_ros-dev/dinov3_ws
 ./run_camera.sh
-# 另一個終端；沿用現有 DINOv3 TensorRT engine
-./run.sh --model vitb16
-# 或使用原本預設的 ViT-H+
+# 另一個終端；預設 Grounding DINO TRT + DINOv3 ViT-S/16 TRT
 ./run.sh
+# 明確指定 ViT-S/16
+./run.sh --model vits16
+# 仍可選用既有 ViT-B/16、ViT-H/16+
+./run.sh --model vitb16
+./run.sh --model vith16plus
 ```
 
-首次啟動會從 Hugging Face 下載公開的 `IDEA-Research/grounding-dino-tiny` 至 `dinov3_ws/artifacts/grounding_dino`。Grounding DINO 使用 FP32 PyTorch 與原生算子，DINOv3 使用既有 TensorRT／PyTorch 後端；無需安裝 GroundingDINO 原始碼或編譯自訂 CUDA extension。模型載入失敗會在網頁顯示原因。可用 `grounding_model_id` 指定本機模型目錄，並以 `grounding_cache_dir` 覆寫快取位置。
+預設使用 [wingdzero/GroundingDINO-TensorRT-and-ONNX-Inference](https://github.com/wingdzero/GroundingDINO-TensorRT-and-ONNX-Inference) 的 Swin-T OGC 權重，依上游外部文字 mask 的匯出方法建立 FP16 TensorRT 引擎；DINOv3 使用 `facebook/dinov3-vits16-pretrain-lvd1689m` 的 BF16 TensorRT 引擎（RoPE 使用 FP32、輸入輸出 FP32）。Grounding DINO 的 tokenizer／結果後處理使用 Hugging Face 實作，模型載入失敗會在網頁顯示原因。
+
+Grounding DINO 圖片直接縮放為固定 800×1200（長寬比可能改變），RGB/ImageNet normalization，輸出框映射回原圖。預設提示詞 `medicine bottle. medicine box. bottle. box.` 共 12 tokens；預設使用第二次匯出的 12-token engine，較短提示詞會補齊 padding，超過 12 tokens 會拒絕。可即時修改容量內的提示詞與門檻；增加文字容量需重新編譯。DINOv3 保留動態尺寸範圍 32–2560，預設引擎針對 448×448 最佳化。ViT-S/16 特徵維度為 384。
+
+```bash
+# 使用獨立 groundingdino_venv 與 wingdzero 上游腳本重新匯出／编譯
+bash build_grounding_dino_wingdzero_trt.sh
+# 以較長提示詞重新設定 engine 的固定文字容量
+bash build_grounding_dino_wingdzero_trt.sh 'medicine bottle. medicine box. bottle. box. package.'
+# DINOv3 ViT-S/16 的重建方法
+../dinov3_venv/bin/python export_dinov3_vits_dynamic.py
+bash build_dinov3_vits_trt.sh
+```
+
+預設 Grounding DINO engine 為第二次匯出的 `artifacts/tensorrt/grounding_dino_wingdzero_fp16.engine`（12 tokens），使用藥瓶／藥盒提示詞。`build_grounding_dino_wingdzero_trt.sh` 可重建該模型。第一次匯出的 4-token engine 保留於 `artifacts/tensorrt/grounding_dino_wingdzero_car_fp16.engine`。processor 小檔案位於 `artifacts/grounding_dino_wingdzero_processor`。原社群 FP32 engine 與其建置腳本仍可透過引擎路徑和 model_id 參數使用。TensorRT 引擎需在部署 GPU／相容 TensorRT 版本建置。
+
+獨立轉換 venv 為 `../groundingdino_venv`；執行 ROS／DINOv3 流程仍使用 `../dinov3_venv`。`./run.sh` 已切換至新的 Grounding DINO engine；如需 PyTorch Grounding DINO，可用 `./run.sh --ros-args -p grounding_backend:=torch`。DINOv3 可獨立使用 `-p inference_backend:=torch`。
 
 開啟 <http://localhost:8090>：
 
 1. 每個 case 放同一商品的多角度裁切照片，例如 `medicine_A`、`medicine_B`。所有非空 case 都參與辨識；「檢視此圖庫」僅選擇預覽圖片。
-2. 在文字提示輸入 `medicine bottle. medicine box. bottle. box.`，按「套用設定」。英文類別用句點分隔；提示詞不得超過模型的 256 token 上限。
+2. 在文字提示輸入 `medicine bottle. medicine box. bottle. box.`，按「套用設定」。英文類別用句點分隔；提示詞不得超過目前 engine 的 12 token 容量（包含特殊 tokens 與句點）。
 3. 使用 ROS 相機或上傳目標圖。每個框顯示商品名稱、偵測文字、`det` 偵測分數及 `sim` 圖庫相似度。
 4. 調整偵測門檻、文字門檻、辨識相似度與前兩名最小差距。設定立即生效並重新處理靜態目標，僅保存至當前程序；永久設定請修改 `config/dinov3_cases.yaml`。
 
@@ -54,6 +73,8 @@ grounded 模式的頁面底部預設顯示每個 Grounding bbox 的 DINOv3 熱�
 | 參數 | 預設 | 用途 |
 | --- | --- | --- |
 | `pipeline` | `grounded` | `grounded` 新流程；`heatmap` 舊全圖流程 |
+| `grounding_backend` | `trt` | Grounding DINO 推論後端：`trt`／`torch` |
+| `grounding_engine_path` | `artifacts/tensorrt/grounding_dino_wingdzero_fp16.engine` | Grounding DINO 引擎路徑 |
 | `grounding_prompt` | `medicine bottle. medicine box. bottle. box.` | 文字提示 |
 | `grounding_box_threshold` | 0.30 | 候選框分數門檻 |
 | `grounding_text_threshold` | 0.25 | 文字片語門檻 |
@@ -73,11 +94,11 @@ grounded 模式的頁面底部預設顯示每個 Grounding bbox 的 DINOv3 熱�
 {"prompt":"medicine bottle. medicine box.","box_threshold":0.3,"text_threshold":0.25,"recognition_threshold":0.75,"margin":0.05}
 ```
 
-`GET /api/status` 增加 `pipeline`、`grounding`、`grounding_model_id`、`object_max_side`。
+`GET /api/status` 增加 `pipeline`、`grounding`、`grounding_model_id`、`grounding_backend`、`object_max_side`。
 `GET /api/detections` 的每個物體包含 `bbox`（原圖半開 XYXY）、`area`（矩形面積）、`label`、`candidate`（最接近商品）、`score`（DINOv3 相似度或 null）、`margin`、`reason`、`detection_label`、`detection_score`、`pose`、`pose_error`。
 有可用參考圖時另含 `reference`（case、name）。`GET /api/object_visualizations` 回傳逐物體尺寸、視圖清單與 `revision`；影像使用 `/debug/objects/<revision>/<index>/<view>.jpg`。兩個端點皆可加上 `?reference_case=<標籤>`，未指定則使用自動模式。manifest 另回傳 `reference_cases`、`reference_case`、`ready`；物體資料另含 `comparison_case`、`comparison_score`、`comparison_reference`、`comparison_reference_count`。不存在或無圖片的標籤回傳 400。
 
-快取保留最近三幀的 ROI 特徵與當時的參考圖庫，標籤比較在請求時產生；每幀最多保存自動模式及兩個指定標籤的影像。設定／來源／圖庫變更會清空；已失效 revision 回傳 410，頁面會重新取得最新結果。切換標籤時會清除舊標籤卡片，快速切換所產生的過期請求不會覆蓋新的選擇。
+快取保留最近三個已請求 revision 的 ROI 特徵與當時的參考圖庫，標籤比較在請求時產生；每幀最多保存自動模式及兩個指定標籤的影像。設定／來源／圖庫變更會清空；已失效 revision 回傳 410，頁面會重新取得最新結果。切換標籤時會清除舊標籤卡片，快速切換所產生的過期請求不會覆蓋新的選擇。
 
 - `/medicine_recognition/detections`：`Detection2DArray`；每個框的 `class_id` 是商品名稱或 `unknown`，`score` 是圖庫相似度（無圖庫為 0），不是 Grounding DINO 分數。無物體時發布空陣列。ID 是單幀編號。
 - `/medicine_recognition/debug_image` 與既有 `/dinov3/heatmap/overlay`：原圖加物體框與標籤，後者保留為顯示相容介面。
@@ -104,3 +125,46 @@ export PYTHONPATH="/workspaces/isaac_ros-dev/dinov3_ws/src/dinov3_cases:$PYTHONP
 原有全圖 patch 熱圖、深度姿態與圖片管理說明見 [HEATMAP_LEGACY.md](HEATMAP_LEGACY.md)。全圖熱圖／姿態功能需以 `./run.sh --ros-args -p pipeline:=heatmap` 啟動；舊預設值以實際 config 為準。
 
 DINOv3 模型授權／登入設定見 [舊版環境說明](HEATMAP_LEGACY.md#first-hugging-face-access)；TensorRT engine 建置見 [TENSORRT.md](TENSORRT.md)。
+
+
+## 即時延遲與效能
+
+預設 `inference_hz=0.0`：新影格直接喚醒推論，處理最新影格，不追趕舊影格。
+若指定正值，採用每輪開始時間的頻率上限；處理已超時就直接繼續，不再額外等待。
+相機訂閱使用 BEST_EFFORT、KEEP_LAST depth=1。grounded 模式不訂閱深度與校正資料；heatmap 估姿仍保留。
+
+相機預覽 `/camera.mjpg` 與辨識結果 `/overlay.mjpg` 都在新 JPEG 完成時通知 HTTP 串流，
+移除原本 15 FPS 預覽與約 4 FPS 結果圖片輪詢限制。`/overlay.jpg` 保留供單張擷取。
+串流只有最新影格，不建立應用層的每客戶端影格佇列；TCP、代理與瀏覽器仍可能緩衝。
+`jpeg_quality` 預設 80（1–100），`preview_max_width` 預設 960；結果圖保留原始解析度。
+這些設定不改變模型輸入與辨識門檻。
+
+逐物體診斷圖片預設不更新，勾選「開啟診斷圖片」後才按需產生並快取，沿用既有特徵，不重跑模型。
+開啟診斷仍會消耗 CPU/GPU。grounded 的 ROS 輸出改由獨立執行緒發布，
+只保留最新待發布結果，且只有影像 topic 有訂閱者時才轉換 ROS Image。
+慢速 ROS 訂閱者可能看到跳幀，目的是保留即時性；相機接收與瀏覽器不必等待 DDS 發布。
+
+`/api/status.performance` 提供 grounded 的 `detect_ms`（含輸入轉換）、`recognize_ms`、
+`render_ms`、`processing_ms`、`result_fps`（相鄰結果完成間隔倒數）及 `callback_to_result_ms`。
+後者是 Python 相機 callback 到 JPEG 就緒的時間，**不含相機曝光、DDS callback 前的傳輸、網路與瀏覽器顯示時間**。
+上傳静態圖片時該欄位為 null；FPS 是最近兩筆結果的產出速率，停流時不代表仍有更新。
+
+重啟 `./dinov3_ws/run.sh` 並重新整理瀏覽器即可使用新流程。可透過
+`./dinov3_ws/run.sh --ros-args -p inference_hz:=0.0 -p jpeg_quality:=80` 指定參數。
+實際上限仍受 Grounding DINO、逐 ROI DINOv3 運算、JPEG 編碼及顯示網路限制；需在真實相機與目標物數量下量測。
+
+TensorRT 真實 GPU 數值比對（不同提示詞、直／橫式影像、DINOv3 動態尺寸）：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ../dinov3_venv/bin/activate
+source install/setup.bash
+python tests/check_grounding_trt.py
+python tests/check_grounded_trt_pipeline.py
+```
+
+數值報告輸出至 `artifacts/tensorrt/verification_grounding_community_vits16.json`，實際雙 TRT ROS／HTTP 流程報告為 `integration_grounding_community_vits16.json`。數值比對使用 ONNX Runtime 執行原始社群 ONNX 與修補版本，檢查兩者輸出相等，再與 TensorRT 最終接受的框、分數、標籤比對。使用一張參考圖、不同提示詞／方向。Grounding DINO 的 two-stage top-k 對數值擾動敏感，低信心候選 query 不保證逐項一致，原始 tensor 最大差異仍保留於報告。這些檢查不代表完整商品偵測／辨識準確率評估。
+
+## Wingdzero TRT 驗證
+
+相關單元測試 22 項通過，既有 ROS/HTTP 回歸驗證通過。`tests/check_grounding_wingdzero_trt.py` 用實際藥品圖片比對完整提示詞、較短補齊提示詞與旋轉圖片；NMS 後偵測框配對 IoU 最小約 0.9989，信心分數最大誤差約 0.00265。`tests/check_grounded_trt_pipeline.py` 已驗證新 Grounding DINO TRT → DINOv3 ViT-S/16 TRT → 圖庫辨識、物件預覽、較短提示詞更新與超長提示詞拒絕。結果存於 `artifacts/tensorrt/verification_grounding_wingdzero.json` 和 `integration_grounding_wingdzero_vits16.json`。此檢查不是完整資料集精度評估。

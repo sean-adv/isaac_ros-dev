@@ -1,6 +1,8 @@
 dinov3_cases:
   ros__parameters:
     pipeline: grounded
+    grounding_backend: trt
+    grounding_engine_path: /workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/grounding_dino_wingdzero_fp16.engine
     grounding_model_id: IDEA-Research/grounding-dino-tiny
     grounding_prompt: 'medicine bottle. medicine box. bottle. box.'
     grounding_box_threshold: 0.3

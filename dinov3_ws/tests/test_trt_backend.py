@@ -29,9 +29,10 @@ def test_fixed_engine_does_not_accept_native_rectangular_image():
 
 
 def test_selectable_vit_model_specs():
-    assert set(MODEL_VARIANTS) == {'vith16plus', 'vitb16'}
+    assert set(MODEL_VARIANTS) == {'vith16plus', 'vitb16', 'vits16'}
     assert model_variant('vith16plus')['hidden_size'] == 1280
     assert model_variant('vitb16')['hidden_size'] == 768
+    assert model_variant('vits16')['hidden_size'] == 384
     for variant, spec in MODEL_VARIANTS.items():
         assert model_spec_for_id(spec['model_id']) == (variant, spec)
         assert spec['patch_size'] == 16 and spec['num_register_tokens'] == 4

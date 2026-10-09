@@ -16,10 +16,11 @@ from PIL import Image, ImageOps
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rcl_interfaces.msg import ParameterDescriptor
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image as ImageMsg
 from sensor_msgs.msg import CameraInfo
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Header
 from transformers import AutoModel, AutoImageProcessor
 from werkzeug.serving import make_server
 
@@ -64,6 +65,9 @@ class Encoder:
                  target_padding=0, target_padding_mode='reflect'):
         if backend not in ('torch', 'trt'):
             raise ValueError('inference_backend must be torch or trt.')
+        from .trt_backend import MODEL_VARIANTS
+        cache_dir = next((spec.get('cache_dir') for spec in MODEL_VARIANTS.values()
+                          if spec['model_id'] == model_id), None)
         self.backend = backend
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if backend == 'trt':
@@ -74,12 +78,13 @@ class Encoder:
             self.description = self.model.description
         else:
             self.dtype = inference_dtype(self.device)
-            self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype).to(self.device).eval()
+            self.model = AutoModel.from_pretrained(model_id, dtype=self.dtype, cache_dir=cache_dir).to(self.device).eval()
             self.description = f'PyTorch {str(self.dtype).removeprefix("torch.")}'
         validate_target_padding(target_padding, target_padding_mode, feature_stride(self.model))
         self.target_padding = target_padding
         self.target_padding_mode = target_padding_mode
-        self.processor = AutoImageProcessor.from_pretrained(model_id, local_files_only=backend == 'trt')
+        self.processor = AutoImageProcessor.from_pretrained(
+            model_id, cache_dir=cache_dir, local_files_only=backend == 'trt')
 
     def spatial_features(self, image):
         pixels = torch.from_numpy(np.array(image, dtype=np.uint8)).permute(2, 0, 1).to(self.device)
@@ -129,7 +134,9 @@ class CaseNode(Node):
         super().__init__('dinov3_cases')
         defaults = dict(cases_dir='/workspaces/isaac_ros-dev/dinov3_cases_data',
                         pipeline='grounded', grounding_model_id='IDEA-Research/grounding-dino-tiny',
-                        grounding_cache_dir='/workspaces/isaac_ros-dev/dinov3_ws/artifacts/grounding_dino',
+                        grounding_cache_dir='/workspaces/isaac_ros-dev/dinov3_ws/artifacts/huggingface',
+                        grounding_backend='trt',
+                        grounding_engine_path='/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/grounding_dino_wingdzero_fp16.engine',
                         grounding_prompt=DEFAULT_PROMPT, grounding_box_threshold=0.3,
                         grounding_text_threshold=0.25, grounding_nms_iou=0.5,
                         grounding_max_detections=20, recognition_threshold=0.75,
@@ -139,7 +146,8 @@ class CaseNode(Node):
                         depth_topic='/camera/depth/image_raw',
                         camera_info_topic='/camera/color/camera_info',
                         depth_sync_tolerance=0.05, pose_depth_band=0.04, axis_length=0.05,
-                        port=8090, host='127.0.0.1', inference_hz=20.0,
+                        port=8090, host='127.0.0.1', inference_hz=0.0,
+                        preview_max_width=960, jpeg_quality=80,
                         max_reference_patches=8192, cosine_threshold=0.65,
                         min_area=2048, bbox_padding=1, debug_visualization=False,
                         **{k: v for k, v in vars(BoxConfig()).items()
@@ -171,6 +179,10 @@ class CaseNode(Node):
         validate_target_padding(self.param('target_padding'), self.param('target_padding_mode'))
         if self.param('reference_max_side') < 0:
             raise ValueError('reference_max_side must be nonnegative.')
+        if not np.isfinite(self.param('inference_hz')) or self.param('inference_hz') < 0:
+            raise ValueError('inference_hz must be finite and nonnegative; 0 is unlimited.')
+        if not 1 <= self.param('jpeg_quality') <= 100 or self.param('preview_max_width') < 1:
+            raise ValueError('jpeg_quality must be 1–100 and preview_max_width must be positive.')
         self.root = Path(self.param('cases_dir')).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.bridge = CvBridge()
@@ -178,6 +190,12 @@ class CaseNode(Node):
             if not np.isfinite(self.param(key)) or self.param(key) <= 0:
                 raise ValueError(f'{key} must be finite and positive.')
         self.lock = threading.Lock()
+        self.image_changed = threading.Event()
+        self.preview_changed = threading.Event()
+        self.stream_changed = threading.Condition(self.lock)
+        self.performance = {}
+        self.pending_publication = None
+        self.publish_changed = threading.Event()
         self.depth_frames = deque(maxlen=90)
         self.camera_info = None
         self.stop = threading.Event()
@@ -214,14 +232,19 @@ class CaseNode(Node):
         self.recognition_pub = self.create_publisher(Detection2DArray, '/medicine_recognition/detections', 10)
         self.recognition_debug_pub = self.create_publisher(ImageMsg, '/medicine_recognition/debug_image', 1)
         self.pose_pub = self.create_publisher(PoseStamped, '/medicine_recognition/pose', 10)
-        self.create_subscription(ImageMsg, self.param('image_topic'), self.on_image, qos_profile_sensor_data)
-        self.create_subscription(ImageMsg, self.param('depth_topic'), self.on_depth, qos_profile_sensor_data)
-        self.create_subscription(CameraInfo, self.param('camera_info_topic'), self.on_camera_info, qos_profile_sensor_data)
+        image_qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
+                               reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(ImageMsg, self.param('image_topic'), self.on_image, image_qos)
+        if self.param('pipeline') == 'heatmap':
+            self.create_subscription(ImageMsg, self.param('depth_topic'), self.on_depth, qos_profile_sensor_data)
+            self.create_subscription(CameraInfo, self.param('camera_info_topic'), self.on_camera_info, qos_profile_sensor_data)
         self.app = self.make_app()
         self.server = make_server(self.param('host'), self.param('port'), self.app, threaded=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.preview_worker = threading.Thread(target=self.run_preview, daemon=True)
         self.preview_worker.start()
+        self.publisher_worker = threading.Thread(target=self.run_publications, daemon=True)
+        self.publisher_worker.start()
         self.worker = threading.Thread(target=self.run_worker, daemon=True)
         self.worker.start()
         self.get_logger().info(f"Browser: http://{self.param('host')}:{self.param('port')}")
@@ -266,28 +289,74 @@ class CaseNode(Node):
             self.camera_frame = msg
             self.camera_seq += 1
             self.camera_received_at = time.monotonic()
+            self.preview_changed.set()
             if self.source != 'camera':
                 return
             self.frame = msg
             self.frame_seq += 1
+            self.image_changed.set()
+
+    def worker_ticks(self):
+        """Wake on input; rate limit start-to-start, never sleep after processing."""
+        deadline = 0.0
+        while not self.stop.is_set():
+            self.image_changed.wait(.1)  # Also recheck uploads, settings and gallery changes.
+            self.image_changed.clear()
+            if self.stop.wait(max(0., deadline - time.monotonic())):
+                return
+            hz = float(self.param("inference_hz"))
+            deadline = time.monotonic() + (1 / hz if hz > 0 else 0)
+            yield
+
+    def run_publications(self):
+        """DDS output cannot stall inference; pending output is a single latest slot."""
+        while not self.stop.is_set():
+            self.publish_changed.wait(.1)
+            self.publish_changed.clear()
+            with self.lock:
+                pending, self.pending_publication = self.pending_publication, None
+                generation = self.generation
+            if pending is None:
+                continue
+            overlay, detections, header, gen = pending
+            if gen != generation:
+                continue
+            try:
+                if header is None:
+                    header = Header(stamp=self.get_clock().now().to_msg())
+                if self.recognition_pub.get_subscription_count():
+                    self.recognition_pub.publish(recognition_message(detections, header))
+                image_publishers = [pub for pub in (self.pub, self.recognition_debug_pub)
+                                    if pub.get_subscription_count()]
+                if image_publishers:
+                    out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
+                    out.header = header
+                    for publisher in image_publishers:
+                        publisher.publish(out)
+            except Exception as error:
+                self.get_logger().error(f'ROS result publication failed: {error}')
 
     def run_preview(self):
         processed = -1
-        while not self.stop.wait(1 / 15):
+        while not self.stop.is_set():
+            self.preview_changed.wait(.1)
+            self.preview_changed.clear()
             with self.lock:
                 frame, seq = self.camera_frame, self.camera_seq
             if frame is None or seq == processed:
                 continue
             try:
                 bgr = self.bridge.imgmsg_to_cv2(frame, desired_encoding='bgr8')
-                if bgr.shape[1] > 960:
-                    bgr = cv2.resize(bgr, (960, round(bgr.shape[0] * 960 / bgr.shape[1])))
-                ok, data = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                width = max(1, int(self.param('preview_max_width')))
+                if bgr.shape[1] > width:
+                    bgr = cv2.resize(bgr, (width, round(bgr.shape[0] * width / bgr.shape[1])))
+                ok, data = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, self.param('jpeg_quality')])
                 if not ok:
                     raise ValueError('Could not encode camera frame')
                 with self.lock:
                     self.preview_jpeg = data.tobytes()
                     self.preview_error = None
+                    self.stream_changed.notify_all()
             except Exception as e:
                 with self.lock:
                     self.preview_error = str(e)
@@ -296,6 +365,14 @@ class CaseNode(Node):
     def make_app(self):
         app = Flask(__name__)
         app.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024
+
+        @app.after_request
+        def wake_after_update(response):
+            if request.method != 'GET':
+                self.image_changed.set()
+                with self.stream_changed:
+                    self.stream_changed.notify_all()
+            return response
 
         def images_changed(group):
             with self.lock:
@@ -325,8 +402,12 @@ class CaseNode(Node):
             with self.lock:
                 age = None if self.camera_received_at is None else time.monotonic() - self.camera_received_at
                 return jsonify(cases=cases, selected=self.selected, source=self.source, status=self.status, threshold=self.threshold,
+                               performance=self.performance, overlay_ready=self.jpeg is not None,
                                pipeline=self.param('pipeline'), grounding=self.grounding_settings,
                                grounding_model_id=self.param('grounding_model_id'),
+                               grounding_backend=self.param('grounding_backend'),
+                               grounding_engine_path=self.param('grounding_engine_path'),
+                               grounding_text_token_limit=getattr(self, 'grounding_text_token_limit', None),
                                object_max_side=self.param('object_max_side'),
                                reference_revision=self.generation, reference_stride=self.reference_stride,
                                inference_backend=self.param('inference_backend'),
@@ -388,6 +469,9 @@ class CaseNode(Node):
             with self.lock:
                 settings = {**self.grounding_settings, **payload}
                 settings['prompt'] = validate_settings(**settings)
+                detector = getattr(self, 'grounding_detector', None)
+                if detector is not None:
+                    detector.validate_prompt(settings['prompt'])
                 self.grounding_settings = settings
                 self.generation += 1
                 self.jpeg = None
@@ -483,20 +567,32 @@ class CaseNode(Node):
                 self.detections = []
             return jsonify(ok=True)
 
-        @app.get('/camera.mjpg')
-        def camera_stream():
+        def stream(attribute):
             def frames():
                 previous = None
-                while not self.stop.wait(1 / 15):
-                    with self.lock:
-                        data = self.preview_jpeg
-                        fresh = self.camera_received_at is not None and time.monotonic() - self.camera_received_at < 3
-                    if fresh and data is not None and data is not previous:
+                while not self.stop.is_set():
+                    with self.stream_changed:
+                        self.stream_changed.wait_for(
+                            lambda: self.stop.is_set() or getattr(self, attribute) is not previous,
+                            timeout=.5)
+                        data = getattr(self, attribute)
+                    if data is None or data is previous:
                         previous = data
-                        yield (b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
-                               + str(len(data)).encode() + b'\r\n\r\n' + data + b'\r\n')
+                        continue
+                    previous = data
+                    # No per-client frame queue: slow clients pick the newest result next.
+                    yield (b'--frame\r\nContent-Type: image/jpeg\r\nContent-Length: '
+                           + str(len(data)).encode() + b'\r\n\r\n' + data + b'\r\n')
             return Response(frames(), mimetype='multipart/x-mixed-replace; boundary=frame',
-                            headers={'Cache-Control': 'no-store'})
+                            headers={'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no'})
+
+        @app.get('/camera.mjpg')
+        def camera_stream():
+            return stream('preview_jpeg')
+
+        @app.get('/overlay.mjpg')
+        def overlay_stream():
+            return stream('jpeg')
 
         @app.get('/api/detections')
         def detections():
@@ -508,6 +604,8 @@ class CaseNode(Node):
             reference_case = request.args.get('reference_case', '')
             with self.lock:
                 revision, snapshot = self.object_debug_revision, self.object_debug_snapshot
+                if snapshot is not None and not any(v == revision for v, _ in self.object_debug_history):
+                    self.object_debug_history.append((revision, snapshot))
             if snapshot is None:
                 return jsonify(revision=revision, objects=[], reference_cases=[], reference_case='', ready=False)
             try:
@@ -565,7 +663,7 @@ class CaseNode(Node):
             self.status = f'{encoder.description} ready on {encoder.device}. Upload or select a case.'
         self.get_logger().info(self.status)
         processed = None
-        while not self.stop.wait(1 / max(.1, self.param('inference_hz'))):
+        for _ in self.worker_ticks():
             with self.lock:
                 name, gen, frame, seq = self.selected, self.generation, self.frame, self.frame_seq
                 threshold = self.threshold
@@ -638,7 +736,7 @@ class CaseNode(Node):
                             .5, (255, 255, 255), 1)
                 cv2.putText(overlay, f'{name} | cosine >= {threshold:.2f} | max {scores.max():.2f}',
                             (12, 28), cv2.FONT_HERSHEY_SIMPLEX, .6, (255,255,255), 2)
-                ok, data = cv2.imencode('.jpg', overlay)
+                ok, data = cv2.imencode('.jpg', overlay, [cv2.IMWRITE_JPEG_QUALITY, self.param('jpeg_quality')])
                 if not ok:
                     raise RuntimeError('JPEG encoding failed.')
                 with self.lock:
@@ -648,29 +746,30 @@ class CaseNode(Node):
                     self.debug_jpegs = debug_jpegs
                     self.detections = detections
                     self.overlay_at = time.monotonic()
+                    self.stream_changed.notify_all()
                     self.status = f'{name}: {len(paths)} references | {patch_grid[0]}×{patch_grid[1]} patches / batch 1 | {encoder.device} {encoder.description} | {time.monotonic()-start:.2f}s inference'
-                    out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
-                    raw = self.bridge.cv2_to_imgmsg(scores.astype(np.float32), encoding='32FC1')
-                    if header is not None:
-                        out.header = header
-                        raw.header = header
-                    else:
-                        out.header.stamp = self.get_clock().now().to_msg()
-                        raw.header = out.header
-                    self.pub.publish(out)
-                    self.raw_pub.publish(raw)
-                    recognition.header = out.header
-                    for detection in recognition.detections:
-                        detection.header = out.header
-                    self.recognition_pub.publish(recognition)
-                    if pose is not None:
-                        pose_msg = PoseStamped()
-                        pose_msg.header = out.header
-                        pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z = pose['position']
-                        q = pose_msg.pose.orientation
-                        q.x, q.y, q.z, q.w = pose['quaternion_xyzw']
-                        self.pose_pub.publish(pose_msg)
-                    self.recognition_debug_pub.publish(out)
+                out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
+                raw = self.bridge.cv2_to_imgmsg(scores.astype(np.float32), encoding='32FC1')
+                if header is not None:
+                    out.header = header
+                    raw.header = header
+                else:
+                    out.header.stamp = self.get_clock().now().to_msg()
+                    raw.header = out.header
+                self.pub.publish(out)
+                self.raw_pub.publish(raw)
+                recognition.header = out.header
+                for detection in recognition.detections:
+                    detection.header = out.header
+                self.recognition_pub.publish(recognition)
+                if pose is not None:
+                    pose_msg = PoseStamped()
+                    pose_msg.header = out.header
+                    pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z = pose['position']
+                    q = pose_msg.pose.orientation
+                    q.x, q.y, q.z, q.w = pose['quaternion_xyzw']
+                    self.pose_pub.publish(pose_msg)
+                self.recognition_debug_pub.publish(out)
                 processed = (gen, seq)
             except Exception as e:
                 with self.lock:
@@ -700,7 +799,13 @@ class CaseNode(Node):
                 self.backend_description = encoder.description
                 self.status = 'Loading Grounding DINO model…'
             detector = GroundingDetector(self.param('grounding_model_id'), encoder.device,
-                                         self.param('grounding_cache_dir') or None)
+                                         self.param('grounding_cache_dir') or None,
+                                         self.param('grounding_backend'), self.param('grounding_engine_path'))
+            with self.lock:
+                detector.validate_prompt(self.grounding_settings['prompt'])
+                self.grounding_detector = detector
+                config = getattr(getattr(detector, 'model', None), 'config', None)
+                self.grounding_text_token_limit = getattr(config, 'max_text_len', None)
         except Exception as error:
             with self.lock:
                 self.status = f'Model load failed: {type(error).__name__}: {error}'
@@ -711,16 +816,23 @@ class CaseNode(Node):
         next_gallery_scan = 0.
         gallery_revision = 0
         max_side = self.param('object_max_side')
-        while not self.stop.wait(1 / max(.1, self.param('inference_hz'))):
+        for _ in self.worker_ticks():
             with self.lock:
                 gen, frame, seq = self.generation, self.frame, self.frame_seq
                 settings = dict(self.grounding_settings)
+                received_at = self.camera_received_at if self.source == 'camera' else None
             try:
                 # Include filesystem changes even with an uploaded, otherwise static target.
                 if time.monotonic() >= next_gallery_scan or processed is None or processed[0] != gen:
                     if gallery.refresh(self.root, encoder, max_side, stride):
                         gallery_revision += 1
                     next_gallery_scan = time.monotonic() + 1.
+                with self.lock:
+                    if gen != self.generation:
+                        continue
+                    gen, frame, seq = self.generation, self.frame, self.frame_seq
+                    settings = dict(self.grounding_settings)
+                    received_at = self.camera_received_at if self.source == 'camera' else None
                 if frame is None:
                     with self.lock:
                         if gen == self.generation:
@@ -738,12 +850,13 @@ class CaseNode(Node):
                 proposals = detector.detect(image, settings['prompt'], settings['box_threshold'],
                                             settings['text_threshold'], self.param('grounding_nms_iou'),
                                             self.param('grounding_max_detections'))
+                detected_at = time.monotonic()
                 diagnostics = []
                 detections = recognize_objects(image, proposals, encoder, gallery, max_side, stride,
                                                settings['recognition_threshold'], settings['margin'],
-                                               diagnostics=diagnostics)
+                                               diagnostics=diagnostics, defer_diagnostics=True)
+                recognized_at = time.monotonic()
                 object_snapshot = ObjectVisualizationSnapshot(detections, diagnostics, gallery, max_side, stride)
-                object_items, object_jpegs = object_snapshot.render()
                 overlay = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
                 for index, item in enumerate(detections):
                     x0, y0, x1, y1 = item['bbox']
@@ -757,33 +870,33 @@ class CaseNode(Node):
                               max(text_height+6, y0-8))
                     cv2.putText(overlay, label, origin, font, font_scale, (0, 0, 0), 4, cv2.LINE_AA)
                     cv2.putText(overlay, label, origin, font, font_scale, color, thickness, cv2.LINE_AA)
-                ok, jpeg = cv2.imencode('.jpg', overlay)
+                ok, jpeg = cv2.imencode('.jpg', overlay, [cv2.IMWRITE_JPEG_QUALITY, self.param('jpeg_quality')])
                 if not ok:
                     raise RuntimeError('JPEG encoding failed.')
-                out = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
-                if header is not None:
-                    out.header = header
-                else:
-                    out.header.stamp = self.get_clock().now().to_msg()
-                recognition = recognition_message(detections, out.header)
                 with self.lock:
                     if gen != self.generation:
                         continue
                     self.jpeg = jpeg.tobytes()
                     self.debug_jpegs = {'boxes': self.jpeg}
                     self.object_debug_revision += 1
-                    self.object_debug_items = object_items
-                    self.object_debug_jpegs = object_jpegs
                     self.object_debug_snapshot = object_snapshot
-                    self.object_debug_history.append((self.object_debug_revision, object_snapshot))
                     self.detections = detections
                     self.overlay_at = time.monotonic()
+                    self.stream_changed.notify_all()
+                    previous_completed = self.performance.get('completed_at')
+                    self.performance = dict(
+                        completed_at=self.overlay_at,
+                        result_fps=None if previous_completed is None else 1 / max(1e-9, self.overlay_at-previous_completed),
+                        detect_ms=(detected_at-start)*1000,
+                        recognize_ms=(recognized_at-detected_at)*1000,
+                        render_ms=(self.overlay_at-recognized_at)*1000,
+                        processing_ms=(self.overlay_at-start)*1000,
+                        callback_to_result_ms=None if received_at is None else (self.overlay_at-received_at)*1000)
                     self.status = (f'Grounding DINO → {encoder.description} | {len(detections)} objects | '
                                    f'{len(set(gallery.labels))} classes / {len(gallery.labels)} references | '
                                    f'{time.monotonic()-start:.2f}s inference')
-                    self.pub.publish(out)
-                    self.recognition_debug_pub.publish(out)
-                    self.recognition_pub.publish(recognition)
+                    self.pending_publication = (overlay, detections, header, gen)
+                    self.publish_changed.set()
                 processed = (gen, seq, gallery_revision)
             except Exception as error:
                 with self.lock:
@@ -814,9 +927,9 @@ PAGE = '''<!doctype html><html><head><meta charset="utf-8"><title>DINOv3 Cases</
 <section><h2>範例照片 · Patch 分割示意圖</h2><p id="reference-status" role="status">請選擇 case 以查看每張範例照片。</p><p><small>黃色線為模型輸入的 patch 網格；右側與底部不足一格時，自動複製邊緣像素補齊。</small></p><div id="reference-gallery" class="reference-gallery"></div></section>
 <section><h2>2. Target image</h2><button id="camera">Use ROS camera</button><form id="target"><input name="image" type="file" accept="image/*" required><button>Use uploaded target</button></form></section>
 <section><h2>Live camera</h2><p id="camera-status">Waiting for camera…</p><img id="preview" src="/camera.mjpg" alt="Live Orbbec camera"></section>
-<section><h2>辨識結果</h2><div id="legacy-threshold"><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"></div><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" alt="物體框選與辨識結果"><p><small>det 為 Grounding DINO 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small></p><div id="recognition-list"></div></section>
+<section><h2>辨識結果</h2><div id="legacy-threshold"><label for="threshold">Cosine threshold: <output id="threshold-value">0.70</output></label><input id="threshold" type="range" min="0" max="1" step="0.01" value="0.70" style="width: min(450px, 90%)"></div><p id="status">Connecting…</p><p id="error" role="alert"></p><img id="overlay" src="/overlay.mjpg" alt="物體框選與辨識結果"><p><small>det 為 Grounding DINO 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small></p><div id="recognition-list"></div></section>
 <section id="debug-section" hidden><h2>Patch diagnostics</h2><select id="debug-view"><option value="grid">Original + patch grid</option><option value="patches">Patch similarity</option><option value="heatmap">Full-image similarity</option><option value="mask">Mask after threshold, closing and hole filling</option><option value="boxes">Final bounding boxes</option></select><p><img id="debug-image" alt="Patch diagnostic"></p></section>
-<section id="object-section" hidden><h2>逐物體 DINOv3 視覺化</h2>
+<section id="object-section" hidden><h2>逐物體 DINOv3 視覺化</h2><label><input id="object-enabled" type="checkbox" checked>開啟診斷圖片（會增加運算負載）</label>
 <label>比對 reference 標籤 <select id="object-reference"><option value="">自動最佳參考圖</option></select></label>
 <label>顯示內容 <select id="object-view"><option value="heatmap">ROI 相似度熱圖疊加</option><option value="crop">Grounding bbox 裁切原圖</option><option value="grid">模型輸入與 patch 網格</option><option value="patches">逐 patch 相似度</option><option value="similarity">純相似度熱圖</option><option value="reference">最佳參考圖</option></select></label>
 <div id="object-scale" style="max-width:320px"><div style="height:12px;background:linear-gradient(to right,#30123b,#466be3,#1ae4b6,#a4fc3b,#f9ba38,#e3440a,#7a0403);border-radius:4px"></div><small style="display:flex;justify-content:space-between"><span>0</span><span>0.5</span><span>1</span></small></div>
@@ -847,7 +960,8 @@ el('upload').onsubmit=e=>{e.preventDefault();send('/api/cases',{method:'POST',bo
 el('select').onclick=()=>send('/api/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({case:el('cases').value})});
 el('target').onsubmit=e=>{e.preventDefault();let f=new FormData(e.target);f.set('source','upload');send('/api/source',{method:'POST',body:f});};
 el('camera').onclick=()=>{let f=new FormData();f.set('source','camera');send('/api/source',{method:'POST',body:f});};
-async function refresh(){const r=await fetch('/api/status');const d=await r.json();updateGrounding(d);if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}refreshReferences(s.value||d.selected,d.reference_revision,d.reference_stride);const im=await fetch('/overlay.jpg?t='+Date.now());if(im.status===200){const url=URL.createObjectURL(await im.blob());const old=el('overlay').src;el('overlay').src=url;if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{el('overlay').removeAttribute('src');}}
+async function refresh(){const r=await fetch('/api/status');const d=await r.json();updateGrounding(d);if(!thresholdDirty){el('threshold').value=d.threshold;el('threshold-value').textContent=Number(d.threshold).toFixed(2);}el('status').textContent=d.status+' | source: '+d.source+(d.overlay_age===null?'':' | result age: '+d.overlay_age.toFixed(1)+'s');el('camera-status').textContent=d.preview_error|| (d.camera_connected?'Live · '+d.camera_topic:'No recent camera frames · '+d.camera_topic+' · start the Orbbec driver');el('preview').style.opacity=d.camera_connected?'1':'0.3';const s=el('cases');if(JSON.stringify(d.cases)!==s.dataset.list){const value=s.value||d.selected;s.replaceChildren(new Option('Select case',''),...d.cases.map(c=>new Option(c,c)));s.value=value;s.dataset.list=JSON.stringify(d.cases);}refreshReferences(s.value||d.selected,d.reference_revision,d.reference_stride);el('overlay').style.display=d.overlay_ready?'':'none';if(d.performance&&d.performance.result_fps)el('status').textContent+=' | '+d.performance.result_fps.toFixed(1)+' FPS | callback→result '+(d.performance.callback_to_result_ms===null?'—':d.performance.callback_to_result_ms.toFixed(0)+' ms');}
+
 let debugBusy=false;
 async function refreshDebug(){if(debugBusy||el('debug-section').hidden)return;debugBusy=true;try{const r=await fetch('/debug/'+el('debug-view').value+'.jpg');const im=el('debug-image');if(r.status===200){const old=im.src;im.src=URL.createObjectURL(await r.blob());if(old.startsWith('blob:'))URL.revokeObjectURL(old);}else{const old=im.src;im.removeAttribute('src');if(old.startsWith('blob:'))URL.revokeObjectURL(old);}}finally{debugBusy=false;}}
 el('debug-view').onchange=()=>refreshDebug().catch(()=>{});
@@ -857,7 +971,8 @@ let objectBusy=false,objectKey='',objectUrls=[];
 function clearObjectUrls(){for(const url of objectUrls)URL.revokeObjectURL(url);objectUrls=[];}
 function updateObjectReferences(cases){const select=el('object-reference');const list=JSON.stringify(cases);if(select.dataset.list===list)return;const selected=select.value;select.replaceChildren(new Option('自動最佳參考圖',''),...cases.map(name=>new Option(name,name)));select.value=cases.includes(selected)?selected:'';select.dataset.list=list;}
 async function refreshObjects(){
- if(objectBusy||el('object-section').hidden)return;objectBusy=true;
+ if(objectBusy||el('object-section').hidden)return;
+ if(!el('object-enabled').checked){el('object-status').textContent='診斷圖片已關閉；勾選「開啟診斷圖片」以顯示物體熱圖。';return;}objectBusy=true;
  const view=el('object-view').value;el('object-help').textContent=objectHelp[view];
  const referenceCase=el('object-reference').value;const comparisonQuery=referenceCase?'?reference_case='+encodeURIComponent(referenceCase):'';
  if(referenceCase)el('object-help').textContent='比對標籤 '+referenceCase+' 的全部參考圖片。'+objectHelp[view].replace('最佳參考圖所有 patch','指定標籤全部參考圖的 patch');
@@ -871,7 +986,7 @@ async function refreshObjects(){
    const image=await fetch('/debug/objects/'+data.revision+'/'+item.index+'/'+view+'.jpg'+comparisonQuery);
    if(image.status===410)throw Error('結果已更新，正在取得最新視覺化…');if(!image.ok)throw Error('物體 '+(item.index+1)+' 視覺化讀取失敗');return image.blob();
   }));
-  if(view!==el('object-view').value||referenceCase!==el('object-reference').value)return;
+  if(!el('object-enabled').checked||view!==el('object-view').value||referenceCase!==el('object-reference').value)return;
   clearObjectUrls();const gallery=el('object-gallery');gallery.replaceChildren();
   data.objects.forEach((item,index)=>{
    const card=document.createElement('figure');card.className='reference-card';
@@ -887,6 +1002,7 @@ async function refreshObjects(){
 }
 el('object-view').onchange=()=>{objectKey='';refreshObjects();};
 el('object-reference').onchange=()=>{objectKey='';clearObjectUrls();el('object-gallery').replaceChildren();el('object-status').textContent='正在更新標籤熱圖…';refreshObjects();};
+el('object-enabled').onchange=()=>{objectKey='';if(!el('object-enabled').checked){clearObjectUrls();el('object-gallery').replaceChildren();}refreshObjects();};
 setInterval(refreshObjects,1000);
 async function poll(){try{await refresh();await refreshDetections();}catch(e){el('status').textContent='Connection lost: '+e.message;}setTimeout(poll,250);}poll();
 </script></body></html>'''
@@ -901,9 +1017,15 @@ def main(args=None):
         pass
     finally:
         node.stop.set()
+        node.image_changed.set()
+        node.preview_changed.set()
+        node.publish_changed.set()
+        with node.stream_changed:
+            node.stream_changed.notify_all()
         node.server.shutdown()
         node.preview_worker.join(timeout=2)
         node.worker.join(timeout=10)
+        node.publisher_worker.join(timeout=2)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

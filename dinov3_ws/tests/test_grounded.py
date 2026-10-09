@@ -118,6 +118,7 @@ def test_detector_uses_original_image_size_and_text_labels():
         def __call__(self, **kwargs):
             return None
     detector = GroundingDetector.__new__(GroundingDetector)
+    detector.backend = 'torch'
     detector.processor, detector.model, detector.device = Processor(), Model(), 'cpu'
     result = detector.detect(Image.new('RGB', (100, 50)), 'bottle.', .3, .25, .5, 20)
     assert result[0]['bbox'] == [10, 5, 90, 45]
@@ -224,3 +225,26 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
     gallery.refresh(tmp_path, encoder, 32, 16)
     assert snapshot.render('mix')[0][0]['comparison_reference_count'] == 2
     assert gallery.best_reference(torch.tensor([1., 0., 0.]), 'mix') == (None, None)
+
+
+def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
+    import dinov3_cases.grounded as grounded
+    image = Image.new('RGB', (32, 32), 'red')
+    proposals = clean_proposals([[0, 0, 32, 32]], [.9], ['box'], image.size)
+    diagnostics = []
+    original = grounded.build_object_diagnostic
+    calls = []
+    def render(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(grounded, 'build_object_diagnostic', render)
+    gallery = ObjectGallery()
+    results = recognize_objects(image, proposals, ColorEncoder(), gallery, 32, 16,
+                                .75, .05, diagnostics, defer_diagnostics=True)
+    snapshot = ObjectVisualizationSnapshot(results, diagnostics, gallery, 32, 16)
+    assert calls == []
+    items, images = snapshot.render()
+    assert len(calls) == 1 and set(items[0]['views']) == {'crop', 'grid'}
+    assert images[0, 'crop'].startswith(b'\xff\xd8')
+    assert snapshot.render() == (items, images)
+    assert len(calls) == 1

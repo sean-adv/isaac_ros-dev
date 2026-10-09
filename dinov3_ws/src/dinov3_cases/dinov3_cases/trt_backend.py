@@ -8,8 +8,14 @@ import torch
 
 
 ARTIFACTS = Path('/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt')
-DEFAULT_VARIANT = 'vith16plus'
+DEFAULT_VARIANT = 'vits16'
 MODEL_VARIANTS = {
+    'vits16': {
+        'model_id': 'facebook/dinov3-vits16-pretrain-lvd1689m',
+        'engine_path': str(ARTIFACTS / 'dinov3_vits16_dynamic_bf16.engine'),
+        'patch_size': 16, 'num_register_tokens': 4, 'hidden_size': 384,
+        'cache_dir': str(ARTIFACTS.parent / 'huggingface'),
+    },
     'vith16plus': {
         'model_id': 'facebook/dinov3-vith16plus-pretrain-lvd1689m',
         'engine_path': str(ARTIFACTS / 'dinov3_dynamic_bf16.engine'),

@@ -17,6 +17,9 @@ class Detector:
     def __init__(self, *args):
         pass
 
+    def validate_prompt(self, prompt):
+        pass
+
     def detect(self, image, prompt, *args):
         if prompt == 'nothing.':
             return []
@@ -128,13 +131,17 @@ with tempfile.TemporaryDirectory() as temp:
             assert result[0]['label'] == selected
             # Camera header survives both stages.
             captured = []
-            with patch.object(node.recognition_pub, 'publish', side_effect=captured.append):
+            with patch.object(node.recognition_pub, 'publish', side_effect=captured.append), \
+                 patch.object(node.recognition_pub, 'get_subscription_count', return_value=1):
                 assert client.post('/api/source', data={'source': 'camera'}).status_code == 200
                 frame = node.bridge.cv2_to_imgmsg(np.asarray(picture), encoding='rgb8')
                 frame.header.frame_id = 'test_camera'
                 frame.header.stamp.sec = 345
                 node.on_image(frame)
                 wait_result(client)
+                deadline = time.monotonic() + 5
+                while not captured and time.monotonic() < deadline:
+                    time.sleep(.01)
             assert captured and captured[-1].header == frame.header
             assert captured[-1].detections[0].results[0].hypothesis.class_id == selected
             print('PASS: grounded ROI inference, per-object heatmaps, reference views, stale cache rejection, unknown, static refresh, camera headers')
@@ -143,5 +150,6 @@ with tempfile.TemporaryDirectory() as temp:
             node.server.shutdown()
             node.preview_worker.join(2)
             node.worker.join(30)
+            node.publisher_worker.join(2)
             node.destroy_node()
             rclpy.shutdown()

@@ -61,17 +61,39 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20):
 
 
 class GroundingDetector:
-    def __init__(self, model_id, device, cache_dir=None):
+    def __init__(self, model_id, device, cache_dir=None, backend='torch', engine_path=''):
         from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        self.processor = AutoProcessor.from_pretrained(model_id, cache_dir=cache_dir)
-        # Native PyTorch attention avoids compiling an extension on Jetson.
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
-            model_id, cache_dir=cache_dir, disable_custom_kernels=True).to(device).eval()
+        if backend == 'trt':
+            from .grounding_trt import GroundingTRT
+            self.model = GroundingTRT(engine_path, model_id, device)
+            self.processor = AutoProcessor.from_pretrained(
+                self.model.processor_path, local_files_only=True)
+        elif backend == 'torch':
+            self.processor = AutoProcessor.from_pretrained(model_id, cache_dir=cache_dir)
+            # The community repository supplies ONNX only. Use its upstream
+            # weights when explicitly selecting the PyTorch backend.
+            torch_model_id = ('IDEA-Research/grounding-dino-tiny'
+                              if model_id == 'onnx-community/grounding-dino-tiny-ONNX' else model_id)
+            torch_cache = (str(Path(cache_dir).parent / 'grounding_dino')
+                           if cache_dir and model_id == 'onnx-community/grounding-dino-tiny-ONNX'
+                           else cache_dir)
+            self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
+                torch_model_id, cache_dir=torch_cache, disable_custom_kernels=True).to(device).eval()
+        else:
+            raise ValueError('grounding_backend must be torch or trt.')
+        self.backend = backend
         self.device = device
+
+    def validate_prompt(self, prompt):
+        if self.backend == 'trt':
+            self.model.validate_prompt(self.processor, prompt)
 
     @torch.inference_mode()
     def detect(self, image, prompt, box_threshold, text_threshold, nms_iou, limit):
-        inputs = self.processor(images=image, text=prompt, return_tensors='pt').to(self.device)
+        if self.backend == 'trt':
+            inputs = self.model.prepare_inputs(self.processor, image, prompt)
+        else:
+            inputs = self.processor(images=image, text=prompt, return_tensors='pt').to(self.device)
         if inputs.input_ids.shape[-1] > self.model.config.max_text_len:
             raise ValueError('Prompt exceeds Grounding DINO token limit; use fewer categories.')
         outputs = self.model(**inputs)
@@ -262,15 +284,15 @@ class ObjectVisualizationSnapshot:
         self.reference_cases = sorted(set(gallery.labels))
         self.max_side, self.stride = max_side, stride
         self.lock = threading.Lock()
-        self.cache = OrderedDict([('', encode_object_diagnostics(detections, diagnostics))])
+        self.cache = OrderedDict()
 
     def render(self, reference_case=''):
         if reference_case and reference_case not in self.reference_cases:
             raise ValueError('Reference label has no images in this result.')
         with self.lock:
             if reference_case not in self.cache:
-                bank = torch.cat([patches for label, patches in zip(self.gallery.labels, self.gallery.patch_banks)
-                                  if label == reference_case])
+                bank = (torch.cat([patches for label, patches in zip(self.gallery.labels, self.gallery.patch_banks)
+                                   if label == reference_case]) if reference_case else None)
                 diagnostics = [build_object_diagnostic(context, self.gallery, self.max_side,
                                                       self.stride, reference_case, bank)
                                for context in self.contexts]
@@ -283,7 +305,7 @@ class ObjectVisualizationSnapshot:
 
 
 def recognize_objects(image, proposals, encoder, gallery, max_side, stride, threshold, margin,
-                      diagnostics=None):
+                      diagnostics=None, defer_diagnostics=False):
     results = []
     for proposal in proposals:
         roi = image.crop(proposal['bbox'])
@@ -296,7 +318,8 @@ def recognize_objects(image, proposals, encoder, gallery, max_side, stride, thre
             preview.thumbnail((640, 640), Image.Resampling.LANCZOS)
             context = dict(roi=preview, roi_size=roi.size, prepared=prepared,
                            patches=patches, descriptor=descriptor)
-            diagnostics.append(build_object_diagnostic(context, gallery, max_side, stride))
+            diagnostics.append({'context': context} if defer_diagnostics else
+                               build_object_diagnostic(context, gallery, max_side, stride))
         # Detection rectangles are not segmentation masks for surface pose estimation.
         result.update(pose=None, pose_error='Object segmentation is required for surface pose')
         results.append(result)

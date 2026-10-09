@@ -10,3 +10,11 @@ log/
 /CutLER
 /detectron2
 __pycache__/
+
+/dinov3_ws/artifacts/huggingface/
+
+/groundingdino_venv/
+
+/dinov3_ws/artifacts/grounding_dino_wingdzero_processor/
+/dinov3_ws/artifacts/tensorrt/*wingdzero*
+/GroundingDINO-TensorRT-and-ONNX-Inference
