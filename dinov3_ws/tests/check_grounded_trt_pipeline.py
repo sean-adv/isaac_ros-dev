@@ -1,4 +1,5 @@
 """Smoke check the real Grounding DINO + ViT-S/16 TRT ROS/HTTP worker."""
+import argparse
 import io
 import json
 from pathlib import Path
@@ -13,6 +14,12 @@ from dinov3_cases.trt_backend import ARTIFACTS
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--trt11', action='store_true')
+    group.add_argument('--split', action='store_true')
+    args = parser.parse_args()
+    artifact_dir = ARTIFACTS.parent / 'tensorrt11' if args.trt11 or args.split else ARTIFACTS
     image = Image.open(Path(__file__).resolve().parents[2] /
                        'dinov3_cases_data/stomach/1790733215386907348_2.png').convert('RGB')
     def png():
@@ -21,8 +28,15 @@ def main():
         data.seek(0)
         return data
     with tempfile.TemporaryDirectory() as tmp:
-        rclpy.init(args=['--ros-args', '-p', f'cases_dir:={tmp}', '-p', 'port:=0',
-                        '-p', 'object_max_side:=448'])
+        ros_args = ['--ros-args', '-p', f'cases_dir:={tmp}', '-p', 'port:=0',
+                    '-p', 'object_max_side:=224', '-p', 'object_square_input:=true']
+        if args.trt11 or args.split:
+            ros_args += ['-p', f'engine_path:={artifact_dir / "dinov3_vits16_fp16_224.engine"}',
+                         '-p', f'grounding_engine_path:={artifact_dir / "grounding_dino_mixed_fp16.engine"}']
+        if args.split:
+            ros_args += ['-p', 'grounding_execution:=subprocess',
+                         '-p', f'grounding_engine_path:={ARTIFACTS / "grounding_dino_wingdzero_fp16.engine"}']
+        rclpy.init(args=ros_args)
         node = CaseNode()
         client = node.app.test_client()
         def wait():
@@ -43,9 +57,15 @@ def main():
             assert status['grounding_model_id'] == 'IDEA-Research/grounding-dino-tiny'
             assert status['model_id'] == 'facebook/dinov3-vits16-pretrain-lvd1689m'
             assert 'vits16' in status['backend_description']
+            if args.split:
+                assert status['grounding_worker']['tensorrt'] == '10.16.2.10'
+                assert status['performance']['grounding_ipc']['frame_id'] > 0
+                import tensorrt
+                assert tensorrt.__version__ == '11.1.0.106'
             assert any(item['label'] == 'sample' for item in detections), detections
             manifest = client.get('/api/object_visualizations').json
             assert manifest['objects']
+            assert all(item['input_size'] == [224, 224] for item in manifest['objects'])
             revision = manifest['revision']
             for view in ('crop', 'grid', 'heatmap', 'reference'):
                 assert client.get(f'/debug/objects/{revision}/0/{view}.jpg').status_code == 200
@@ -58,7 +78,8 @@ def main():
             assert any(item['label'] == 'sample' for item in changed), changed
             report = {'passed': True, 'status': status, 'detections': detections,
                       'changed_prompt_detections': changed}
-            path = ARTIFACTS / 'integration_grounding_wingdzero_vits16.json'
+            path = artifact_dir / ('integration_split_trt_224.json' if args.split else
+                                   'integration_grounding_wingdzero_vits16_224.json')
             path.write_text(json.dumps(report, indent=2) + '\n')
             print(f'PASS: real dual-TRT worker, gallery recognition, per-object previews, prompt update. {path}')
         finally:

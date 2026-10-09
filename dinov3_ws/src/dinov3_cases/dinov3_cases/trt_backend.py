@@ -83,8 +83,17 @@ class TRTBackbone:
         self.engine = self.runtime.deserialize_cuda_engine(path.read_bytes())
         if self.engine is None:
             raise RuntimeError(f'Could not deserialize TensorRT engine: {path}')
-        if self.engine.num_io_tensors != 2:
-            raise ValueError('Expected exactly one TRT input and one output.')
+        names = {self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)}
+        if names not in ({'pixel_values', 'last_hidden_state'},
+                         {'pixel_values', 'last_hidden_state', 'pooler_output'}):
+            raise ValueError('Unexpected DINOv3 TRT input/output names.')
+        self.has_pooler = 'pooler_output' in names
+        if self.has_pooler and (
+                self.engine.get_tensor_mode('pooler_output') != trt.TensorIOMode.OUTPUT or
+                self.engine.get_tensor_dtype('pooler_output') != trt.float32 or
+                self.engine.get_tensor_format('pooler_output') != trt.TensorFormat.LINEAR or
+                tuple(self.engine.get_tensor_shape('pooler_output')) != (1, self.config.hidden_size)):
+            raise ValueError('Unexpected TensorRT interface for pooler_output.')
         for name, mode in [('pixel_values', trt.TensorIOMode.INPUT),
                            ('last_hidden_state', trt.TensorIOMode.OUTPUT)]:
             if (self.engine.get_tensor_mode(name) != mode or
@@ -120,7 +129,11 @@ class TRTBackbone:
             if output_shape != expected:
                 raise RuntimeError(f'TRT output shape {output_shape}, expected {expected}.')
             y = torch.empty(output_shape, device=self.device, dtype=torch.float32)
-            for name, tensor in [('pixel_values', x), ('last_hidden_state', y)]:
+            bindings = [('pixel_values', x), ('last_hidden_state', y)]
+            if self.has_pooler:
+                pooler = torch.empty((1, self.config.hidden_size), device=self.device, dtype=torch.float32)
+                bindings.append(('pooler_output', pooler))
+            for name, tensor in bindings:
                 if not self.context.set_tensor_address(name, tensor.data_ptr()):
                     raise RuntimeError(f'TRT could not bind {name}.')
             stream = torch.cuda.current_stream(self.device)

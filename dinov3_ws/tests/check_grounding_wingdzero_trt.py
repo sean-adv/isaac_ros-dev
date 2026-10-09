@@ -1,4 +1,5 @@
 """Compare wingdzero ONNX/TRT through the production input and postprocess adapter."""
+import argparse
 import json
 from pathlib import Path
 import time
@@ -15,15 +16,19 @@ from dinov3_cases.trt_backend import ARTIFACTS
 
 @torch.inference_mode()
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--engine', type=Path, default=ARTIFACTS / 'grounding_dino_wingdzero_fp16.engine')
+    parser.add_argument('--report', type=Path, default=ARTIFACTS / 'verification_grounding_wingdzero.json')
+    args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     image = Image.open(root / 'dinov3_cases_data/stomach/1790733215386907348_2.png').convert('RGB')
     detector = GroundingDetector('IDEA-Research/grounding-dino-tiny', 'cuda', backend='trt',
-                                engine_path=ARTIFACTS / 'grounding_dino_wingdzero_fp16.engine')
+                                engine_path=args.engine)
     options = ort.SessionOptions(); options.intra_op_num_threads = 8; options.inter_op_num_threads = 1
     session = ort.InferenceSession(str(ARTIFACTS / 'grounding_dino_wingdzero.onnx'), options,
                                    providers=['CPUExecutionProvider'])
     report = {'scope': 'One real medicine image, full/short prompts, and rotated image; not a dataset accuracy benchmark.',
-              'engine': str(ARTIFACTS / 'grounding_dino_wingdzero_fp16.engine'), 'checks': []}
+              'engine': str(args.engine), 'checks': []}
     for picture, prompt in [(image, 'medicine bottle. medicine box. bottle. box.'),
                             (image, 'box. bottle.'),
                             (image.rotate(90, expand=True), 'medicine bottle. medicine box.')]:
@@ -72,7 +77,7 @@ def main():
     except ValueError as error:
         assert 'tokens' in str(error)
     report['passed'] = True
-    (ARTIFACTS / 'verification_grounding_wingdzero.json').write_text(json.dumps(report, indent=2)+'\n')
+    args.report.write_text(json.dumps(report, indent=2)+'\n')
     print('PASS: wingdzero ONNX/TRT, shorter padded prompts, rotated image, over-length prompt rejection')
 
 

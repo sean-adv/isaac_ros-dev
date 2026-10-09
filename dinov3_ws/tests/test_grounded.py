@@ -248,3 +248,28 @@ def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
     assert images[0, 'crop'].startswith(b'\xff\xd8')
     assert snapshot.render() == (items, images)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('size', [(1, 1000), (1000, 1), (77, 151), (224, 224)])
+def test_square_object_input_preserves_content_and_pads_to_224(size):
+    image = Image.new('RGB', size, 'red')
+    result = prepare_object(image, 224, 16, square=True)
+    assert result.size == (224, 224)
+    assert result.getpixel((223, 223)) == (255, 0, 0)
+
+
+def test_square_object_padding_is_removed_from_heatmap():
+    roi = Image.new('RGB', (32, 16), 'red')
+    prepared = prepare_object(roi, 32, 16, square=True)
+    features = torch.tensor([[1., 0.], [1., 0.], [0., 1.], [0., 1.]])
+    views, metadata = object_debug_views(roi, prepared, features, torch.tensor([[1., 0.]]), 32, 16)
+    assert metadata['input_size'] == [32, 32]
+    assert metadata['content_size'] == [32, 16]
+    assert metadata['patch_grid'] == [2, 2]
+    assert views['heatmap'].shape[:2] == (16, 32)
+    # Bilinear interpolation may blend across the boundary, but the pure
+    # padding region at score zero must not appear in the cropped ROI map.
+    import cv2
+    import numpy as np
+    padding_color = cv2.applyColorMap(np.zeros((1, 1), dtype=np.uint8), cv2.COLORMAP_TURBO)[0, 0]
+    assert not (views['heatmap'] == padding_color).all(axis=-1).any()

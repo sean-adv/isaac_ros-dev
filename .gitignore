@@ -18,3 +18,8 @@ __pycache__/
 /dinov3_ws/artifacts/grounding_dino_wingdzero_processor/
 /dinov3_ws/artifacts/tensorrt/*wingdzero*
 /GroundingDINO-TensorRT-and-ONNX-Inference
+/dinov3_trt11_venv/
+
+/dinov3_ws/artifacts/tensorrt11/
+/trtmc_venv
+/TensorRT-Model-Connect

@@ -104,7 +104,7 @@ class GroundingDetector:
                                result['text_labels'], image.size, nms_iou, limit)
 
 
-def prepare_object(image, max_side=224, stride=16, minimum=32):
+def prepare_object(image, max_side=224, stride=16, minimum=32, square=False):
     """Apply the same aspect-preserving resize/padding to references and proposals."""
     if max_side < minimum or stride <= 0:
         raise ValueError('Object size must cover the minimum input size and stride must be positive.')
@@ -114,13 +114,16 @@ def prepare_object(image, max_side=224, stride=16, minimum=32):
     image = image.resize((width, height), Image.Resampling.LANCZOS)
     padded_w = max(minimum, math.ceil(width / stride) * stride)
     padded_h = max(minimum, math.ceil(height / stride) * stride)
+    if square:
+        padded_w = padded_h = math.ceil(max_side / stride) * stride
     pixels = np.pad(np.asarray(image), ((0, padded_h-height), (0, padded_w-width), (0, 0)), mode='edge')
     return Image.fromarray(pixels)
 
 
 @torch.inference_mode()
 def encode_object(encoder, image, max_side, stride):
-    prepared = prepare_object(image, max_side, stride)
+    prepared = prepare_object(image, max_side, stride,
+                              square=getattr(encoder, "square_input", False))
     features = encoder.encode(prepared)
     vector = features.float().mean(dim=0)
     if not torch.isfinite(vector).all() or vector.norm() < 1e-8:

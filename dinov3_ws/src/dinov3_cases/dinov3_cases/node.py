@@ -62,19 +62,20 @@ def render_heatmap(bgr, scores, threshold):
 
 class Encoder:
     def __init__(self, model_id, backend='torch', engine_path='',
-                 target_padding=0, target_padding_mode='reflect'):
+                 target_padding=0, target_padding_mode='reflect', square_input=False):
         if backend not in ('torch', 'trt'):
             raise ValueError('inference_backend must be torch or trt.')
         from .trt_backend import MODEL_VARIANTS
         cache_dir = next((spec.get('cache_dir') for spec in MODEL_VARIANTS.values()
                           if spec['model_id'] == model_id), None)
+        self.square_input = square_input
         self.backend = backend
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if backend == 'trt':
             from .trt_backend import TRTBackbone
             self.model = TRTBackbone(engine_path, model_id)
             self.device = str(self.model.device)
-            self.dtype = torch.float32  # Engine BF16 compute still has FP32 I/O.
+            self.dtype = torch.float32  # The engine exposes FP32 I/O regardless of compute precision.
             self.description = self.model.description
         else:
             self.dtype = inference_dtype(self.device)
@@ -135,12 +136,14 @@ class CaseNode(Node):
         defaults = dict(cases_dir='/workspaces/isaac_ros-dev/dinov3_cases_data',
                         pipeline='grounded', grounding_model_id='IDEA-Research/grounding-dino-tiny',
                         grounding_cache_dir='/workspaces/isaac_ros-dev/dinov3_ws/artifacts/huggingface',
-                        grounding_backend='trt',
+                        grounding_backend='trt', grounding_execution='inprocess',
+                        grounding_worker_python='/workspaces/isaac_ros-dev/dinov3_venv/bin/python',
+                        grounding_ipc_timeout=60.0,
                         grounding_engine_path='/workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/grounding_dino_wingdzero_fp16.engine',
                         grounding_prompt=DEFAULT_PROMPT, grounding_box_threshold=0.3,
                         grounding_text_threshold=0.25, grounding_nms_iou=0.5,
                         grounding_max_detections=20, recognition_threshold=0.75,
-                        recognition_margin=0.05, object_max_side=224,
+                        recognition_margin=0.05, object_max_side=224, object_square_input=False,
                         image_topic='/camera/color/image_raw', model_id=MODEL,
                         inference_backend='trt', engine_path=DEFAULT_ENGINE,
                         depth_topic='/camera/depth/image_raw',
@@ -174,6 +177,10 @@ class CaseNode(Node):
             raise ValueError('grounding_nms_iou must be between 0 and 1.')
         if not 1 <= self.param('grounding_max_detections') <= 100:
             raise ValueError('grounding_max_detections must be between 1 and 100.')
+        if self.param('grounding_execution') not in ('inprocess', 'subprocess'):
+            raise ValueError('grounding_execution must be inprocess or subprocess.')
+        if self.param('grounding_ipc_timeout') <= 0:
+            raise ValueError('grounding_ipc_timeout must be positive.')
         if not 32 <= self.param('object_max_side') <= 2048:
             raise ValueError('object_max_side must be between 32 and 2048.')
         validate_target_padding(self.param('target_padding'), self.param('target_padding_mode'))
@@ -406,9 +413,12 @@ class CaseNode(Node):
                                pipeline=self.param('pipeline'), grounding=self.grounding_settings,
                                grounding_model_id=self.param('grounding_model_id'),
                                grounding_backend=self.param('grounding_backend'),
+                               grounding_execution=self.param('grounding_execution'),
+                               grounding_worker=getattr(getattr(self, 'grounding_detector', None), 'worker_info', None),
                                grounding_engine_path=self.param('grounding_engine_path'),
                                grounding_text_token_limit=getattr(self, 'grounding_text_token_limit', None),
                                object_max_side=self.param('object_max_side'),
+                               object_square_input=self.param('object_square_input'),
                                reference_revision=self.generation, reference_stride=self.reference_stride,
                                inference_backend=self.param('inference_backend'),
                                model_id=self.param('model_id'),
@@ -437,7 +447,8 @@ class CaseNode(Node):
                 item = dict(name=path.name, version=f'{path.stat().st_mtime_ns}-{path.stat().st_size}')
                 try:
                     original = decode_image(path)
-                    reference = (prepare_object(original, self.param('object_max_side'), stride)
+                    reference = (prepare_object(original, self.param('object_max_side'), stride,
+                                                square=self.param('object_square_input'))
                                  if self.param('pipeline') == 'grounded' else
                                  prepare_reference(original, self.param('reference_max_side'), stride))
                     item.update(original_size=list(original.size), size=list(reference.size),
@@ -454,7 +465,8 @@ class CaseNode(Node):
                 stride = self.reference_stride
             if stride is None:
                 return jsonify(error='模型載入中。'), 503
-            reference = (prepare_object(decode_image(path), self.param('object_max_side'), stride)
+            reference = (prepare_object(decode_image(path), self.param('object_max_side'), stride,
+                                        square=self.param('object_square_input'))
                          if self.param('pipeline') == 'grounded' else
                          prepare_reference(decode_image(path), self.param('reference_max_side'), stride))
             data = BytesIO()
@@ -782,6 +794,17 @@ class CaseNode(Node):
                 self.get_logger().error(str(e))
                 processed = (gen, seq)
 
+    def close_grounding_worker(self):
+        detector = getattr(self, 'grounding_detector', None)
+        close = getattr(detector, 'close', None)
+        if close is not None:
+            close()
+
+    def destroy_node(self):
+        self.stop.set()
+        self.close_grounding_worker()
+        return super().destroy_node()
+
     def clear_object_debug(self):
         self.object_debug_revision = getattr(self, 'object_debug_revision', 0) + 1
         self.object_debug_items = []
@@ -792,21 +815,32 @@ class CaseNode(Node):
     def run_grounded_worker(self):
         try:
             encoder = Encoder(self.param('model_id'), self.param('inference_backend'),
-                              self.param('engine_path'), 0, self.param('target_padding_mode'))
+                              self.param('engine_path'), 0, self.param('target_padding_mode'),
+                              square_input=self.param('object_square_input'))
             stride = feature_stride(encoder.model)
             with self.lock:
                 self.reference_stride = stride
                 self.backend_description = encoder.description
                 self.status = 'Loading Grounding DINO model…'
-            detector = GroundingDetector(self.param('grounding_model_id'), encoder.device,
+            detector_class = GroundingDetector
+            detector_options = {}
+            if self.param('grounding_execution') == 'subprocess':
+                from .grounding_ipc import SharedMemoryGroundingDetector
+                detector_class = SharedMemoryGroundingDetector
+                detector_options = dict(python=self.param('grounding_worker_python'),
+                                        timeout=self.param('grounding_ipc_timeout'))
+            detector = detector_class(self.param('grounding_model_id'), encoder.device,
                                          self.param('grounding_cache_dir') or None,
-                                         self.param('grounding_backend'), self.param('grounding_engine_path'))
+                                         self.param('grounding_backend'), self.param('grounding_engine_path'),
+                                         **detector_options)
+            self.grounding_detector = detector
             with self.lock:
                 detector.validate_prompt(self.grounding_settings['prompt'])
                 self.grounding_detector = detector
                 config = getattr(getattr(detector, 'model', None), 'config', None)
                 self.grounding_text_token_limit = getattr(config, 'max_text_len', None)
         except Exception as error:
+            self.close_grounding_worker()
             with self.lock:
                 self.status = f'Model load failed: {type(error).__name__}: {error}'
             self.get_logger().error(self.status)
@@ -887,6 +921,7 @@ class CaseNode(Node):
                     self.performance = dict(
                         completed_at=self.overlay_at,
                         result_fps=None if previous_completed is None else 1 / max(1e-9, self.overlay_at-previous_completed),
+                        grounding_ipc=dict(getattr(detector, 'last_metrics', {})),
                         detect_ms=(detected_at-start)*1000,
                         recognize_ms=(recognized_at-detected_at)*1000,
                         render_ms=(self.overlay_at-recognized_at)*1000,
@@ -1023,6 +1058,7 @@ def main(args=None):
         with node.stream_changed:
             node.stream_changed.notify_all()
         node.server.shutdown()
+        node.close_grounding_worker()
         node.preview_worker.join(timeout=2)
         node.worker.join(timeout=10)
         node.publisher_worker.join(timeout=2)

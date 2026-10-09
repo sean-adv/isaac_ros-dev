@@ -4,6 +4,9 @@
 
 ## 啟動
 
+Grounding DINO 保留舊 TensorRT 10.16、DINOv3 使用新 TensorRT 11.1 的雙程序入口為
+`./run_split_trt.sh`；共享記憶體傳輸、版本、延遲量測與回切方式見 [SPLIT_TRT.md](SPLIT_TRT.md)。
+
 ```bash
 cd /workspaces/isaac_ros-dev/dinov3_ws
 ./run_camera.sh
@@ -18,7 +21,7 @@ cd /workspaces/isaac_ros-dev/dinov3_ws
 
 預設使用 [wingdzero/GroundingDINO-TensorRT-and-ONNX-Inference](https://github.com/wingdzero/GroundingDINO-TensorRT-and-ONNX-Inference) 的 Swin-T OGC 權重，依上游外部文字 mask 的匯出方法建立 FP16 TensorRT 引擎；DINOv3 使用 `facebook/dinov3-vits16-pretrain-lvd1689m` 的 BF16 TensorRT 引擎（RoPE 使用 FP32、輸入輸出 FP32）。Grounding DINO 的 tokenizer／結果後處理使用 Hugging Face 實作，模型載入失敗會在網頁顯示原因。
 
-Grounding DINO 圖片直接縮放為固定 800×1200（長寬比可能改變），RGB/ImageNet normalization，輸出框映射回原圖。預設提示詞 `medicine bottle. medicine box. bottle. box.` 共 12 tokens；預設使用第二次匯出的 12-token engine，較短提示詞會補齊 padding，超過 12 tokens 會拒絕。可即時修改容量內的提示詞與門檻；增加文字容量需重新編譯。DINOv3 保留動態尺寸範圍 32–2560，預設引擎針對 448×448 最佳化。ViT-S/16 特徵維度為 384。
+Grounding DINO 圖片直接縮放為固定 800×1200（長寬比可能改變），RGB/ImageNet normalization，輸出框映射回原圖。預設提示詞 `medicine bottle. medicine box. bottle. box.` 共 12 tokens；預設使用第二次匯出的 12-token engine，較短提示詞會補齊 padding，超過 12 tokens 會拒絕。可即時修改容量內的提示詞與門檻；增加文字容量需重新編譯。DINOv3 保留動態尺寸範圍 32–2560，預設引擎針對 448×448 最佳化。ViT-S/16 特徵維度為 384。目前 grounded 設定統一使用 224×224 正方形補邊輸入；engine 本身仍保留動態尺寸。TensorRT 11.1 試用與回切方式見 [TRT11.md](TRT11.md)。
 
 ```bash
 # 使用獨立 groundingdino_venv 與 wingdzero 上游腳本重新匯出／编譯
@@ -45,7 +48,7 @@ bash build_dinov3_vits_trt.sh
 
 Grounding DINO 的框會映射回原始 RGB 座標、裁齊邊界，經跨文字類別的 NMS 移除重複框。NMS 保留較高分的框，不取外接聯集；最多辨識 `grounding_max_detections` 個框。
 
-參考圖片與每個 ROI 使用相同的等比例縮放：長邊設為 `object_max_side`，短邊不足 32 pixels 或 feature stride 整數倍時複製邊緣補齊。DINOv3 產生正規化 patch 特徵，取平均後再次 L2 正規化，作為整個物體的描述向量。每張參考圖保留一個向量，各 case 取其最高 cosine similarity；以最高分與不同 case 的第二高分之差進行接受判定。這是無需訓練的初版視覺檢索，門檻需以真實商品驗證集校準。
+參考圖片與每個 ROI 使用相同的等比例縮放：長邊設為 `object_max_side`，預設以右側／底部複製邊緣補成 224×224 正方形；`object_square_input=false` 可恢復短邊至少 32、補齊 feature stride 的模式。DINOv3 產生正規化 patch 特徵，取平均後再次 L2 正規化，作為整個物體的描述向量。每張參考圖保留一個向量，各 case 取其最高 cosine similarity；以最高分與不同 case 的第二高分之差進行接受判定。這是無需訓練的初版視覺檢索，門檻需以真實商品驗證集校準。
 
 - `low_similarity`：最高分低於辨識門檻。
 - `ambiguous`：最高分達標，但不同 case 的前兩名分差不足。
@@ -81,6 +84,7 @@ grounded 模式的頁面底部預設顯示每個 Grounding bbox 的 DINOv3 熱�
 | `grounding_nms_iou` | 0.50 | 重複框抑制 IoU |
 | `grounding_max_detections` | 20 | 每幀最大 ROI 數量 |
 | `object_max_side` | 224 | 參考圖與 ROI 的共同長邊尺寸 |
+| `object_square_input` | config 為 true | 將參考图與 ROI 補成固定正方形輸入 |
 | `recognition_threshold` | 0.75 | 接受商品身分的 cosine 門檻 |
 | `recognition_margin` | 0.05 | 不同商品前兩名最小分差 |
 

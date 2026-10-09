@@ -11,11 +11,12 @@ dinov3_cases:
     grounding_max_detections: 20
     recognition_threshold: 0.75
     recognition_margin: 0.05
-    object_max_side: 448
+    object_max_side: 224
+    object_square_input: true
     # Reference image long-edge limit. 0 keeps the original resolution.
     # Aspect ratio is preserved and smaller images are not enlarged.
     # Can not to big (640) or the border will be cropped and the recognize will be wrong.
-    reference_max_side: 448
+    reference_max_side: 224
     # Add target context before inference; crop features back to original coordinates.
     # Padding must be a multiple of the model feature stride; 0 disables it.
     target_padding: 0
