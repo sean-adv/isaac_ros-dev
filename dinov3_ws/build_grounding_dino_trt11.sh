@@ -7,7 +7,7 @@ export OMP_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
 export PYTHONPATH=""
 export LD_LIBRARY_PATH="$script_dir/../dinov3_trt11_venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
 if [[ ! -f "$artifact_dir/calibration.npz" ]]; then
-    echo "Missing real-image calibration.npz; see TRT11.md." >&2
+    echo "Missing real-image calibration.npz; see README.md." >&2
     exit 1
 fi
 "$python_bin" -m modelopt.onnx.autocast \

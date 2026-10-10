@@ -1,1 +1,0 @@
-/workspaces/isaac_ros-dev/dinov3_ws/src/rgbd_object_proposals/launch/proposals.launch.py

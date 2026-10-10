@@ -1,0 +1,61 @@
+body {
+  font: 16px system-ui;
+  background: #101821;
+  color: #e7eef8;
+  max-width: 1150px;
+  margin: 32px auto;
+  padding: 0 20px
+}
+
+section {
+  background: #1b2836;
+  padding: 20px;
+  border-radius: 12px;
+  margin: 16px 0
+}
+
+button,
+input,
+select {
+  padding: 10px;
+  margin: 6px;
+  border-radius: 6px
+}
+
+button {
+  background: #8ddcc4;
+  cursor: pointer
+}
+
+img {
+  max-width: 100%;
+  border-radius: 10px
+}
+
+small {
+  color: #b0becd
+}
+
+.reference-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+  gap: 16px
+}
+
+.reference-card {
+  margin: 0;
+  padding: 12px;
+  background: #101821;
+  border-radius: 8px;
+  overflow-wrap: anywhere
+}
+
+.reference-card img {
+  display: block;
+  width: 100%;
+  image-rendering: pixelated
+}
+
+.reference-card figcaption {
+  margin-top: 10px
+}

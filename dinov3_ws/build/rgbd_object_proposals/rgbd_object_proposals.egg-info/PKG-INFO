@@ -1,7 +1,0 @@
-Metadata-Version: 2.1
-Name: rgbd-object-proposals
-Version: 0.1.0
-Summary: Aligned RGB-D geometric object proposals for crop-based recognition
-Maintainer: Workspace maintainers
-Maintainer-email: admin@example.com
-License: Apache-2.0

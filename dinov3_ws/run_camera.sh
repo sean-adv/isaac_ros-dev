@@ -9,5 +9,5 @@ exec ros2 launch orbbec_camera gemini_330_series.launch.py \
   enable_left_ir:=false enable_right_ir:=false \
   color_width:=1280 color_height:=720 color_fps:=30 \
   depth_width:=1280 depth_height:=720 depth_fps:=30 \
-  depth_registration:=false \
+  depth_registration:=true \
   "$@"

@@ -1,9 +1,5 @@
 dinov3_cases:
   ros__parameters:
-    pipeline: grounded
-    grounding_backend: trt
-    grounding_engine_path: /workspaces/isaac_ros-dev/dinov3_ws/artifacts/tensorrt/grounding_dino_wingdzero_fp16.engine
-    grounding_model_id: IDEA-Research/grounding-dino-tiny
     grounding_prompt: 'medicine bottle. medicine box. bottle. box.'
     grounding_box_threshold: 0.3
     grounding_text_threshold: 0.25
@@ -11,13 +7,17 @@ dinov3_cases:
     grounding_max_detections: 20
     recognition_threshold: 0.75
     recognition_margin: 0.05
-    object_max_side: 224
-    object_square_input: true
-    # Reference image long-edge limit. 0 keeps the original resolution.
-    # Aspect ratio is preserved and smaller images are not enlarged.
-    # Can not to big (640) or the border will be cropped and the recognize will be wrong.
-    reference_max_side: 224
-    # Add target context before inference; crop features back to original coordinates.
-    # Padding must be a multiple of the model feature stride; 0 disables it.
-    target_padding: 0
-    target_padding_mode: reflect
+    # Both modes use fixed 224×224 DINOv3 inputs; paths are selected by run.sh.
+    inference_hz: 0.0
+    preview_max_width: 960
+    jpeg_quality: 80
+    # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
+    pose_enabled: true
+    depth_topic: /camera/depth/image_raw
+    depth_camera_info_topic: /camera/depth/camera_info
+    pose_sync_tolerance: 0.05
+    pose_min_depth: 0.1
+    pose_max_depth: 5.0
+    pose_depth_band: 0.08
+    pose_min_points: 80
+    pose_axis_ratio: 1.15

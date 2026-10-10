@@ -1,4 +1,5 @@
 """Reference grids must follow the same resize and stride as inference."""
+
 import threading
 from io import BytesIO
 from types import SimpleNamespace
@@ -7,13 +8,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dinov3_cases.node import CaseNode
+from dinov3_cases.web import create_app
 from dinov3_cases.patches import reference_grid_image
 
 
-@pytest.mark.parametrize('stride', [16, 32])
+@pytest.mark.parametrize("stride", [16, 32])
 def test_grid_preserves_pixels_including_incomplete_edges(stride):
-    original = Image.new('RGB', (stride * 2 + 5, stride + 3), (10, 20, 30))
+    original = Image.new("RGB", (stride * 2 + 5, stride + 3), (10, 20, 30))
     before = np.array(original)
     grid = reference_grid_image(original, stride)
     assert grid.size == original.size
@@ -26,44 +27,46 @@ def test_grid_preserves_pixels_including_incomplete_edges(stride):
 
 @pytest.fixture
 def gallery(tmp_path):
-    folder = tmp_path / 'sample'
+    folder = tmp_path / "sample"
     folder.mkdir()
-    Image.new('RGB', (101, 65), 'white').save(folder / 'one.png')
-    Image.new('RGB', (64, 32), 'blue').save(folder / 'two.png')
-    (folder / 'broken.png').write_bytes(b'broken')
-    (folder / 'link.png').symlink_to(folder / 'one.png')
-    params = {'reference_max_side': 64, 'pipeline': 'heatmap'}
-    node = SimpleNamespace(root=tmp_path, lock=threading.Lock(), reference_stride=16,
-                           param=params.__getitem__)
-    app = CaseNode.make_app(node)
-    app.config['TESTING'] = True
+    Image.new("RGB", (101, 65), "white").save(folder / "one.png")
+    Image.new("RGB", (64, 32), "blue").save(folder / "two.png")
+    (folder / "broken.png").write_bytes(b"broken")
+    (folder / "link.png").symlink_to(folder / "one.png")
+    node = SimpleNamespace(
+        root=tmp_path,
+        lock=threading.Lock(),
+        reference_stride=16,
+    )
+    app = create_app(node)
+    app.config["TESTING"] = True
     return app.test_client(), node
 
 
 def test_lists_every_reference_with_actual_resize_even_without_target(gallery):
     client, _ = gallery
-    result = client.get('/api/references?case=sample')
+    result = client.get("/api/references?case=sample")
     assert result.status_code == 200
     data = result.json
-    assert data['patch_size'] == 16
-    assert [item['name'] for item in data['images']] == ['broken.png', 'one.png', 'two.png']
-    assert 'error' in data['images'][0]
-    item = data['images'][1]
-    assert item['original_size'] == [101, 65]
-    assert item['size'] == [64, 48]
-    assert (item['rows'], item['columns']) == (3, 4)
-    response = client.get('/api/references/grid/sample/one.png')
+    assert data["patch_size"] == 16
+    assert [item["name"] for item in data["images"]] == ["broken.png", "one.png", "two.png"]
+    assert "error" in data["images"][0]
+    item = data["images"][1]
+    assert item["original_size"] == [101, 65]
+    assert item["size"] == [224, 224]
+    assert (item["rows"], item["columns"]) == (14, 14)
+    response = client.get("/api/references/grid/sample/one.png")
     assert response.status_code == 200
-    assert response.mimetype == 'image/png'
-    assert Image.open(BytesIO(response.data)).size == (64, 48)
+    assert response.mimetype == "image/png"
+    assert Image.open(BytesIO(response.data)).size == (224, 224)
 
 
 def test_loading_invalid_paths_and_symlinks(gallery):
     client, node = gallery
-    assert client.get('/api/references?case=../sample').status_code == 400
-    assert client.get('/api/references?case=missing').status_code == 400
-    assert client.get('/api/references/grid/sample/link.png').status_code == 400
-    assert client.get('/api/references/grid/sample/missing.png').status_code == 400
+    assert client.get("/api/references?case=../sample").status_code == 400
+    assert client.get("/api/references?case=missing").status_code == 400
+    assert client.get("/api/references/grid/sample/link.png").status_code == 400
+    assert client.get("/api/references/grid/sample/missing.png").status_code == 400
     node.reference_stride = None
-    assert client.get('/api/references?case=sample').status_code == 503
-    assert client.get('/api/references/grid/sample/one.png').status_code == 503
+    assert client.get("/api/references?case=sample").status_code == 503
+    assert client.get("/api/references/grid/sample/one.png").status_code == 503

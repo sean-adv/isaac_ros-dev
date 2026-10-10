@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DINOv3 Cases</title>
+<link rel="stylesheet" href="/static/cases.css">
+</head>
+<body>
+<h1>Grounding DINO → DINOv3 物體辨識</h1>
+<p>
+<a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a>
+</p>
+<p id="pipeline-help">先透過文字找出物體，再與所有商品參考圖比對。每個 case 代表一個商品身分。</p>
+<section id="grounding-section">
+<h2>偵測與辨識設定</h2>
+<form id="grounding-form">
+<label>文字提示 <input id="prompt" name="prompt" maxlength="1000" required style="width:min(600px,85%)">
+</label>
+<br>
+<label>偵測門檻 <input name="box_threshold" type="number" min="0" max="1" step="0.01" required>
+</label>
+<label>文字門檻 <input name="text_threshold" type="number" min="0" max="1" step="0.01" required>
+</label>
+<br>
+<label>辨識相似度門檻 <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
+</label>
+<label>前兩名最小差距 <input name="margin" type="number" min="0" max="2" step="0.01" required>
+</label>
+<button>套用設定</button>
+</form>
+<small>英文類別以句點分隔，例如 medicine bottle. medicine box. bottle. box.。門檻或差距不足時顯示 unknown。</small>
+</section>
+<section>
+<h2>1. Reference groups</h2>
+<form id="upload">
+<input name="case" placeholder="Case name, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}">
+<input name="images" type="file" accept="image/*" multiple required>
+<button>Add pictures to case</button>
+</form>
+<select id="cases">
+<option value="">Select case</option>
+</select>
+<button id="select">檢視此圖庫</button>
+<p>
+<small>每個 case 放同一商品的多角度近距離照片。兩階段模式會比對所有圖庫；這裡的選擇僅切換參考圖預覽。</small>
+</p>
+</section>
+<section>
+<h2>範例照片 · Patch 分割示意圖</h2>
+<p id="reference-status" role="status">請選擇 case 以查看每張範例照片。</p>
+<p>
+<small>黃色線為模型輸入的 patch 網格；等比例縮放至 224，再於右側與底部複製邊緣像素，補齊 224×224。</small>
+</p>
+<div id="reference-gallery" class="reference-gallery">
+</div>
+</section>
+<section>
+<h2>2. Target image</h2>
+<button id="camera">Use ROS camera</button>
+<form id="target">
+<input name="image" type="file" accept="image/*" required>
+<button>Use uploaded target</button>
+</form>
+</section>
+<section>
+<h2>Live camera</h2>
+<p id="camera-status">Waiting for camera…</p>
+<img id="preview" src="/camera.mjpg" alt="Live Orbbec camera">
+</section>
+<section>
+<h2>辨識結果</h2>
+<p id="status">Connecting…</p>
+<p id="error" role="alert">
+</p>
+<img id="overlay" src="/overlay.mjpg" alt="物體框選與辨識結果">
+<p>
+<small>det 為 Grounding DINO 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small>
+</p>
+<div id="recognition-list">
+</div>
+</section>
+
+<section id="object-section">
+<h2>逐物體 DINOv3 視覺化</h2>
+<label>
+<input id="object-enabled" type="checkbox" checked>開啟診斷圖片（會增加運算負載）</label>
+<label>比對 reference 標籤 <select id="object-reference">
+<option value="">自動最佳參考圖</option>
+</select>
+</label>
+<label>顯示內容 <select id="object-view">
+<option value="heatmap">ROI 相似度熱圖疊加</option>
+<option value="crop">Grounding bbox 裁切原圖</option>
+<option value="grid">模型輸入與 patch 網格</option>
+<option value="patches">逐 patch 相似度</option>
+<option value="similarity">純相似度熱圖</option>
+<option value="reference">最佳參考圖</option>
+</select>
+</label>
+<div id="object-scale" style="max-width:320px">
+<div style="height:12px;background:linear-gradient(to right,#30123b,#466be3,#1ae4b6,#a4fc3b,#f9ba38,#e3440a,#7a0403);border-radius:4px">
+</div>
+<small style="display:flex;justify-content:space-between">
+<span>0</span>
+<span>0.5</span>
+<span>1</span>
+</small>
+</div>
+<p id="object-help">
+</p>
+<p>
+<small>自動模式使用各物體的最佳參考圖；指定標籤時，每個 Grounding object 都與該標籤所有圖片的 patch 比對。最佳參考圖視圖顯示該標籤內對各物體最相似的圖片。局部 patch 相似度與整體商品辨識分數不同。網格內藍框為縮放後 ROI 範圍，外側為補邊。</small>
+</p>
+<p id="object-status" role="status">等待物體偵測結果…</p>
+<div id="object-gallery" class="reference-gallery">
+</div>
+</section>
+<script src="/static/cases.js">
+</script>
+</body>
+</html>

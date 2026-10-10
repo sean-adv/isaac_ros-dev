@@ -23,3 +23,7 @@ __pycache__/
 /dinov3_ws/artifacts/tensorrt11/
 /trtmc_venv
 /TensorRT-Model-Connect
+/dinov3_ws/build/
+/dinov3_ws/install/
+/dinov3_ws/log/
+/.pytest_cache

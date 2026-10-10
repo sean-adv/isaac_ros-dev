@@ -1,2 +1,0 @@
-[console_scripts]
-rgbd_object_proposal_node = rgbd_object_proposals.node:main
