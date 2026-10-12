@@ -27,9 +27,12 @@ from .runtime import (
     TRT_PYTHON,
     INPUT_SIZE,
 )
-from vision_msgs.msg import Detection2DArray, Detection3DArray
-from .depth_pose import matched_inputs, attach_surface_poses, poses_message, draw_pose_axes
+from vision_msgs.msg import Detection2DArray
+from dinov3_cases_msgs.msg import Detection3DPointsArray
+from .depth_pose import matched_inputs
+from .depth_bbox import attach_bboxes3d, bboxes3d_message
 from .web import create_app
+from .visualization import render_bbox_overlay
 from .grounded import (
     DEFAULT_PROMPT,
     OmDetDetector,
@@ -72,9 +75,8 @@ class CaseNode(Node):
             pose_sync_tolerance=0.05,
             pose_min_depth=0.1,
             pose_max_depth=5.0,
-            pose_depth_band=0.08,
-            pose_min_points=80,
-            pose_axis_ratio=1.15,
+            bbox3d_depth_band=0.08,
+            bbox3d_edge_min_jump=0.03,
             engine_path=str(DINO_ENGINE),
             port=8090,
             host="127.0.0.1",
@@ -119,15 +121,11 @@ class CaseNode(Node):
             raise ValueError("inference_hz must be finite and nonnegative; 0 is unlimited.")
         if not 1 <= self.param("jpeg_quality") <= 100 or self.param("preview_max_width") < 1:
             raise ValueError("jpeg_quality must be 1–100 and preview_max_width must be positive.")
-        for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "pose_depth_band"):
+        for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band", "bbox3d_edge_min_jump"):
             if not np.isfinite(self.param(name)) or self.param(name) <= 0:
                 raise ValueError(f"{name} must be finite and positive.")
         if self.param("pose_min_depth") >= self.param("pose_max_depth"):
             raise ValueError("pose_min_depth must be less than pose_max_depth.")
-        if self.param("pose_min_points") < 3:
-            raise ValueError("pose_min_points must be at least 3.")
-        if not np.isfinite(self.param("pose_axis_ratio")) or self.param("pose_axis_ratio") <= 1:
-            raise ValueError("pose_axis_ratio must be finite and greater than 1.")
         self.root = Path(self.param("cases_dir")).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.bridge = CvBridge()
@@ -148,6 +146,7 @@ class CaseNode(Node):
         self.frame = None
         self.frame_seq = 0
         self.jpeg = None
+        self.jpeg3d = None
         self.clear_object_debug()
         self.detections = []
         self.preview_jpeg = None
@@ -163,8 +162,8 @@ class CaseNode(Node):
         self.recognition_pub = self.create_publisher(
             Detection2DArray, "/medicine_recognition/detections", 10
         )
-        self.pose_pub = self.create_publisher(
-            Detection3DArray, "/medicine_recognition/poses", 10
+        self.bbox3d_pub = self.create_publisher(
+            Detection3DPointsArray, "/medicine_recognition/detections_3d", 10
         )
         self.recognition_debug_pub = self.create_publisher(
             ImageMsg, "/medicine_recognition/debug_image", 1
@@ -230,13 +229,10 @@ class CaseNode(Node):
                 self.depth_changed.wait(remaining)
         return None
 
-    def estimate_poses(self, detections, inputs):
+    def estimate_bboxes3d(self, detections, inputs):
         if inputs is None:
             for item in detections:
-                item["pose_status"] = (
-                    "unknown" if item["label"] == "unknown"
-                    else "missing_synchronized_registered_depth"
-                )
+                item["bbox3d_status"] = "missing_synchronized_registered_depth"
             return
         depth_msg, info = inputs
         try:
@@ -247,15 +243,15 @@ class CaseNode(Node):
                 depth = depth.astype(np.float64)
             else:
                 raise ValueError(f"unsupported_depth_encoding:{depth_msg.encoding}")
-            attach_surface_poses(
+            attach_bboxes3d(
                 detections, depth, info,
                 min_depth=self.param("pose_min_depth"), max_depth=self.param("pose_max_depth"),
-                depth_band=self.param("pose_depth_band"), min_points=self.param("pose_min_points"),
-                axis_ratio=self.param("pose_axis_ratio"),
+                depth_band=self.param("bbox3d_depth_band"),
+                edge_min_jump=self.param("bbox3d_edge_min_jump"),
             )
         except (ValueError, CvBridgeError) as error:
             for item in detections:
-                item["pose_status"] = "unknown" if item["label"] == "unknown" else str(error)
+                item["bbox3d_status"] = str(error)
 
     def worker_ticks(self):
         """Wake on input; rate limit start-to-start, never sleep after processing."""
@@ -287,8 +283,8 @@ class CaseNode(Node):
                     header = Header(stamp=self.get_clock().now().to_msg())
                 if self.recognition_pub.get_subscription_count():
                     self.recognition_pub.publish(recognition_message(detections, header))
-                if self.pose_pub.get_subscription_count():
-                    self.pose_pub.publish(poses_message(detections, header))
+                if self.bbox3d_pub.get_subscription_count():
+                    self.bbox3d_pub.publish(bboxes3d_message(detections, header))
                 image_publishers = [
                     pub
                     for pub in (self.pub, self.recognition_debug_pub)
@@ -457,65 +453,33 @@ class CaseNode(Node):
                         tracking_context = context
                     self.tracker.update(detections, frame_key=(gen, seq))
                 if self.param("pose_enabled") and header is not None:
-                    self.estimate_poses(detections, depth_inputs)
+                    self.estimate_bboxes3d(detections, depth_inputs)
                 else:
                     for item in detections:
-                        item["pose_status"] = "disabled" if not self.param("pose_enabled") else "no_camera_depth"
-                posed_at = time.monotonic()
+                        item["bbox3d_status"] = "disabled" if not self.param("pose_enabled") else "no_camera_depth"
+                bbox3d_at = time.monotonic()
                 object_snapshot = ObjectVisualizationSnapshot(
                     detections, diagnostics, gallery, max_side, stride
                 )
-                overlay = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-                for index, item in enumerate(detections):
-                    if not item["bbox_visible"]:
-                        continue
-                    x0, y0, x1, y1 = item["bbox"]
-                    color = (0, 190, 255) if item["label"] == "unknown" else (60, 220, 80)
-                    cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, 2)
-                    label = f"ID {item['track_id']} {item['label']} | {item['detection_label']}"
-                    pose = item.get("pose")
-                    if pose is not None:
-                        px, py, pz = pose["position"]
-                        position_label = f"position (m): X={px:.3f} Y={py:.3f} Z={pz:.3f}"
-                    else:
-                        position_label = "position: N/A"
-                    font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-                    (_, text_height), baseline = cv2.getTextSize(
-                        label, font, font_scale, thickness
-                    )
-                    line_height = text_height + baseline + 8
-                    label_y = max(
-                        text_height + 6,
-                        min(y0 - 8, overlay.shape[0] - line_height - baseline - 6),
-                    )
-                    for line_index, text in enumerate((label, position_label)):
-                        (text_width, _), _ = cv2.getTextSize(
-                            text, font, font_scale, thickness
-                        )
-                        origin = (
-                            max(4, min(x0, overlay.shape[1] - text_width - 4)),
-                            label_y + line_index * line_height,
-                        )
-                        cv2.putText(
-                            overlay, text, origin, font, font_scale, (0, 0, 0), 3, cv2.LINE_AA
-                        )
-                        cv2.putText(
-                            overlay, text, origin, font, font_scale, color, thickness, cv2.LINE_AA
-                        )
-                if depth_inputs is not None:
-                    _, pose_info = depth_inputs
-                    for item in detections:
-                        if item["bbox_visible"] and item.get("pose") is not None:
-                            draw_pose_axes(overlay, item["pose"], pose_info)
+                rgb_frame = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+                info = depth_inputs[1] if depth_inputs is not None else None
+                overlay = render_bbox_overlay(rgb_frame, detections, info, "2d")
+                overlay3d = render_bbox_overlay(rgb_frame, detections, info, "3d")
                 ok, jpeg = cv2.imencode(
                     ".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]
                 )
                 if not ok:
                     raise RuntimeError("JPEG encoding failed.")
+                ok3d, jpeg3d = cv2.imencode(
+                    ".jpg", overlay3d, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]
+                )
+                if not ok3d:
+                    raise RuntimeError("3D JPEG encoding failed.")
                 with self.lock:
                     if gen != self.generation:
                         continue
                     self.jpeg = jpeg.tobytes()
+                    self.jpeg3d = jpeg3d.tobytes()
                     self.object_debug_revision += 1
                     self.object_debug_snapshot = object_snapshot
                     self.detections = detections
@@ -532,9 +496,9 @@ class CaseNode(Node):
                         grounding_ipc=dict(getattr(detector, "last_metrics", {})),
                         detect_ms=(detected_at - start) * 1000,
                         recognize_ms=(recognized_at - detected_at) * 1000,
-                        pose_ms=(posed_at - recognized_at) * 1000,
-                        pose_count=sum("pose" in item for item in detections),
-                        render_ms=(self.overlay_at - posed_at) * 1000,
+                        bbox3d_ms=(bbox3d_at - recognized_at) * 1000,
+                        bbox3d_count=sum("bbox3d" in item for item in detections),
+                        render_ms=(self.overlay_at - bbox3d_at) * 1000,
                         processing_ms=(self.overlay_at - start) * 1000,
                         callback_to_result_ms=(
                             None if received_at is None else (self.overlay_at - received_at) * 1000
@@ -552,6 +516,7 @@ class CaseNode(Node):
                 with self.lock:
                     if gen == self.generation:
                         self.jpeg = None
+                        self.jpeg3d = None
                         self.clear_object_debug()
                         self.detections = []
                         self.overlay_at = None

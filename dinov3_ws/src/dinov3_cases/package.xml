@@ -11,5 +11,6 @@
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>dinov3_cases_msgs</exec_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

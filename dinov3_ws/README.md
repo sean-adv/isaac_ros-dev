@@ -184,60 +184,113 @@ HTTP 每個 detection 額外含 `track_detected_frames`、`track_total_frames`�
 `track_hit_ratio`、`bbox_visible`，可檢查尚未顯示的原因。
 門檻修改後重新啟動程序，亦可用 `--ros-args -p` 在啟動時覆寫。
 
-## 已識別物件的 6D 姿態
+網頁「辨識結果」的「框顯示」可選 2D bbox 或 3D bbox 線框，預設 2D。
+3D 模式將與 ROS 相同的八個長方體頂點，用該影格相機內參／畸變投影回 RGB 影像。
+只顯示已有 3D bbox 的非 unknown 物件，沿用追蹤穩定門檻；深度缺失時不畫替代 2D 框。
+兩種疊圖共用同次推論結果，切換不重跑模型，各瀏覽器可獨立選擇。
+`/overlay.mjpg?bbox=3d` 與 `/overlay.jpg?bbox=3d` 提供 3D 疊圖；省略參數或 `bbox=2d` 為 2D。
 
-`run_camera.sh` 預設啟用 `depth_registration:=true`，將 IR 雙目產生的深度對齊到
-彩色影像。使用 `/camera/depth/image_raw` 和 `/camera/depth/camera_info`；
-不需要另外開啟 IR 灰階影像串流。單獨的 IR 灰階影像不含公尺距離。
+## 由 2D 框推算 3D 長方體
+
+`run_camera.sh` 預設啟用 `depth_registration:=true`，將深度對齊彩色影像。
+使用 `/camera/depth/image_raw` 和 `/camera/depth/camera_info`，RGB／深度須同尺寸、
+同 optical frame，時間差不超過 `pose_sync_tolerance`（目前 YAML 設定 0.2 秒）。
+推論前保留同步深度快照；`16UC1` 毫米轉公尺，`32FC1` 視為公尺。
+
+讀取 2D bbox 四角各自的深度（右／下邊界為 exclusive，取框內最後一個像素）。
+每角沿 2D 框中心到角落的直線，由內往外搜尋。
+先取得框內最近的有效 Z；只比較相鄰且都有效的兩個深度值，不跨越零值／NaN 等孔洞。
+候選跳變須至少 `bbox3d_edge_min_jump`（目前 0.03 m），且靠中心一側深度須在
+`[最近 Z, 最近 Z + bbox3d_depth_band]`（目前 0.08 m）內，以避免選遠處背景內部的邊緣。
+取候選中絕對深度落差最大的位置，選其靠中心一側的像素與深度；相同落差時取靠中心者。
+沒有明顯跳變時，取線上離角落最近的合理深度點；連合理點都沒有時不輸出該 3D 框，
+狀態為 `no_reasonable_corner_depth:<角落編號>`。
+最大深度跳變是邊界線索，不保證屬於商品；重疊物件、反光與有效範圍內的雜訊仍可能誤選。
+另找整個框內最近的有效深度 Z 與其像素位置；排除零值、NaN、Inf 及超出距離範圍的值。
+此處「最近」指 optical Z 最小，不是歐氏距離最小；最小值仍可能受有效範圍內的雜訊影響。
+
+將四條線找到的實際像素位置與框內最近點依各自深度反投影到 3D，先校正相機畸變。
+不把線內深度套回原始角落位置，避免放大範圍。
+無畸變時每點為 `X=(u-cx)*Z/fx`、`Y=(v-cy)*Z/fy`。
+取這五點各軸的最小／最大值：`size = maxXYZ - minXYZ`，
+`center = (maxXYZ + minXYZ) / 2`，得到與相機座標軸對齊的長方體。
+四元數固定為 `[0,0,0,1]`，不再使用 PCA 或 `max(寬,高)` 假設厚度。
+Z 厚度為四角最遠深度與框內最近深度之差；所有深度相同時厚度為 0，不捏造厚度。
+
+這是五個取樣點的包圍框，未涵蓋未取樣點或不可見背面。
+角落落在背景或框內有其他較近物件時，結果可能包含背景／其他物件，
+不能直接視為完整商品尺寸；後續需物件遮罩或多視角資料才能進一步改善。
 
 ```bash
 ./dinov3_ws/run_camera.sh
 # 另一個終端：
 ./dinov3_ws/run.sh --mode split
-# 再開一個已 source /opt/ros/jazzy/setup.bash 的終端：
-ros2 topic echo /medicine_recognition/poses
+# 再開一個終端：
+source /opt/ros/jazzy/setup.bash
+source dinov3_ws/install/setup.bash
+ros2 topic echo /medicine_recognition/detections_3d
 ```
 
-輸出型別為 `vision_msgs/msg/Detection3DArray`：
+3D topic 改為 `/medicine_recognition/detections_3d`，型別 `dinov3_cases_msgs/msg/Detection3DPointsArray`：
 
-- `header`：原始 RGB 影格的時間戳與 optical frame。
-- `detections[].results[].hypothesis.class_id`／`score`：商品標籤與辨識相似度。
-- `detections[].results[].pose.pose.position`：`x, y, z`，單位公尺。
-- `detections[].results[].pose.pose.orientation`：`x, y, z, w` 單位四元數。
-- `detections[].bbox`：可見表面點雲的有向包圍框，尺寸單位公尺。
+- `header`：原始 RGB 影格的時間戳與 optical frame（X 向右、Y 向下、Z 向前）。
+- `detections[].id`：與當次 2D detection 相同的追蹤 ID。
+- `detections[].bbox.center`：上述中心位置（公尺）與固定單位四元數。
+- `detections[].bbox.size`：推算長方體的寬、高、厚度（公尺）。
+- `detections[].hypothesis.class_id`／`score`：商品標籤與 DINOv3 相似度。
+- `detections[].bbox_2d`：原始 2D 框中心與尺寸（pixel）。
+- `detections[].bbox_2d_corners`：原始 2D 框四角（pixel）；右／下為原始 exclusive 邊界。
+- `detections[].sampled_2d_points`：四條角落到中心線上實際找到的像素位置（pixel）。
+- `detections[].sampled_3d_points`：對應四個實際取樣位置的 3D 點（公尺）。
+- `detections[].nearest_2d_point`／`nearest_3d_point`：框內最近深度點的 2D／3D 位置。
+- `detections[].bbox_3d_corners`：最終長方體的八個 3D 頂點（公尺）。
 
-位置是**可見表面點雲的質心**；不是完整商品中心。旋轉由點雲 PCA 估計：
-局部 X 為最長主軸，Z 為最小變異的表面法向、符號指向遠離相機的一側，
-Y 形成右手座標系。X 的影像平面主要分量固定為正。相機 optical frame 為
-X 向右、Y 向下、Z 向前。沒有 CAD 或物件姿態標定，這個幾何座標系無法代表
-商品標準正面，也不能解決對稱物件的真實朝向；PCA 軸在不同視角可能切換。
-訊息 covariance 使用未經標定的保守常數（位置對角 0.01 m²、旋轉 1 rad²），
-不是感測器精度量測。3D detection 的 ID 沿用同次 2D ROI 追蹤 ID。
+四角及取樣點順序為左上、右上、右下、左下；八頂點先列 min-Z 面四角，再列 max-Z 面四角，
+每面順序為 min-X/min-Y、max-X/min-Y、max-X/max-Y、min-X/max-Y。
+「所有 3D 點」包含四個反投影取樣點、最近深度點與八個包圍框頂點，不是整張深度圖點雲。
 
-只對非 `unknown` 物件估計姿態。RGB／深度必須同尺寸、同 frame，時間差不超過
-`pose_sync_tolerance`（預設 0.05 秒），並有匹配的相機內參。
-推論前保留深度快照，避免模型處理期間誤用後來的影格。
-`16UC1` 由毫米轉公尺；`32FC1` 視為公尺，其他編碼拒絕。
-框中心深度作為種子，保留同深度帶內相連區域，排除零值、NaN、超距和背景。
-點數不足或主軸不明確（例如圓形／正方形表面）時不發布該物件的 6D 姿態。
-辨識框中心落在背景、重疊物件或背景與物件深度接近時，這種分割仍可能誤估，
-需以實機資料確認。所有物件的處理狀態可在 `/api/detections` 的 `pose_status`
-查看，成功者另含 `pose`。
-偵測疊圖在每個框旁顯示 `position (m): X=… Y=… Z=…`，保留三位小數；
-沒有可用姿態的物件顯示 `position: N/A`。
-有可用姿態時，疊圖也在表面質心畫出物件局部座標軸：X 紅、Y 綠、Z 藍，
-各長 8 公分，依姿態四元數、相機內參與畸變投影。朝向視線的軸可能呈現為點。
-
-每次辨識結果均可發布空陣列，表示當次沒有可用姿態；原本的 2D 辨識輸出保留。
-上傳圖片沒有對應深度，因此只提供 2D 辨識。
-參數在 `config/dinov3_cases.yaml`：距離範圍預設 0.1–5 m、深度帶 ±0.08 m、
-至少 80 點、相鄰 PCA 特徵值比例至少 1.15。可用 `--ros-args -p` 覆寫，例如
-`-p pose_enabled:=false` 停用姿態，或 `-p pose_depth_band:=0.12` 調整分割深度帶。
-
-## 驗證
+自訂訊息原始檔位於 `src/dinov3_cases_msgs`。`run.sh` 首次啟動自動編譯並載入訊息；
+修改 `.msg` 後需重新建置：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+colcon --log-base dinov3_ws/log build --base-paths dinov3_ws/src/dinov3_cases_msgs \
+  --build-base dinov3_ws/build --install-base dinov3_ws/install \
+  --packages-select dinov3_cases_msgs --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+source dinov3_ws/install/setup.bash
+```
+
+原本訂閱標準 `vision_msgs/Detection3DArray` 的程式須改用新型別與上述欄位。
+
+自訂訊息不包含 `results[].pose` 或 covariance。位置與尺寸請讀 `bbox`。
+已停用 `/medicine_recognition/poses`。原本 2D topic 保留；ROS 2D／3D detection
+都過濾 `unknown`，內部追蹤與 HTTP 辨識資料仍保留。已識別物件須在四條角落到中心
+的線上及框內有有效深度，才輸出 3D 框。全為 `unknown` 或無可用結果時發布空陣列。
+上傳圖片沒有對應深度，因此只提供 2D 辨識。
+
+HTTP `/api/detections` 改用 `bbox3d_status`；成功者含 `bbox3d` 的 `position`、`size`、
+`corners`、`corner_depths`（依左上、右上、右下、左下排序）、`nearest_point`、
+`nearest_depth`、`nearest_pixel`、`depth_range`、`foreground_depth_band`、`corner_pixels`（原始四角）、
+`corner_sample_pixels`（實際取樣位置）、`corner_edge_jumps`、
+`corner_sampling_methods`（max_depth_jump 或 reasonable_depth_fallback）、`edge_min_jump` 與 `method`，不再附帶 `pose`。
+疊圖仍顯示中心位置與 `sqrt(X²+Y²+Z²)` 距離（公尺，三位小數），無框時顯示 N/A。
+顯示穩定門檻只影響疊圖，不延遲 ROS 2D／3D 輸出。
+
+為保留啟動參數相容性，深度功能仍使用 `pose_enabled`、`pose_sync_tolerance`、
+`pose_min_depth`、`pose_max_depth`；目前有效深度範圍為 0.1–5 m。
+`bbox3d_edge_min_jump` 控制最小可接受深度跳變（公尺）。
+`bbox3d_depth_band` 控制沿線搜尋與最近深度的最大差距；若真實可見表面深度跨度
+超過 8 cm，可提高此值，但可能再次納入背景。最近深度仍採框內最小有效 Z，
+框內若有其他更近物件或有效範圍內雜訊，仍可能選錯前景或拒絕輸出。
+`-p pose_enabled:=false` 可停用 3D 框；PCA 的深度帶、最少點數與軸比例參數已移除。
+
+## 驗證
+
+先建置上方的自訂訊息套件，再執行：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source dinov3_ws/install/setup.bash
 source dinov3_trt11_venv/bin/activate
 export PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"

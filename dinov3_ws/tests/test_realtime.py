@@ -92,13 +92,13 @@ def test_blocked_ros_output_does_not_lock_input_and_skips_pending_frames():
         generation=0,
         pending_publication=(None, [], Header(frame_id="first"), 0),
         recognition_pub=Mock(),
-        pose_pub=Mock(),
+        bbox3d_pub=Mock(),
         pub=Mock(),
         recognition_debug_pub=Mock(),
         bridge=Mock(),
         get_logger=lambda: Mock(),
     )
-    node.pose_pub.get_subscription_count.return_value = 0
+    node.bbox3d_pub.get_subscription_count.return_value = 0
     node.recognition_pub.get_subscription_count.return_value = 1
     node.recognition_pub.publish.side_effect = publish
     node.pub.get_subscription_count.return_value = 0

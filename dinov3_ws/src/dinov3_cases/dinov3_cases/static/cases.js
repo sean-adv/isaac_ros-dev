@@ -2,6 +2,13 @@ const el = id => document.getElementById(id);
 let referenceKey = '',
   referenceVersion = 0;
 let groundingLoaded = false;
+el('bbox-view').onchange = () => {
+  const mode = el('bbox-view').value;
+  el('overlay').src = '/overlay.mjpg?bbox=' + mode;
+  el('bbox-help').textContent = mode === '3d'
+    ? '顯示 3D bbox 投影線框；需有效同步深度、已識別商品與穩定追蹤。沒有可用 3D 框時只顯示影像。'
+    : '顯示原始 2D 框；綠框為已辨識商品，黃框為 unknown。';
+};
 el('grounding-form').onsubmit = e => {
   e.preventDefault();
   const values = Object.fromEntries(new FormData(e.target));

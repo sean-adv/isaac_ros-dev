@@ -47,7 +47,7 @@ def main():
         def performance(self, value):
             if 'completed_at' in value:
                 value = dict(value, **extras, objects=len(self.detections),
-                             pose_statuses=[x.get('pose_status') for x in self.detections])
+                             bbox3d_statuses=[x.get('bbox3d_status') for x in self.detections])
             self._performance = value
         def on_image(self, msg):
             self.arrivals.append(time.monotonic())

@@ -31,7 +31,8 @@ def new_session(item, revision):
         scan["reason"] = "等待抓取規劃器：表面 PCA 姿態尚未通過接觸及夾爪檢查。"
     else:
         scan["state"] = "rescan" if scan.get("points") else "failed"
-        scan["reason"] = item.get("pose_status", "missing_depth")
+        scan["reason"] = ("3D bbox 尚未提供抓取規劃所需點雲。" if item.get("bbox3d")
+                          else item.get("bbox3d_status", item.get("pose_status", "missing_depth")))
     return scan
 
 

@@ -24,12 +24,14 @@ dinov3_cases:
     preview_max_width: 960
     jpeg_quality: 80
     # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
+    # Legacy pose_* names now configure corner/nearest-depth 3D boxes.
     pose_enabled: true
     depth_topic: /camera/depth/image_raw
     depth_camera_info_topic: /camera/depth/camera_info
-    pose_sync_tolerance: 0.05
+    pose_sync_tolerance: 0.2
     pose_min_depth: 0.1
     pose_max_depth: 5.0
-    pose_depth_band: 0.08
-    pose_min_points: 80
-    pose_axis_ratio: 1.15
+    # Corner-to-center samples must stay within 8 cm of the ROI nearest valid Z.
+    bbox3d_depth_band: 0.08
+    # Minimum adjacent valid depth jump for a center-to-corner edge (meters).
+    bbox3d_edge_min_jump: 0.03

@@ -70,6 +70,11 @@
 <p id="status">Connecting…</p>
 <p id="error" role="alert">
 </p>
+<label>框顯示 <select id="bbox-view">
+<option value="2d">2D bbox</option>
+<option value="3d">3D bbox 線框</option>
+</select></label>
+<p id="bbox-help" role="status">顯示原始 2D 框。</p>
 <img id="overlay" src="/overlay.mjpg" alt="物體框選與辨識結果">
 <p>
 <small>det 為 OmDet-Turbo-Tiny 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small>

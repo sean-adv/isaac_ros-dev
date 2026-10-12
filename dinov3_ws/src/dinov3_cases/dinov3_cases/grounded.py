@@ -416,6 +416,8 @@ def recognition_message(items, header=None):
     if header is not None:
         message.header = header
     for index, item in enumerate(items):
+        if item["label"] == "unknown":
+            continue
         x0, y0, x1, y1 = item["bbox"]
         detection = Detection2D()
         detection.header = message.header

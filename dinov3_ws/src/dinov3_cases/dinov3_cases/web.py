@@ -43,6 +43,7 @@ def create_app(node):
         with node.lock:
             node.generation += 1
             node.jpeg = None
+            node.jpeg3d = None
             node.clear_object_debug()
             node.detections = []
             node.overlay_at = None
@@ -167,6 +168,7 @@ def create_app(node):
             node.grounding_settings = settings
             node.generation += 1
             node.jpeg = None
+            node.jpeg3d = None
             node.clear_object_debug()
             node.detections = []
             node.overlay_at = None
@@ -194,6 +196,7 @@ def create_app(node):
             node.selected = name
             node.generation += 1
             node.jpeg = None
+            node.jpeg3d = None
             node.clear_object_debug()
             node.detections = []
             node.status = "Building reference features…"
@@ -228,6 +231,7 @@ def create_app(node):
             node.frame_seq += 1
             node.generation += 1
             node.jpeg = None
+            node.jpeg3d = None
             node.clear_object_debug()
             node.detections = []
         return jsonify(ok=True)
@@ -265,9 +269,15 @@ def create_app(node):
     def camera_stream():
         return stream("preview_jpeg")
 
+    def overlay_attribute():
+        mode = request.args.get("bbox", "2d")
+        if mode not in ("2d", "3d"):
+            raise ValueError("bbox must be 2d or 3d.")
+        return "jpeg3d" if mode == "3d" else "jpeg"
+
     @app.get("/overlay.mjpg")
     def overlay_stream():
-        return stream("jpeg")
+        return stream(overlay_attribute())
 
     @app.get("/api/detections")
     def detections():
@@ -327,8 +337,9 @@ def create_app(node):
 
     @app.get("/overlay.jpg")
     def overlay():
+        attribute = overlay_attribute()
         with node.lock:
-            data = node.jpeg
+            data = getattr(node, attribute, None)
         return Response(
             data or b"",
             status=200 if data else 204,

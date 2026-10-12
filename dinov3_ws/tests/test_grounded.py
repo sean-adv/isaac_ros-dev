@@ -355,3 +355,18 @@ def test_square_object_padding_is_removed_from_heatmap():
 
     padding_color = cv2.applyColorMap(np.zeros((1, 1), dtype=np.uint8), cv2.COLORMAP_TURBO)[0, 0]
     assert not (views["heatmap"] == padding_color).all(axis=-1).any()
+
+
+def test_ros_2d_filters_unknown_without_changing_tracking_ids_or_input():
+    from std_msgs.msg import Header
+
+    items = [dict(label=label, score=.9, track_id=track_id, bbox=[0, 0, 100, 100])
+             for label, track_id in [("unknown", 7), ("medicine", 42), ("unknown", 8)]]
+    header = Header(frame_id="camera")
+    message = recognition_message(items, header)
+    assert message.header == header
+    assert len(message.detections) == 1
+    assert message.detections[0].id == "42"
+    assert message.detections[0].results[0].hypothesis.class_id == "medicine"
+    assert not recognition_message([items[0], items[2]], header).detections
+    assert [item["label"] for item in items] == ["unknown", "medicine", "unknown"]

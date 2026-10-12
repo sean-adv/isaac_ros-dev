@@ -102,7 +102,7 @@ def test_sync_rejects_stale_unregistered_and_wrong_size_depth():
 def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     values = dict(pose_min_depth=.1, pose_max_depth=5., pose_depth_band=.08,
                   pose_min_points=80, pose_axis_ratio=1.15, pose_enabled=True,
-                  pose_sync_tolerance=.05)
+                  pose_sync_tolerance=.05, bbox3d_depth_band=.08, bbox3d_edge_min_jump=.03)
     node = SimpleNamespace(param=values.__getitem__, bridge=Mock(), stop=threading.Event(),
                            depth_changed=threading.Condition(), depth_frames=deque(),
                            depth_infos=deque([calibration()]))
@@ -114,9 +114,9 @@ def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     node.bridge.imgmsg_to_cv2.return_value = (plane() * scale).astype(
         np.uint16 if encoding == "16UC1" else np.float32)
     items = [dict(label="medicine", score=.9, bbox=[35, 40, 125, 80])]
-    CaseNode.estimate_poses(node, items, inputs)
-    assert items[0]["pose"]["position"][2] == pytest.approx(1.)
-    CaseNode.estimate_poses(node, [dict(label="medicine")], None)
+    CaseNode.estimate_bboxes3d(node, items, inputs)
+    assert items[0]["bbox3d"]["position"][2] == pytest.approx(1.)
+    CaseNode.estimate_bboxes3d(node, [dict(label="medicine")], None)
 
 
 def test_unit_quaternion_handles_half_turn():
