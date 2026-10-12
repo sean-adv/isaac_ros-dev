@@ -1,4 +1,4 @@
-"""Smoke check the real Grounding DINO + ViT-S/16 TRT ROS/HTTP worker."""
+"""Smoke check the real OmDet-Turbo-Tiny + ViT-S/16 TRT ROS/HTTP worker."""
 
 import argparse
 import io
@@ -16,9 +16,9 @@ from dinov3_cases.runtime import ARTIFACTS, MODES, DINO_ENGINE, LEGACY_PYTHON
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=MODES, default="split")
+    parser.add_argument("--mode", choices=MODES, default="single")
     args = parser.parse_args()
-    artifact_dir = ARTIFACTS / "tensorrt11"
+    artifact_dir = ARTIFACTS / "omdet"
     execution, grounding_engine = MODES[args.mode]
     image = Image.open(
         Path(__file__).resolve().parents[2] / "dinov3_cases_data/stomach/1790733215386907348_2.png"
@@ -76,18 +76,19 @@ def main():
             )
             status, detections = wait()
             assert status["inference_backend"] == status["grounding_backend"] == "trt"
-            assert status["grounding_model_id"] == "IDEA-Research/grounding-dino-tiny"
+            assert status["grounding_model_id"] == "omlab/OmDet-Turbo_tiny_SWIN_T"
             assert status["model_id"] == "facebook/dinov3-vits16-pretrain-lvd1689m"
             assert "vits16" in status["backend_description"]
             import tensorrt
 
             assert tensorrt.__version__ == "11.1.0.106"
             assert status["grounding_execution"] == execution
+            assert status["grounding_precision"] == json.loads(grounding_engine.with_suffix(".json").read_text())["precision"]
             assert client.get("/").status_code == 200
             assert client.get("/static/cases.js").status_code == 200
             assert client.get("/images").status_code == 200
             if args.mode == "split":
-                assert status["grounding_worker"]["tensorrt"] == "10.16.2.10"
+                assert status["grounding_worker"]["tensorrt"] == "11.1.0.106"
                 assert status["performance"]["grounding_ipc"]["frame_id"] > 0
             else:
                 assert status["grounding_worker"] is None
@@ -107,9 +108,12 @@ def main():
                 client.get("/api/status").json["grounding"]["prompt"]
                 == status["grounding"]["prompt"]
             )
-            assert client.post("/api/grounding", json={"prompt": "box. bottle."}).status_code == 200
+            assert client.post("/api/grounding", json={"prompt": "box. bottle."}).status_code == 400
+            assert client.post("/api/grounding", json={"box_threshold": 0.32}).status_code == 200
             changed_status, changed = wait()
-            assert changed_status["grounding"]["prompt"] == "box. bottle."
+            assert changed_status["grounding"]["prompt"] == status["grounding"]["prompt"]
+            assert changed_status["grounding"]["box_threshold"] == 0.32
+            assert changed_status["grounding_offline_prompts"]
             assert any(item["label"] == "sample" for item in changed), changed
             report = {
                 "passed": True,

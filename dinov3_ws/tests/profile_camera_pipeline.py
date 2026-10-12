@@ -12,7 +12,7 @@ from dinov3_cases.trt_backend import TRTBackbone
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=MODES, default='split')
+    parser.add_argument('--mode', choices=MODES, default='single')
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--warmup', type=int, default=10)
     parser.add_argument('--no-pose', action='store_true')
@@ -37,9 +37,8 @@ def main():
     timed(pipeline.Encoder, 'encode', 'roi_encode_ms')
     timed(TRTBackbone, '__call__', 'dinov3_trt_ms')
     if args.mode == 'single':
-        from dinov3_cases.grounding_trt import GroundingTRT
-        timed(GroundingTRT, 'prepare_inputs', 'grounding_prepare_ms')
-        timed(GroundingTRT, '__call__', 'grounding_trt_ms')
+        from dinov3_cases.omdet_trt import OmDetDetector
+        timed(OmDetDetector, 'infer', 'omdet_trt_ms')
     class ProfileNode(pipeline.CaseNode):
         @property
         def performance(self):

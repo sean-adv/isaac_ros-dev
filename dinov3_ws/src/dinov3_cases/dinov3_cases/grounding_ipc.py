@@ -93,6 +93,8 @@ class SharedMemoryGroundingDetector:
             if not ready.get("ok"):
                 raise RuntimeError(ready.get("error", "Grounding worker startup failed"))
             self.worker_info = ready["worker"]
+            self.offline_prompts = ready.get("offline_prompts", [])
+            self.precision = ready.get("precision")
             self.model = SimpleNamespace(config=SimpleNamespace(max_text_len=ready["max_text_len"]))
             self.sock.settimeout(self.timeout)
         except BaseException:
@@ -216,15 +218,19 @@ def worker_main(fd, detector_factory=None, version=None):
                 import torch
                 from .grounded import GroundingDetector
 
-                if trt.__version__ != "10.16.2.10":
+                if trt.__version__ != "11.1.0.106":
                     raise RuntimeError(
-                        f"Expected legacy TensorRT 10.16.2.10, got {trt.__version__}"
+                        f"Expected TensorRT 11.1.0.106, got {trt.__version__}"
                     )
                 detector_factory = GroundingDetector
                 version = dict(tensorrt=trt.__version__, torch=torch.__version__, pid=os.getpid())
             detector = detector_factory(**config)
             _send(
-                sock, dict(ok=True, worker=version, max_text_len=detector.model.config.max_text_len)
+                sock, dict(
+                    ok=True, worker=version, max_text_len=detector.model.config.max_text_len,
+                    offline_prompts=getattr(detector, "offline_prompts", []),
+                    precision=getattr(detector, "precision", None),
+                )
             )
         except Exception as error:
             _send(sock, dict(ok=False, error=f"{type(error).__name__}: {error}"))

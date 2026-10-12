@@ -45,6 +45,63 @@ def rotation_quaternion(rotation):
     return q if q[3] >= 0 else -q
 
 
+
+def draw_pose_axes(image, pose, info, axis_length=0.08):
+    """Project object-local axes into the registered RGB image (length in meters)."""
+    position = np.asarray(pose["position"], dtype=np.float64)
+    quaternion = np.asarray(pose["quaternion"], dtype=np.float64)
+    if (not np.isfinite(position).all() or not np.isfinite(quaternion).all()
+            or np.linalg.norm(quaternion) < 1e-12):
+        return
+    x, y, z, w = quaternion / np.linalg.norm(quaternion)
+    rotation = np.array([
+        [1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+        [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+        [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)],
+    ])
+    points = np.vstack((position, position + axis_length * rotation.T))
+    # Do not project points on or behind the camera plane.
+    if np.any(points[:, 2] <= 1e-6):
+        return
+    k = np.asarray(info.k, dtype=np.float64).reshape(3, 3)
+    distortion = np.asarray(info.d, dtype=np.float64)
+    zero = np.zeros(3, dtype=np.float64)
+    if info.distortion_model == "equidistant" and distortion.size == 4:
+        projected, _ = cv2.fisheye.projectPoints(
+            points.reshape(-1, 1, 3), zero, zero, k, distortion
+        )
+    elif info.distortion_model in ("plumb_bob", "rational_polynomial", ""):
+        projected, _ = cv2.projectPoints(
+            points, zero, zero, k, distortion if distortion.size else None
+        )
+    else:
+        return
+    pixels = projected.reshape(-1, 2)
+    if not np.isfinite(pixels).all() or np.max(np.abs(pixels)) > 1e7:
+        return
+    pixels = np.rint(pixels).astype(int)
+    origin = tuple(map(int, pixels[0]))
+    height, width = image.shape[:2]
+    for endpoint, label, color in zip(
+        pixels[1:], ("X", "Y", "Z"), ((0, 0, 255), (0, 255, 0), (255, 0, 0))
+    ):
+        endpoint = tuple(map(int, endpoint))
+        visible, start, end = cv2.clipLine((0, 0, width, height), origin, endpoint)
+        if not visible:
+            continue
+        cv2.arrowedLine(image, start, end, (0, 0, 0), 5, cv2.LINE_AA, tipLength=0.2)
+        cv2.arrowedLine(image, start, end, color, 3, cv2.LINE_AA, tipLength=0.2)
+        # An axis along the viewing direction projects to a dot.
+        if start == end:
+            cv2.circle(image, end, 4, color, -1, cv2.LINE_AA)
+        text_origin = (max(0, min(end[0] + 6, width - 20)),
+                       max(18, min(end[1] - 6, height - 6)))
+        cv2.putText(image, label, text_origin, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(image, label, text_origin, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, color, 2, cv2.LINE_AA)
+
+
 def estimate_surface_pose(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                           depth_band=0.08, min_points=80, axis_ratio=1.15):
     """Segment a central depth component, unproject, then fit its PCA frame.

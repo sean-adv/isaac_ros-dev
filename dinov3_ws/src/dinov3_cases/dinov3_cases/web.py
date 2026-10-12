@@ -81,6 +81,8 @@ def create_app(node):
                 grounding=node.grounding_settings,
                 grounding_model_id=GROUNDING_MODEL_ID,
                 grounding_backend="trt",
+                grounding_precision=getattr(getattr(node, "grounding_detector", None), "precision", None),
+                grounding_offline_prompts=getattr(getattr(node, "grounding_detector", None), "offline_prompts", []),
                 grounding_execution=node.param("grounding_execution"),
                 grounding_worker=getattr(
                     getattr(node, "grounding_detector", None), "worker_info", None
@@ -159,6 +161,8 @@ def create_app(node):
             settings = {**node.grounding_settings, **payload}
             settings["prompt"] = validate_settings(**settings)
             detector = getattr(node, "grounding_detector", None)
+            if detector is None and "prompt" in payload:
+                return jsonify(error="OmDet 載入中，請稍後選擇離線提示。"), 503
             if detector is not None:
                 detector.validate_prompt(settings["prompt"])
             node.grounding_settings = settings

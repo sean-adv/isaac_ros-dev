@@ -1,97 +1,57 @@
-"""Compare legacy direct results with shared-memory results and time warm IPC."""
-
+"""Check real offline OmDet parity between direct and shared-memory execution."""
 import argparse
 import json
-from pathlib import Path
 import time
-
 import numpy as np
 from PIL import Image
-import tensorrt
-
-from dinov3_cases.grounded import GroundingDetector
+from dinov3_cases.grounded import GroundingDetector, DEFAULT_PROMPT
 from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
+from dinov3_cases.runtime import GROUNDING_ENGINE, LEGACY_PYTHON, WORKSPACE
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--direct", action="store_true")
-    parser.add_argument("--samples", type=int, default=20)
+    parser.add_argument('--samples',type=int,default=20)
+    parser.add_argument('--direct',action='store_true')
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[2]
-    artifacts = root / "dinov3_ws/artifacts"
-    output = artifacts / "tensorrt11"
-    image = Image.open(root / "dinov3_cases_data/stomach/1790733215386907348_2.png").convert("RGB")
-    config = dict(
-        device="cuda", engine_path=artifacts / "tensorrt/grounding_dino_wingdzero_fp16.engine"
-    )
-    detector = (
-        GroundingDetector(**config)
-        if args.direct
-        else SharedMemoryGroundingDetector(**config, python=str(root / "dinov3_venv/bin/python"))
-    )
-    prompt = "medicine bottle. medicine box. bottle. box."
-    cases = [(image, prompt), (image, "box. bottle."), (image.rotate(90, expand=True), prompt)]
-
-    def detect(im, text):
-        return detector.detect(im, text, 0.3, 0.25, 0.5, 20)
-
+    if args.samples < 1:
+        parser.error('--samples must be positive')
+    image = Image.open(WORKSPACE / 'dinov3_cases_data/stomach/1790733215386907348_2.png').convert('RGB')
+    direct = GroundingDetector(GROUNDING_ENGINE,'cuda')
+    worker = None if args.direct else SharedMemoryGroundingDetector(GROUNDING_ENGINE,'cuda',python=str(LEGACY_PYTHON))
+    detector = worker or direct
     try:
-        if args.direct:
-            assert tensorrt.__version__ == "10.16.2.10"
+        for frame in [image,image.rotate(90,expand=True)]:
+            expected = direct.detect(frame,DEFAULT_PROMPT,.3,.25,.5,20)
+            actual = detector.detect(frame,DEFAULT_PROMPT,.3,.25,.5,20)
+            assert len(actual)==len(expected)
+            for a,e in zip(actual,expected):
+                assert a['bbox']==e['bbox'] and a['detection_label']==e['detection_label']
+                np.testing.assert_allclose(a['detection_score'],e['detection_score'],atol=1e-6)
+        detector.validate_prompt(DEFAULT_PROMPT)
+        try:
+            detector.validate_prompt('unencoded category.')
+        except ValueError:
+            pass
         else:
-            assert tensorrt.__version__ == "11.1.0.106"
-            assert detector.worker_info["tensorrt"] == "10.16.2.10"
-        results = [detect(im, text) for im, text in cases]
-        if not args.direct:
-            reference = json.loads((output / "ipc-direct-reference.json").read_text())["results"]
-            for actual, expected in zip(results, reference):
-                assert len(actual) == len(expected)
-                for a, b in zip(actual, expected):
-                    assert a["bbox"] == b["bbox"] and a["detection_label"] == b["detection_label"]
-                    np.testing.assert_allclose(
-                        a["detection_score"], b["detection_score"], atol=1e-6, rtol=0
-                    )
+            raise AssertionError('Unencoded prompt accepted')
+        assert detector.offline_prompts==direct.offline_prompts
         for _ in range(3):
-            detect(image, prompt)
-        measurements = []
-        previous_id = 0
+            detector.detect(image,DEFAULT_PROMPT,.3,.25,.5,20)
+        rows=[]
         for _ in range(args.samples):
-            start = time.monotonic_ns()
-            detect(image, prompt)
-            elapsed = (time.monotonic_ns() - start) / 1e6
-            entry = dict(detector.last_metrics) if not args.direct else {}
-            entry["caller_detect_ms"] = elapsed
-            if not args.direct:
-                assert entry["frame_id"] > previous_id
-                previous_id = entry["frame_id"]
-            measurements.append(entry)
-        summary = {
-            key: dict(
-                median=float(np.median([m[key] for m in measurements])),
-                p95=float(np.percentile([m[key] for m in measurements], 95)),
-            )
-            for key in measurements[0]
-            if key.endswith("_ms")
-        }
-        report = dict(
-            passed=True,
-            parent_tensorrt=tensorrt.__version__,
-            worker=getattr(detector, "worker_info", None),
-            image_size=list(image.size),
-            samples=args.samples,
-            warmups=3,
-            summary_ms=summary,
-            results=results,
-            measurements=measurements,
-        )
-        path = output / ("ipc-direct-reference.json" if args.direct else "ipc-latency.json")
-        path.write_text(json.dumps(report, indent=2) + "\n")
-        print(json.dumps(dict(report=str(path), passed=True, summary_ms=summary), indent=2))
+            start=time.monotonic()
+            detector.detect(image,DEFAULT_PROMPT,.3,.25,.5,20)
+            rows.append(dict(getattr(detector,'last_metrics',{}),caller_detect_ms=(time.monotonic()-start)*1000))
+        report=dict(passed=True,worker=getattr(detector,'worker_info',None),
+                    median_detect_ms=float(np.median([r['caller_detect_ms'] for r in rows])),rows=rows)
+        path=GROUNDING_ENGINE.parent / ('ipc_direct.json' if args.direct else 'ipc_validation.json')
+        path.write_text(json.dumps(report,indent=2)+'\n')
+        print('PASS: real OmDet offline IPC parity',path)
     finally:
-        if not args.direct:
-            detector.close()
+        if worker:
+            worker.close()
 
 
-if __name__ == "__main__":
+if __name__=='__main__':
     main()

@@ -27,3 +27,5 @@ __pycache__/
 /dinov3_ws/install/
 /dinov3_ws/log/
 /.pytest_cache
+/OmDet/
+/dinov3_ws/artifacts/omdet/

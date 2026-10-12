@@ -27,7 +27,7 @@ from .runtime import (
     INPUT_SIZE,
 )
 from vision_msgs.msg import Detection2DArray, Detection3DArray
-from .depth_pose import matched_inputs, attach_surface_poses, poses_message
+from .depth_pose import matched_inputs, attach_surface_poses, poses_message, draw_pose_axes
 from .web import create_app
 from .grounded import (
     DEFAULT_PROMPT,
@@ -333,7 +333,7 @@ class CaseNode(Node):
             with self.lock:
                 self.reference_stride = stride
                 self.backend_description = encoder.description
-                self.status = "Loading Grounding DINO model…"
+                self.status = "Loading OmDet-Turbo-Tiny model…"
             detector_class = GroundingDetector
             detector_options = {}
             if self.param("grounding_execution") == "subprocess":
@@ -443,18 +443,40 @@ class CaseNode(Node):
                     cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, 2)
                     score = "--" if item["score"] is None else f"{item['score']:.2f}"
                     label = f"#{index+1} {item['label']} | {item['detection_label']} | det {item['detection_score']:.2f} sim {score}"
+                    pose = item.get("pose")
+                    if pose is not None:
+                        px, py, pz = pose["position"]
+                        position_label = f"position (m): X={px:.3f} Y={py:.3f} Z={pz:.3f}"
+                    else:
+                        position_label = "position: N/A"
                     font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
-                    (text_width, text_height), _ = cv2.getTextSize(
+                    (_, text_height), baseline = cv2.getTextSize(
                         label, font, font_scale, thickness
                     )
-                    origin = (
-                        max(4, min(x0, overlay.shape[1] - text_width - 4)),
-                        max(text_height + 6, y0 - 8),
+                    line_height = text_height + baseline + 8
+                    label_y = max(
+                        text_height + 6,
+                        min(y0 - 8, overlay.shape[0] - line_height - baseline - 6),
                     )
-                    cv2.putText(overlay, label, origin, font, font_scale, (0, 0, 0), 4, cv2.LINE_AA)
-                    cv2.putText(
-                        overlay, label, origin, font, font_scale, color, thickness, cv2.LINE_AA
-                    )
+                    for line_index, text in enumerate((label, position_label)):
+                        (text_width, _), _ = cv2.getTextSize(
+                            text, font, font_scale, thickness
+                        )
+                        origin = (
+                            max(4, min(x0, overlay.shape[1] - text_width - 4)),
+                            label_y + line_index * line_height,
+                        )
+                        cv2.putText(
+                            overlay, text, origin, font, font_scale, (0, 0, 0), 4, cv2.LINE_AA
+                        )
+                        cv2.putText(
+                            overlay, text, origin, font, font_scale, color, thickness, cv2.LINE_AA
+                        )
+                if depth_inputs is not None:
+                    _, pose_info = depth_inputs
+                    for item in detections:
+                        if item.get("pose") is not None:
+                            draw_pose_axes(overlay, item["pose"], pose_info)
                 ok, jpeg = cv2.imencode(
                     ".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]
                 )
@@ -489,7 +511,7 @@ class CaseNode(Node):
                         ),
                     )
                     self.status = (
-                        f"Grounding DINO → {encoder.description} | {len(detections)} objects | "
+                        f"OmDet-Turbo-Tiny → {encoder.description} | {len(detections)} objects | "
                         f"{len(set(gallery.labels))} classes / {len(gallery.labels)} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )

@@ -18,7 +18,12 @@ el('grounding-form').onsubmit = e => {
 };
 
 function updateGrounding(d) {
-  if (!groundingLoaded && d.grounding) {
+  if (!groundingLoaded && d.grounding && d.grounding_offline_prompts?.length) {
+    el('prompt').replaceChildren(...d.grounding_offline_prompts.map(prompt => {
+      const option = document.createElement('option');
+      option.value = option.textContent = prompt;
+      return option;
+    }));
     for (const [key, value] of Object.entries(d.grounding)) el('grounding-form').elements.namedItem(key).value = value;
     groundingLoaded = true;
   }
@@ -151,7 +156,7 @@ async function refresh() {
 
 const objectHelp = {
   heatmap: 'ROI 原圖疊加局部 patch 相似度。固定色階：0（深藍）→ 0.5（綠）→ 1（紅）；負值顯示深藍。',
-  crop: 'Grounding DINO 在原圖座標中找到的物體裁切，保持原長寬比。',
+  crop: 'OmDet-Turbo-Tiny 在原圖座標中找到的物體裁切，保持原長寬比。',
   grid: '實際 DINOv3 模型輸入：黃色為 patch 邊界，藍框外為右側／底部補邊。',
   patches: '每個 ROI patch 與最佳參考圖所有 patch 的最高 cosine similarity；顯示完整模型網格（含補邊）。',
   similarity: '移除補邊並映射回 ROI 的純相似度圖。固定色階 0–1；負值顯示深藍。',

@@ -76,41 +76,8 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20):
     return kept
 
 
-class GroundingDetector:
-    def __init__(self, engine_path, device):
-        from transformers import AutoProcessor
-        from .grounding_trt import GroundingTRT
-
-        self.model = GroundingTRT(engine_path, GROUNDING_MODEL_ID, device)
-        self.processor = AutoProcessor.from_pretrained(
-            self.model.processor_path, local_files_only=True
-        )
-        self.device = device
-
-    def validate_prompt(self, prompt):
-        self.model.validate_prompt(self.processor, prompt)
-
-    @torch.inference_mode()
-    def detect(self, image, prompt, box_threshold, text_threshold, nms_iou, limit):
-        inputs = self.model.prepare_inputs(self.processor, image, prompt)
-        if inputs.input_ids.shape[-1] > self.model.config.max_text_len:
-            raise ValueError("Prompt exceeds Grounding DINO token limit; use fewer categories.")
-        outputs = self.model(**inputs)
-        result = self.processor.post_process_grounded_object_detection(
-            outputs,
-            inputs.input_ids,
-            threshold=box_threshold,
-            text_threshold=text_threshold,
-            target_sizes=[(image.height, image.width)],
-        )[0]
-        return clean_proposals(
-            result["boxes"].cpu().tolist(),
-            result["scores"].cpu().tolist(),
-            result["text_labels"],
-            image.size,
-            nms_iou,
-            limit,
-        )
+# Retain the established node/IPC import while replacing the detector backend.
+from .omdet_trt import OmDetDetector as GroundingDetector
 
 
 def prepare_object(image, max_side=224, stride=16, minimum=32):

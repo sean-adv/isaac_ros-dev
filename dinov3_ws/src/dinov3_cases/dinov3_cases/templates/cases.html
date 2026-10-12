@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="/static/cases.css">
 </head>
 <body>
-<h1>Grounding DINO → DINOv3 物體辨識</h1>
+<h1>OmDet-Turbo-Tiny → DINOv3 物體辨識</h1>
 <p>
 <a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a>
 </p>
@@ -14,12 +14,12 @@
 <section id="grounding-section">
 <h2>偵測與辨識設定</h2>
 <form id="grounding-form">
-<label>文字提示 <input id="prompt" name="prompt" maxlength="1000" required style="width:min(600px,85%)">
+<label>文字提示 <select id="prompt" name="prompt" required style="width:min(600px,85%)"></select>
 </label>
 <br>
 <label>偵測門檻 <input name="box_threshold" type="number" min="0" max="1" step="0.01" required>
 </label>
-<label>文字門檻 <input name="text_threshold" type="number" min="0" max="1" step="0.01" required>
+<label hidden>文字門檻（OmDet 不使用）<input name="text_threshold" type="number" min="0" max="1" step="0.01">
 </label>
 <br>
 <label>辨識相似度門檻 <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
@@ -28,7 +28,7 @@
 </label>
 <button>套用設定</button>
 </form>
-<small>英文類別以句點分隔，例如 medicine bottle. medicine box. bottle. box.。門檻或差距不足時顯示 unknown。</small>
+<small>OmDet 使用預先編碼的離線提示，類別與任務句分開編碼；新增提示須先建置提示特徵。門檻或差距不足時顯示 unknown。</small>
 </section>
 <section>
 <h2>1. Reference groups</h2>
@@ -74,7 +74,7 @@
 </p>
 <img id="overlay" src="/overlay.mjpg" alt="物體框選與辨識結果">
 <p>
-<small>det 為 Grounding DINO 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small>
+<small>det 為 OmDet-Turbo-Tiny 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small>
 </p>
 <div id="recognition-list">
 </div>
@@ -90,7 +90,7 @@
 </label>
 <label>顯示內容 <select id="object-view">
 <option value="heatmap">ROI 相似度熱圖疊加</option>
-<option value="crop">Grounding bbox 裁切原圖</option>
+<option value="crop">OmDet bbox 裁切原圖</option>
 <option value="grid">模型輸入與 patch 網格</option>
 <option value="patches">逐 patch 相似度</option>
 <option value="similarity">純相似度熱圖</option>
@@ -109,7 +109,7 @@
 <p id="object-help">
 </p>
 <p>
-<small>自動模式使用各物體的最佳參考圖；指定標籤時，每個 Grounding object 都與該標籤所有圖片的 patch 比對。最佳參考圖視圖顯示該標籤內對各物體最相似的圖片。局部 patch 相似度與整體商品辨識分數不同。網格內藍框為縮放後 ROI 範圍，外側為補邊。</small>
+<small>自動模式使用各物體的最佳參考圖；指定標籤時，每個 OmDet object 都與該標籤所有圖片的 patch 比對。最佳參考圖視圖顯示該標籤內對各物體最相似的圖片。局部 patch 相似度與整體商品辨識分數不同。網格內藍框為縮放後 ROI 範圍，外側為補邊。</small>
 </p>
 <p id="object-status" role="status">等待物體偵測結果…</p>
 <div id="object-gallery" class="reference-gallery">

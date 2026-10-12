@@ -1,8 +1,9 @@
 dinov3_cases:
   ros__parameters:
+    # Select a precomputed profile from config/omdet_prompts.json.
     grounding_prompt: 'medicine bottle. medicine box. bottle. box.'
     grounding_box_threshold: 0.3
-    grounding_text_threshold: 0.25
+    grounding_text_threshold: 0.25  # Compatibility only; OmDet does not use token scores.
     grounding_nms_iou: 0.5
     grounding_max_detections: 20
     recognition_threshold: 0.75

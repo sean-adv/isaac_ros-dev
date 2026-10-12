@@ -2,7 +2,7 @@
 
 from collections import deque
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import threading
 
 import numpy as np
@@ -13,7 +13,7 @@ from builtin_interfaces.msg import Time
 
 from dinov3_cases.depth_pose import (
     estimate_surface_pose, attach_surface_poses, poses_message, matched_inputs,
-    rotation_quaternion,
+    rotation_quaternion, draw_pose_axes,
 )
 from dinov3_cases.node import CaseNode
 
@@ -123,3 +123,49 @@ def test_unit_quaternion_handles_half_turn():
     q = rotation_quaternion(np.diag([1., -1., -1.]))
     np.testing.assert_allclose(abs(q[0]), 1., atol=1e-12)
     np.testing.assert_allclose(q[1:], 0., atol=1e-12)
+
+
+@pytest.mark.parametrize("angle", [0., np.pi / 2])
+def test_pose_axes_follow_object_rotation_and_metric_projection(angle):
+    import cv2
+
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    pose = dict(position=[0., 0., 1.],
+                quaternion=[0., 0., np.sin(angle / 2), np.cos(angle / 2)])
+    with patch("dinov3_cases.depth_pose.cv2.arrowedLine", wraps=cv2.arrowedLine) as draw:
+        draw_pose_axes(image, pose, calibration())
+    colored = [call.args for call in draw.call_args_list if call.args[3] != (0, 0, 0)]
+    assert [args[3] for args in colored] == [(0, 0, 255), (0, 255, 0), (255, 0, 0)]
+    assert all(args[1] == (80, 60) for args in colored)
+    # 8 cm at 1 m projects to 16 pixels with focal length 200.
+    expected = [(96, 60), (80, 76), (80, 60)] if angle == 0 else [
+        (80, 76), (64, 60), (80, 60)]
+    assert [args[2] for args in colored] == expected
+    assert image.any()
+
+
+def test_pose_axes_use_fisheye_projection():
+    import cv2
+
+    info = calibration()
+    info.distortion_model = "equidistant"
+    info.d = [0.] * 4
+    pose = dict(position=[.2, .1, 1.], quaternion=[0., 0., 0., 1.])
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    with patch("dinov3_cases.depth_pose.cv2.fisheye.projectPoints",
+               wraps=cv2.fisheye.projectPoints) as project:
+        draw_pose_axes(image, pose, info)
+    project.assert_called_once()
+    assert image.any()
+
+
+@pytest.mark.parametrize("position, quaternion", [
+    ([0., 0., -1.], [0., 0., 0., 1.]),
+    ([0., 0., 0.], [0., 0., 0., 1.]),
+    ([np.nan, 0., 1.], [0., 0., 0., 1.]),
+    ([0., 0., 1.], [0., 0., 0., 0.]),
+])
+def test_pose_axes_skip_unprojectable_poses(position, quaternion):
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    draw_pose_axes(image, dict(position=position, quaternion=quaternion), calibration())
+    assert not image.any()

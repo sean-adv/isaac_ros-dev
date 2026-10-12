@@ -10,13 +10,13 @@ from dinov3_cases.runtime import MODES, DINO_ENGINE, LEGACY_PYTHON
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Grounding DINO and DINOv3 object recognition."
+        description="Run OmDet-Turbo-Tiny and DINOv3 object recognition."
     )
     parser.add_argument(
         "--mode",
         choices=MODES,
-        default="split",
-        help="split: separate TRT 10/11 processes; single: both TRT 11 in one node.",
+        default="single",
+        help="split: separate TRT 11 processes; single: OmDet and DINOv3 in one node.",
     )
     options, extra_args = parser.parse_known_args()
     workspace = Path(__file__).resolve().parent

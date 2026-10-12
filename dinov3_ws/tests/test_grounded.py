@@ -132,42 +132,13 @@ def test_invalid_runtime_settings(key, value):
         validate_settings(**settings)
 
 
-def test_detector_uses_original_image_size_and_text_labels():
-    class Inputs(dict):
-        input_ids = torch.ones((1, 4), dtype=torch.long)
-
-        def to(self, device):
-            return self
-
-    class Processor:
-        def __call__(self, **kwargs):
-            assert kwargs["text"] == "bottle."
-            return Inputs()
-
-        def post_process_grounded_object_detection(self, outputs, ids, **kwargs):
-            assert kwargs["target_sizes"] == [(50, 100)]
-            assert kwargs["threshold"] == 0.3
-            return [
-                dict(
-                    boxes=torch.tensor([[10.0, 5.0, 90.0, 45.0]]),
-                    scores=torch.tensor([0.9]),
-                    text_labels=["bottle"],
-                )
-            ]
-
-    class Model:
-        config = SimpleNamespace(max_text_len=256)
-
-        def prepare_inputs(self, processor, image, prompt):
-            return processor(images=image, text=prompt, return_tensors="pt")
-
-        def __call__(self, **kwargs):
-            return None
-
-    detector = GroundingDetector.__new__(GroundingDetector)
-    detector.processor, detector.model, detector.device = Processor(), Model(), "cpu"
-    result = detector.detect(Image.new("RGB", (100, 50)), "bottle.", 0.3, 0.25, 0.5, 20)
-    assert result[0]["bbox"] == [10, 5, 90, 45]
+def test_detector_uses_original_image_size_and_class_labels():
+    from dinov3_cases.omdet_trt import postprocess
+    boxes = torch.tensor([[[0.5, 0.5, 0.8, 0.8]]])
+    logits = torch.tensor([[[torch.logit(torch.tensor(0.9))]]])
+    result = postprocess(boxes, logits, ["bottle"], (100, 50), 0.3, 0.5, 20)
+    np.testing.assert_allclose(result[0]["bbox"], [10, 5, 90, 45], atol=1)
+    assert result[0]["detection_label"] == "bottle"
 
 
 def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
