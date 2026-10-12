@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import sys
 
-from dinov3_cases.runtime import MODES, DINO_ENGINE, LEGACY_PYTHON
+from dinov3_cases.runtime import MODES, DINO_ENGINE, TRT_PYTHON
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
             "-p",
             f"grounding_execution:={execution}",
             "-p",
-            f"grounding_worker_python:={LEGACY_PYTHON}",
+            f"grounding_worker_python:={TRT_PYTHON}",
             *extra_args,
         ],
     )

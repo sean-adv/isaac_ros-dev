@@ -81,18 +81,18 @@ def main():
     errors.update({'task_padding_' + n: v for n,v in compare_queries(dict(boxes=boxes.numpy(),logits=logits.numpy()),
                                 dict(boxes=trimmed_boxes.numpy(),logits=trimmed_logits.numpy())).items()})
     expected_proposals = postprocess(boxes, logits, profile['labels'], image.size, .3, .5, 20)
-    proposals = detector.detect(image, prompt, .3, .25, .5, 20)
+    proposals = detector.detect(image, prompt, .3, .5, 20)
     assert proposals and len(proposals) == len(expected_proposals), (proposals, expected_proposals)
     for actual, expected in zip(proposals, expected_proposals):
         assert actual['detection_label'] == expected['detection_label']
         np.testing.assert_allclose(actual['bbox'], expected['bbox'], atol=1)
         np.testing.assert_allclose(actual['detection_score'], expected['detection_score'], atol=.001)
     for _ in range(3):
-        detector.detect(image, prompt, .3, .25, .5, 20)
+        detector.detect(image, prompt, .3, .5, 20)
     measurements = []
     for _ in range(10):
         start = time.perf_counter()
-        detector.detect(image, prompt, .3, .25, .5, 20)
+        detector.detect(image, prompt, .3, .5, 20)
         measurements.append((time.perf_counter()-start)*1000)
     report = dict(passed=True, errors=errors, detections=proposals,
                   median_detect_ms=float(np.median(measurements)), precision=detector.metadata['precision'])

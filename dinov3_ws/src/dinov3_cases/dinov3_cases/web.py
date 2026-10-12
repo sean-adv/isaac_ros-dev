@@ -88,7 +88,6 @@ def create_app(node):
                     getattr(node, "grounding_detector", None), "worker_info", None
                 ),
                 grounding_engine_path=node.param("grounding_engine_path"),
-                grounding_text_token_limit=getattr(node, "grounding_text_token_limit", None),
                 object_max_side=INPUT_SIZE,
                 object_square_input=True,
                 reference_revision=node.generation,

@@ -9,7 +9,6 @@ import struct
 import subprocess
 import threading
 import time
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -67,7 +66,7 @@ class SharedMemoryGroundingDetector:
         venv = Path(python).absolute().parent.parent
         env["VIRTUAL_ENV"] = str(venv)
         env["PATH"] = f"{venv}/bin:/usr/local/cuda/bin:/usr/bin:/bin"
-        # Do not leak the parent's TRT 11 libraries into the TRT 10 child.
+        # Load TensorRT libraries from the worker environment.
         env["LD_LIBRARY_PATH"] = "/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu"
         env["PYTHONPATH"] = os.pathsep.join(
             p
@@ -95,7 +94,6 @@ class SharedMemoryGroundingDetector:
             self.worker_info = ready["worker"]
             self.offline_prompts = ready.get("offline_prompts", [])
             self.precision = ready.get("precision")
-            self.model = SimpleNamespace(config=SimpleNamespace(max_text_len=ready["max_text_len"]))
             self.sock.settimeout(self.timeout)
         except BaseException:
             self.close()
@@ -136,7 +134,7 @@ class SharedMemoryGroundingDetector:
         with self.lock:
             self._request("validate_prompt", prompt=prompt)
 
-    def detect(self, image, prompt, box_threshold, text_threshold, nms_iou, limit):
+    def detect(self, image, prompt, box_threshold, nms_iou, limit):
         with self.lock:
             prepare_start = time.monotonic_ns()
             pixels = np.asarray(
@@ -163,7 +161,6 @@ class SharedMemoryGroundingDetector:
                 shape=list(pixels.shape),
                 prompt=prompt,
                 box_threshold=box_threshold,
-                text_threshold=text_threshold,
                 nms_iou=nms_iou,
                 limit=limit,
             )
@@ -216,18 +213,18 @@ def worker_main(fd, detector_factory=None, version=None):
             if detector_factory is None:
                 import tensorrt as trt
                 import torch
-                from .grounded import GroundingDetector
+                from .grounded import OmDetDetector
 
                 if trt.__version__ != "11.1.0.106":
                     raise RuntimeError(
                         f"Expected TensorRT 11.1.0.106, got {trt.__version__}"
                     )
-                detector_factory = GroundingDetector
+                detector_factory = OmDetDetector
                 version = dict(tensorrt=trt.__version__, torch=torch.__version__, pid=os.getpid())
             detector = detector_factory(**config)
             _send(
                 sock, dict(
-                    ok=True, worker=version, max_text_len=detector.model.config.max_text_len,
+                    ok=True, worker=version,
                     offline_prompts=getattr(detector, "offline_prompts", []),
                     precision=getattr(detector, "precision", None),
                 )
@@ -269,7 +266,6 @@ def worker_main(fd, detector_factory=None, version=None):
                         image,
                         request["prompt"],
                         request["box_threshold"],
-                        request["text_threshold"],
                         request["nms_iou"],
                         request["limit"],
                     )

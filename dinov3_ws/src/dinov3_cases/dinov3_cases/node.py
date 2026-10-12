@@ -23,7 +23,7 @@ from .runtime import (
     WORKSPACE,
     DINO_ENGINE,
     GROUNDING_ENGINE,
-    LEGACY_PYTHON,
+    TRT_PYTHON,
     INPUT_SIZE,
 )
 from vision_msgs.msg import Detection2DArray, Detection3DArray
@@ -31,7 +31,7 @@ from .depth_pose import matched_inputs, attach_surface_poses, poses_message, dra
 from .web import create_app
 from .grounded import (
     DEFAULT_PROMPT,
-    GroundingDetector,
+    OmDetDetector,
     ObjectGallery,
     validate_settings,
     recognize_objects,
@@ -46,12 +46,11 @@ class CaseNode(Node):
         defaults = dict(
             cases_dir=str(WORKSPACE / "dinov3_cases_data"),
             grounding_execution="inprocess",
-            grounding_worker_python=str(LEGACY_PYTHON),
+            grounding_worker_python=str(TRT_PYTHON),
             grounding_ipc_timeout=60.0,
             grounding_engine_path=str(GROUNDING_ENGINE),
             grounding_prompt=DEFAULT_PROMPT,
             grounding_box_threshold=0.3,
-            grounding_text_threshold=0.25,
             grounding_nms_iou=0.5,
             grounding_max_detections=20,
             recognition_threshold=0.75,
@@ -79,7 +78,6 @@ class CaseNode(Node):
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
             box_threshold=self.param("grounding_box_threshold"),
-            text_threshold=self.param("grounding_text_threshold"),
             recognition_threshold=self.param("recognition_threshold"),
             margin=self.param("recognition_margin"),
         )
@@ -334,7 +332,7 @@ class CaseNode(Node):
                 self.reference_stride = stride
                 self.backend_description = encoder.description
                 self.status = "Loading OmDet-Turbo-Tiny model…"
-            detector_class = GroundingDetector
+            detector_class = OmDetDetector
             detector_options = {}
             if self.param("grounding_execution") == "subprocess":
                 from .grounding_ipc import SharedMemoryGroundingDetector
@@ -353,8 +351,6 @@ class CaseNode(Node):
                 return
             with self.lock:
                 detector.validate_prompt(self.grounding_settings["prompt"])
-                config = getattr(getattr(detector, "model", None), "config", None)
-                self.grounding_text_token_limit = getattr(config, "max_text_len", None)
         except Exception as error:
             self.close_grounding_worker()
             with self.lock:
@@ -408,7 +404,6 @@ class CaseNode(Node):
                     image,
                     settings["prompt"],
                     settings["box_threshold"],
-                    settings["text_threshold"],
                     self.param("grounding_nms_iou"),
                     self.param("grounding_max_detections"),
                 )

@@ -9,7 +9,7 @@ from PIL import Image
 
 from dinov3_cases.grounded import (
     ObjectGallery,
-    GroundingDetector,
+    OmDetDetector,
     clean_proposals,
     prepare_object,
     recognize_objects,
@@ -114,7 +114,7 @@ def test_roi_coordinates_identity_and_ros_header(tmp_path):
         ("prompt", None),
         ("prompt", "a" * 1001),
         ("box_threshold", True),
-        ("text_threshold", float("nan")),
+        ("box_threshold", float("nan")),
         ("margin", -1),
         ("recognition_threshold", float("inf")),
     ],
@@ -123,7 +123,6 @@ def test_invalid_runtime_settings(key, value):
     settings = dict(
         prompt="bottle. box",
         box_threshold=0.3,
-        text_threshold=0.25,
         recognition_threshold=0.75,
         margin=0.05,
     )

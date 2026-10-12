@@ -6,7 +6,7 @@ import time
 import numpy as np
 import rclpy
 from dinov3_cases import node as pipeline
-from dinov3_cases.runtime import MODES, DINO_ENGINE, LEGACY_PYTHON, WORKSPACE
+from dinov3_cases.runtime import MODES, DINO_ENGINE, TRT_PYTHON, WORKSPACE
 from dinov3_cases.trt_backend import TRTBackbone
 
 
@@ -69,7 +69,7 @@ def main():
     execution, engine = MODES[args.mode]
     ros_args = ['--ros-args', '--params-file', str(WORKSPACE / 'dinov3_ws/config/dinov3_cases.yaml')]
     for key, value in dict(port=0, engine_path=DINO_ENGINE, grounding_engine_path=engine,
-                           grounding_execution=execution, grounding_worker_python=LEGACY_PYTHON,
+                           grounding_execution=execution, grounding_worker_python=TRT_PYTHON,
                            pose_enabled=str(not args.no_pose).lower(), grounding_max_detections=args.max_detections).items():
         ros_args += ['-p', f'{key}:={value}']
     ProfileNode.arrivals = []

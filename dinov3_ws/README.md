@@ -39,8 +39,8 @@ ONNX 不含文字編碼與後處理。TensorRT 11 引擎預設使用 FP16（NVID
 `config/omdet_prompts.json` 定義離線 profiles：`prompt` 是網頁／ROS 的選擇鍵；
 `labels` 是有序類別列表；`task` 是獨立任務句。預設包含 medicine bottle、medicine box、bottle、box。
 執行時只載入 `prompts.npz`，不載入 tokenizer、CLIP、PyTorch 偵測器或下載任何資源。
-未建置的提示回傳錯誤；OmDet 不使用 Grounding DINO 的 token 文字門檻。
-舊 `grounding_*` 參數、HTTP 路徑及 IPC 名稱保留相容，`grounding_text_threshold` 不影響 OmDet 分數。
+未建置的提示回傳錯誤；偵測門檻直接套用於 OmDet 類別分數。
+`grounding_*` 參數、HTTP 路徑及 IPC 用於 OmDet 偵測流程。
 網頁只提供已建置提示的選單。
 
 新增提示時編輯 JSON，再重建。此版本採固定輸入尺寸，所有 profile 的類別數須相同；
@@ -174,4 +174,7 @@ FP16 驗證比對保留的 FP32 引擎與 FP32 ONNX，包含未用於 AutoCast �
 相同實圖、暖機後 20 次量測：FP32 約 92.3 ms，FP16 混合精度約 72.8 ms（約 1.27×）。
 `/api/status.grounding_precision` 顯示目前 OmDet 引擎精度。
 
-舊 Grounding DINO 重建腳本與模型產物保留作歷史資料；目前啟動入口使用 OmDet。
+Grounding DINO 程式碼、重建腳本與專用虛擬環境已移除；grounding 僅使用 OmDet。
+先前轉換的 Grounding DINO ONNX／TensorRT 權重及附屬資料保留於
+`artifacts/` 與工作區的 `GroundingDINO-TensorRT-and-ONNX-Inference/weights/`，供歷史封存。
+`grounding_text_threshold`、HTTP `text_threshold` 與 `grounding_text_token_limit` 狀態欄位已移除。

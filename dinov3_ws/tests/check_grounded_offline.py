@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory() as temp:
         np.random.default_rng(9).integers(0, 255, (64, 96, 3), dtype=np.uint8)
     )
     rclpy.init(args=["--ros-args", "-p", f'cases_dir:={root / "cases"}', "-p", "port:=0"])
-    with patch("dinov3_cases.node.GroundingDetector", Detector), patch(
+    with patch("dinov3_cases.node.OmDetDetector", Detector), patch(
         "dinov3_cases.node.Encoder", TestEncoder
     ):
         node = CaseNode()

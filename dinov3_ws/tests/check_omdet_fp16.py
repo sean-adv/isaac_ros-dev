@@ -36,11 +36,11 @@ def compare_detections(actual, expected):
 
 def benchmark(detector, image, prompt):
     for _ in range(5):
-        detector.detect(image,prompt,.3,.25,.5,20)
+        detector.detect(image,prompt,.3,.5,20)
     samples=[]
     for _ in range(20):
         start=time.perf_counter()
-        detector.detect(image,prompt,.3,.25,.5,20)
+        detector.detect(image,prompt,.3,.5,20)
         samples.append((time.perf_counter()-start)*1000)
     return dict(median_ms=float(np.median(samples)),p95_ms=float(np.percentile(samples,95)),samples=20)
 
@@ -70,7 +70,7 @@ def main():
             outputs=fp16.infer(inputs)
             assert all(torch.isfinite(v).all() for v in outputs.values())
             actual=postprocess(outputs['boxes'],outputs['logits'],profile['labels'],image.size,.3,.5,20)
-            expected=fp32.detect(image,prompt,.3,.25,.5,20)
+            expected=fp32.detect(image,prompt,.3,.5,20)
             parity=compare_detections(actual,expected)
             boxes,logits=onnx_fp32.run(None,{n:v.numpy() for n,v in inputs.items()})
             onnx_expected=postprocess(torch.from_numpy(boxes),torch.from_numpy(logits),profile['labels'],image.size,.3,.5,20)

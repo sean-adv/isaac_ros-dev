@@ -19,12 +19,11 @@ DEFAULT_PROMPT = "medicine bottle. medicine box. bottle. box."
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
-def validate_settings(prompt, box_threshold, text_threshold, recognition_threshold, margin):
+def validate_settings(prompt, box_threshold, recognition_threshold, margin):
     if not isinstance(prompt, str) or not prompt.strip(" .\t\r\n") or len(prompt) > 1000:
         raise ValueError("Prompt must contain 1–1000 characters.")
     for name, value, upper in [
         ("box_threshold", box_threshold, 1),
-        ("text_threshold", text_threshold, 1),
         ("recognition_threshold", recognition_threshold, 1),
         ("recognition_margin", margin, 2),
     ]:
@@ -76,8 +75,7 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20):
     return kept
 
 
-# Retain the established node/IPC import while replacing the detector backend.
-from .omdet_trt import OmDetDetector as GroundingDetector
+from .omdet_trt import OmDetDetector
 
 
 def prepare_object(image, max_side=224, stride=16, minimum=32):

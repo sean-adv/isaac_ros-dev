@@ -3,7 +3,6 @@ import hashlib
 import json
 from pathlib import Path
 import threading
-from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -11,7 +10,7 @@ import torch
 
 
 def prompt_key(prompt):
-    """Legacy dot-separated UI syntax is a bank selector, never online tokenization."""
+    """Dot-separated prompt syntax selects an offline bank entry."""
     return tuple(part.strip() for part in prompt.strip().split('.') if part.strip())
 
 
@@ -91,8 +90,6 @@ class OmDetDetector:
             raise ValueError('OmDet engine checksum mismatch')
         self.bank = OfflinePromptBank(path.parent / 'prompts.npz', self.metadata)
         self.offline_prompts = [p['prompt'] for p in self.bank.profiles]
-        # Compatibility with the node and shared-memory IPC protocol.
-        self.model = SimpleNamespace(config=SimpleNamespace(max_text_len=77))
         self.device = torch.device(device)
         if self.device.type != 'cuda' or not torch.cuda.is_available():
             raise RuntimeError('OmDet TensorRT requires CUDA')
@@ -151,9 +148,8 @@ class OmDetDetector:
                 stream.synchronize()
             return {name: self.buffers[name].clone() for name in self.outputs}
 
-    def detect(self, image, prompt, box_threshold, text_threshold, nms_iou, limit):
+    def detect(self, image, prompt, box_threshold, nms_iou, limit):
         profile, _ = self.bank.resolve(prompt)
         inputs = dict(self.cached[prompt_key(prompt)], img_tensor=prepare_image(image, self.metadata))
         result = self.infer(inputs)
-        # OmDet scores classes directly: text_threshold has no meaning and is retained only for API compatibility.
         return postprocess(result['boxes'], result['logits'], profile['labels'], image.size, box_threshold, nms_iou, limit)

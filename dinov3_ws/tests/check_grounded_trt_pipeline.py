@@ -11,7 +11,7 @@ from PIL import Image
 import rclpy
 
 from dinov3_cases.node import CaseNode
-from dinov3_cases.runtime import ARTIFACTS, MODES, DINO_ENGINE, LEGACY_PYTHON
+from dinov3_cases.runtime import ARTIFACTS, MODES, DINO_ENGINE, TRT_PYTHON
 
 
 def main():
@@ -44,7 +44,7 @@ def main():
             "-p",
             f"grounding_execution:={execution}",
             "-p",
-            f"grounding_worker_python:={LEGACY_PYTHON}",
+            f"grounding_worker_python:={TRT_PYTHON}",
         ]
         rclpy.init(args=ros_args)
         node = CaseNode()

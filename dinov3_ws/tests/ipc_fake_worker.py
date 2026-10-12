@@ -3,20 +3,19 @@
 import argparse
 import os
 import time
-from types import SimpleNamespace
 
 import dinov3_cases.grounding_ipc as ipc
 
 
 class Detector:
     def __init__(self, **config):
-        self.model = SimpleNamespace(config=SimpleNamespace(max_text_len=12))
+        pass
 
     def validate_prompt(self, prompt):
         if prompt == "invalid":
             raise ValueError("invalid test prompt")
 
-    def detect(self, image, prompt, *settings):
+    def detect(self, image, prompt, box_threshold, nms_iou, limit):
         if prompt == "hang":
             time.sleep(5)
         return [dict(bbox=[0, 0, *image.size], color=list(image.getpixel((0, 0))))]

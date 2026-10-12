@@ -4,9 +4,9 @@ import json
 import time
 import numpy as np
 from PIL import Image
-from dinov3_cases.grounded import GroundingDetector, DEFAULT_PROMPT
+from dinov3_cases.grounded import OmDetDetector, DEFAULT_PROMPT
 from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
-from dinov3_cases.runtime import GROUNDING_ENGINE, LEGACY_PYTHON, WORKSPACE
+from dinov3_cases.runtime import GROUNDING_ENGINE, TRT_PYTHON, WORKSPACE
 
 
 def main():
@@ -17,13 +17,13 @@ def main():
     if args.samples < 1:
         parser.error('--samples must be positive')
     image = Image.open(WORKSPACE / 'dinov3_cases_data/stomach/1790733215386907348_2.png').convert('RGB')
-    direct = GroundingDetector(GROUNDING_ENGINE,'cuda')
-    worker = None if args.direct else SharedMemoryGroundingDetector(GROUNDING_ENGINE,'cuda',python=str(LEGACY_PYTHON))
+    direct = OmDetDetector(GROUNDING_ENGINE,'cuda')
+    worker = None if args.direct else SharedMemoryGroundingDetector(GROUNDING_ENGINE,'cuda',python=str(TRT_PYTHON))
     detector = worker or direct
     try:
         for frame in [image,image.rotate(90,expand=True)]:
-            expected = direct.detect(frame,DEFAULT_PROMPT,.3,.25,.5,20)
-            actual = detector.detect(frame,DEFAULT_PROMPT,.3,.25,.5,20)
+            expected = direct.detect(frame,DEFAULT_PROMPT,.3,.5,20)
+            actual = detector.detect(frame,DEFAULT_PROMPT,.3,.5,20)
             assert len(actual)==len(expected)
             for a,e in zip(actual,expected):
                 assert a['bbox']==e['bbox'] and a['detection_label']==e['detection_label']
@@ -37,11 +37,11 @@ def main():
             raise AssertionError('Unencoded prompt accepted')
         assert detector.offline_prompts==direct.offline_prompts
         for _ in range(3):
-            detector.detect(image,DEFAULT_PROMPT,.3,.25,.5,20)
+            detector.detect(image,DEFAULT_PROMPT,.3,.5,20)
         rows=[]
         for _ in range(args.samples):
             start=time.monotonic()
-            detector.detect(image,DEFAULT_PROMPT,.3,.25,.5,20)
+            detector.detect(image,DEFAULT_PROMPT,.3,.5,20)
             rows.append(dict(getattr(detector,'last_metrics',{}),caller_detect_ms=(time.monotonic()-start)*1000))
         report=dict(passed=True,worker=getattr(detector,'worker_info',None),
                     median_detect_ms=float(np.median([r['caller_detect_ms'] for r in rows])),rows=rows)

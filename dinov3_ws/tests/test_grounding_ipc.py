@@ -32,7 +32,7 @@ def proxy(monkeypatch):
 
 
 def detect(proxy, color="red", size=(40, 20), prompt="box."):
-    return proxy.detect(Image.new("RGB", size, color), prompt, 0.3, 0.25, 0.5, 20)
+    return proxy.detect(Image.new("RGB", size, color), prompt, 0.3, 0.5, 20)
 
 
 def test_rgb_frame_identity_resize_and_shm_cleanup(proxy):

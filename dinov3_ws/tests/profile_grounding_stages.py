@@ -5,9 +5,9 @@ from pathlib import Path
 import time
 import numpy as np
 from PIL import Image
-from dinov3_cases.grounded import GroundingDetector, DEFAULT_PROMPT
+from dinov3_cases.grounded import OmDetDetector, DEFAULT_PROMPT
 from dinov3_cases import omdet_trt
-from dinov3_cases.runtime import GROUNDING_ENGINE, LEGACY_PYTHON
+from dinov3_cases.runtime import GROUNDING_ENGINE, TRT_PYTHON
 from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
 
 
@@ -39,8 +39,8 @@ def main():
     if args.gpu_preprocess and args.mode != 'single':
         parser.error('--gpu-preprocess requires single mode')
     original = install_gpu_preprocessing() if args.gpu_preprocess else None
-    detector = (GroundingDetector(GROUNDING_ENGINE,'cuda') if args.mode=='single' else
-                SharedMemoryGroundingDetector(GROUNDING_ENGINE,'cuda',python=str(LEGACY_PYTHON)))
+    detector = (OmDetDetector(GROUNDING_ENGINE,'cuda') if args.mode=='single' else
+                SharedMemoryGroundingDetector(GROUNDING_ENGINE,'cuda',python=str(TRT_PYTHON)))
     image = Image.open(args.image).convert('RGB')
     if original:
         import torch
@@ -50,7 +50,7 @@ def main():
     try:
         for i in range(10+args.samples):
             start = time.monotonic()
-            proposals = detector.detect(image,DEFAULT_PROMPT,.3,.25,.5,20)
+            proposals = detector.detect(image,DEFAULT_PROMPT,.3,.5,20)
             elapsed = (time.monotonic()-start)*1000
             if i>=10:
                 rows.append(dict(getattr(detector,'last_metrics',{}),total_ms=elapsed,objects=len(proposals)))
