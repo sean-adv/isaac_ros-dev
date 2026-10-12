@@ -6,10 +6,9 @@ import threading
 from types import SimpleNamespace
 
 import torch
-from .runtime import ARTIFACTS as MODEL_ARTIFACTS, MODEL_ID, DINO_ENGINE
+from .runtime import MODEL_ID, DINO_ENGINE
 
 
-ARTIFACTS = MODEL_ARTIFACTS / "tensorrt"
 MODEL_SPEC = dict(patch_size=16, num_register_tokens=4, hidden_size=384)
 
 

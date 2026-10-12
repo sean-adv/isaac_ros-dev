@@ -19,6 +19,7 @@ from werkzeug.serving import make_server
 
 from .patches import feature_stride
 from .encoder import Encoder
+from .omdet_trt import OmDetDetector
 from .tracking import ROITracker
 from .runtime import (
     WORKSPACE,
@@ -29,13 +30,12 @@ from .runtime import (
 )
 from vision_msgs.msg import Detection2DArray
 from dinov3_cases_msgs.msg import Detection3DPointsArray
-from .depth_pose import matched_inputs
+from .depth_sync import matched_inputs
 from .depth_bbox import attach_bboxes3d, bboxes3d_message
 from .web import create_app
 from .visualization import render_bbox_overlay
 from .grounded import (
     DEFAULT_PROMPT,
-    OmDetDetector,
     ObjectGallery,
     validate_settings,
     validate_bbox_limits,
@@ -76,7 +76,8 @@ class CaseNode(Node):
             pose_min_depth=0.1,
             pose_max_depth=5.0,
             bbox3d_depth_band=0.08,
-            bbox3d_edge_min_jump=0.03,
+            bbox3d_min_points=80,
+            bbox3d_quantile=0.02,
             engine_path=str(DINO_ENGINE),
             port=8090,
             host="127.0.0.1",
@@ -121,9 +122,14 @@ class CaseNode(Node):
             raise ValueError("inference_hz must be finite and nonnegative; 0 is unlimited.")
         if not 1 <= self.param("jpeg_quality") <= 100 or self.param("preview_max_width") < 1:
             raise ValueError("jpeg_quality must be 1–100 and preview_max_width must be positive.")
-        for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band", "bbox3d_edge_min_jump"):
+        for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
             if not np.isfinite(self.param(name)) or self.param(name) <= 0:
                 raise ValueError(f"{name} must be finite and positive.")
+        if not 0 <= self.param("bbox3d_quantile") < 0.5:
+            raise ValueError("bbox3d_quantile must be in [0, 0.5).")
+        if (not isinstance(self.param("bbox3d_min_points"), int)
+                or self.param("bbox3d_min_points") < 5):
+            raise ValueError("bbox3d_min_points must be an integer >= 5.")
         if self.param("pose_min_depth") >= self.param("pose_max_depth"):
             raise ValueError("pose_min_depth must be less than pose_max_depth.")
         self.root = Path(self.param("cases_dir")).expanduser().resolve()
@@ -247,7 +253,8 @@ class CaseNode(Node):
                 detections, depth, info,
                 min_depth=self.param("pose_min_depth"), max_depth=self.param("pose_max_depth"),
                 depth_band=self.param("bbox3d_depth_band"),
-                edge_min_jump=self.param("bbox3d_edge_min_jump"),
+                min_points=self.param("bbox3d_min_points"),
+                quantile=self.param("bbox3d_quantile"),
             )
         except (ValueError, CvBridgeError) as error:
             for item in detections:

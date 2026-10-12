@@ -4,7 +4,8 @@ import json
 import time
 import numpy as np
 from PIL import Image
-from dinov3_cases.grounded import OmDetDetector, DEFAULT_PROMPT
+from dinov3_cases.grounded import DEFAULT_PROMPT
+from dinov3_cases.omdet_trt import OmDetDetector
 from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
 from dinov3_cases.runtime import GROUNDING_ENGINE, TRT_PYTHON, WORKSPACE
 

@@ -9,7 +9,6 @@ from PIL import Image
 
 from dinov3_cases.grounded import (
     ObjectGallery,
-    OmDetDetector,
     clean_proposals,
     prepare_object,
     recognize_objects,

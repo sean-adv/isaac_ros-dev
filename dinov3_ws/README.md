@@ -139,6 +139,8 @@ DINOv3 為 `facebook/dinov3-vits16-pretrain-lvd1689m`，保持 FP16 計算及 FP
 `omdet_trt.py` 負責離線提示、TensorRT、前後處理；`grounded.py` 負責 ROI、圖庫及辨識。
 `runtime.py` 集中路徑，`launch_pipeline.py` 選擇 single／split。
 `node.py` 處理 ROS、最新影格與發布執行緒，`web.py` 提供 HTTP。
+`depth_sync.py` 負責 RGB-D 同步，`depth_bbox.py` 推算 3D 框並建立 ROS 訊息，
+`visualization.py` 繪製 2D／3D 疊圖。舊 PCA 姿態模組與未接入的抓取掃描原型已移除。
 `grounding_ipc.py` 在 split 模式傳輸可重用 RGB 共享記憶體、設定及結果，核對 frame ID，
 於正常關閉、故障或逾時清理 worker 與共享記憶體。
 
@@ -169,7 +171,7 @@ tracking_bbox_min_detections: 10
 
 每個 track ID 從首次偵測開始，累計「命中的唯一偵測影格數」及
 「已執行偵測的唯一影格總數（包含漏偵測）」。命中率為前者除以後者。
-只有**命中率 > 0.8 且命中幀數 > 10** 時才畫 bbox、ID／商品文字、位置文字與姿態軸。
+只有**命中率 > 0.8 且命中幀數 > 10** 時才畫 bbox、ID／商品文字、位置與距離文字。
 因此連續命中到第 10 幀仍不顯示，第 11 幀才顯示；12／15 恰好 80% 不顯示，
 13／16 為 81.25% 才通過。每幀重新判斷，比例降低時會再次隱藏。
 
@@ -197,29 +199,24 @@ HTTP 每個 detection 額外含 `track_detected_frames`、`track_total_frames`�
 同 optical frame，時間差不超過 `pose_sync_tolerance`（目前 YAML 設定 0.2 秒）。
 推論前保留同步深度快照；`16UC1` 毫米轉公尺，`32FC1` 視為公尺。
 
-讀取 2D bbox 四角各自的深度（右／下邊界為 exclusive，取框內最後一個像素）。
-每角沿 2D 框中心到角落的直線，由內往外搜尋。
-先取得框內最近的有效 Z；只比較相鄰且都有效的兩個深度值，不跨越零值／NaN 等孔洞。
-候選跳變須至少 `bbox3d_edge_min_jump`（目前 0.03 m），且靠中心一側深度須在
-`[最近 Z, 最近 Z + bbox3d_depth_band]`（目前 0.08 m）內，以避免選遠處背景內部的邊緣。
-取候選中絕對深度落差最大的位置，選其靠中心一側的像素與深度；相同落差時取靠中心者。
-沒有明顯跳變時，取線上離角落最近的合理深度點；連合理點都沒有時不輸出該 3D 框，
-狀態為 `no_reasonable_corner_depth:<角落編號>`。
-最大深度跳變是邊界線索，不保證屬於商品；重疊物件、反光與有效範圍內的雜訊仍可能誤選。
-另找整個框內最近的有效深度 Z 與其像素位置；排除零值、NaN、Inf 及超出距離範圍的值。
-此處「最近」指 optical Z 最小，不是歐氏距離最小；最小值仍可能受有效範圍內的雜訊影響。
+在裁切後的 2D bbox 中，取中央約 20% 寬／高區域的有效深度中位數作為種子。
+中央至少需 5 個有效像素；排除零值、NaN、Inf 及超出距離範圍的值。
+保留與種子深度相差不超過 `bbox3d_depth_band`（預設 ±0.08 m）的像素，
+以 8 鄰接連通區分割，選擇與中央區域相交且面積最大的連通區。
+連通區至少需 `bbox3d_min_points`（預設 80）個像素，否則不輸出框。
+缺少中央深度／連通區／足夠點數時，狀態分別為 `no_valid_center_depth`、
+`no_depth_component`、`insufficient_depth_points`；全框無有效深度為 `no_valid_bbox_depth`。
 
-將四條線找到的實際像素位置與框內最近點依各自深度反投影到 3D，先校正相機畸變。
-不把線內深度套回原始角落位置，避免放大範圍。
+將整個選定連通區的像素依各自深度、相機內參與畸變校正反投影成點雲。
 無畸變時每點為 `X=(u-cx)*Z/fx`、`Y=(v-cy)*Z/fy`。
-取這五點各軸的最小／最大值：`size = maxXYZ - minXYZ`，
-`center = (maxXYZ + minXYZ) / 2`，得到與相機座標軸對齊的長方體。
-四元數固定為 `[0,0,0,1]`，不再使用 PCA 或 `max(寬,高)` 假設厚度。
-Z 厚度為四角最遠深度與框內最近深度之差；所有深度相同時厚度為 0，不捏造厚度。
+每個 XYZ 軸取 `bbox3d_quantile` 與 `1-bbox3d_quantile` 分位數，預設 2%／98%，
+得到 `lower`、`upper`；`size = upper-lower`，`center = (upper+lower)/2`。
+長方體與相機座標軸對齊，四元數固定為 `[0,0,0,1]`。
+所有有效表面深度相同時厚度為 0，不捏造不可見背面厚度。
 
-這是五個取樣點的包圍框，未涵蓋未取樣點或不可見背面。
-角落落在背景或框內有其他較近物件時，結果可能包含背景／其他物件，
-不能直接視為完整商品尺寸；後續需物件遮罩或多視角資料才能進一步改善。
+這是可見前景點雲的穩健範圍，不是完整物件尺寸，也不保證包住每個點。
+分位數會裁去少量邊緣／細長突出部位；中央落在背景、深度帶太窄或同深度背景
+與物件連通時仍可能選錯或裁掉表面。完整背面需尺寸先驗或多視角資訊。
 
 ```bash
 ./dinov3_ws/run_camera.sh
@@ -240,9 +237,9 @@ ros2 topic echo /medicine_recognition/detections_3d
 - `detections[].hypothesis.class_id`／`score`：商品標籤與 DINOv3 相似度。
 - `detections[].bbox_2d`：原始 2D 框中心與尺寸（pixel）。
 - `detections[].bbox_2d_corners`：原始 2D 框四角（pixel）；右／下為原始 exclusive 邊界。
-- `detections[].sampled_2d_points`：四條角落到中心線上實際找到的像素位置（pixel）。
+- `detections[].sampled_2d_points`：選定連通區中距離原始四角最近的診斷像素（pixel），不參與決定框界。
 - `detections[].sampled_3d_points`：對應四個實際取樣位置的 3D 點（公尺）。
-- `detections[].nearest_2d_point`／`nearest_3d_point`：框內最近深度點的 2D／3D 位置。
+- `detections[].nearest_2d_point`／`nearest_3d_point`：選定連通區中最近深度點的 2D／3D 位置；僅供診斷，可能在分位數框外。
 - `detections[].bbox_3d_corners`：最終長方體的八個 3D 頂點（公尺）。
 
 四角及取樣點順序為左上、右上、右下、左下；八頂點先列 min-Z 面四角，再列 max-Z 面四角，
@@ -264,25 +261,26 @@ source dinov3_ws/install/setup.bash
 
 自訂訊息不包含 `results[].pose` 或 covariance。位置與尺寸請讀 `bbox`。
 已停用 `/medicine_recognition/poses`。原本 2D topic 保留；ROS 2D／3D detection
-都過濾 `unknown`，內部追蹤與 HTTP 辨識資料仍保留。已識別物件須在四條角落到中心
-的線上及框內有有效深度，才輸出 3D 框。全為 `unknown` 或無可用結果時發布空陣列。
+都過濾 `unknown`，內部追蹤與 HTTP 辨識資料仍保留。已識別物件須有足夠的中央有效深度與前景連通區點數，才輸出 3D 框。全為 `unknown` 或無可用結果時發布空陣列。
 上傳圖片沒有對應深度，因此只提供 2D 辨識。
 
 HTTP `/api/detections` 改用 `bbox3d_status`；成功者含 `bbox3d` 的 `position`、`size`、
 `corners`、`corner_depths`（依左上、右上、右下、左下排序）、`nearest_point`、
 `nearest_depth`、`nearest_pixel`、`depth_range`、`foreground_depth_band`、`corner_pixels`（原始四角）、
-`corner_sample_pixels`（實際取樣位置）、`corner_edge_jumps`、
-`corner_sampling_methods`（max_depth_jump 或 reasonable_depth_fallback）、`edge_min_jump` 與 `method`，不再附帶 `pose`。
+`corner_sample_pixels`（連通區診斷點）、`seed_depth`、`point_count`、`quantile` 與
+`method`（`central_depth_component_quantiles`），不再附帶 `pose`。
+四個診斷點保留左上、右上、右下、左下順序；舊的跳變與沿線搜尋診斷欄位已移除。
 疊圖仍顯示中心位置與 `sqrt(X²+Y²+Z²)` 距離（公尺，三位小數），無框時顯示 N/A。
 顯示穩定門檻只影響疊圖，不延遲 ROS 2D／3D 輸出。
 
 為保留啟動參數相容性，深度功能仍使用 `pose_enabled`、`pose_sync_tolerance`、
 `pose_min_depth`、`pose_max_depth`；目前有效深度範圍為 0.1–5 m。
-`bbox3d_edge_min_jump` 控制最小可接受深度跳變（公尺）。
-`bbox3d_depth_band` 控制沿線搜尋與最近深度的最大差距；若真實可見表面深度跨度
-超過 8 cm，可提高此值，但可能再次納入背景。最近深度仍採框內最小有效 Z，
-框內若有其他更近物件或有效範圍內雜訊，仍可能選錯前景或拒絕輸出。
-`-p pose_enabled:=false` 可停用 3D 框；PCA 的深度帶、最少點數與軸比例參數已移除。
+`bbox3d_depth_band` 控制相對中央中位數的雙向深度容差（公尺），不再相對最近點。
+預設前景深度帶總寬為 16 cm；較深或傾斜的表面可增加此值，但可能納入背景。
+`bbox3d_min_points` 為最少連通區像素數（整數，至少 5），
+`bbox3d_quantile` 範圍為 `[0, 0.5)`，設為 0 使用完整連通區的各軸極值。
+舊參數 `bbox3d_edge_min_jump` 已移除，自訂設定需刪除該項。
+`-p pose_enabled:=false` 可停用 3D 框；不使用 PCA 姿態估算。
 
 ## 驗證
 

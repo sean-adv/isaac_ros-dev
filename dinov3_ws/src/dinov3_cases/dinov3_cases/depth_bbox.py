@@ -1,40 +1,26 @@
-"""Camera-aligned cuboids from RGB boxes and registered corner/nearest depths."""
+"""Camera-aligned robust bounds of a central registered-depth component."""
 
 import cv2
 import numpy as np
 
 
-def line_pixels(start, end):
-    """Yield a Bresenham segment in order, including both endpoints."""
-    x, y = start
-    end_x, end_y = end
-    dx, dy = abs(end_x-x), -abs(end_y-y)
-    sx, sy = (1 if x < end_x else -1), (1 if y < end_y else -1)
-    error = dx + dy
-    while True:
-        yield x, y
-        if (x, y) == (end_x, end_y):
-            break
-        twice_error = 2 * error
-        if twice_error >= dy:
-            error += dy
-            x += sx
-        if twice_error <= dx:
-            error += dx
-            y += sy
+def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
+                    depth_band=0.08, min_points=80, quantile=0.02):
+    """Segment around the central median Z and bound its visible point cloud.
 
-
-def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0, depth_band=0.08, edge_min_jump=0.03):
-    """Bound four measured corner points plus the ROI's nearest valid Z point.
-
-    This bounds the sampled visible geometry, not an unseen object backside.
-    Walk center-to-corner, choose the foreground side of the largest valid
-    adjacent depth jump, and fall back to reasonable corner depth if no edge.
+    Quantiles trim each XYZ axis independently; this is not a strict enclosure
+    or an estimate of the unseen backside. Four corner-near samples and the
+    nearest component point are diagnostics only, not inputs to the bounds.
     """
     if not np.isfinite(depth_band) or depth_band <= 0:
         raise ValueError("invalid_bbox_depth_band")
-    if not np.isfinite(edge_min_jump) or edge_min_jump <= 0:
-        raise ValueError("invalid_bbox_edge_min_jump")
+    if not np.isfinite(quantile) or not 0 <= quantile < 0.5:
+        raise ValueError("invalid_bbox_quantile")
+    if not isinstance(min_points, (int, np.integer)) or min_points < 5:
+        raise ValueError("invalid_bbox_min_points")
+    if not (np.isfinite(min_depth) and np.isfinite(max_depth)
+            and 0 < min_depth < max_depth):
+        raise ValueError("invalid_depth_range")
     h, w = depth.shape
     if (info.width, info.height) != (w, h):
         raise ValueError("camera_info_size_mismatch")
@@ -49,73 +35,72 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0, depth_ba
     x0, y0, x1, y1 = max(0., x0), max(0., y0), min(float(w), x1), min(float(h), y1)
     if x1 <= x0 or y1 <= y0:
         raise ValueError("empty_bbox")
-    # Detection boxes use exclusive right/bottom bounds; sample inside the ROI.
     left, top = int(x0), int(y0)
     right, bottom = int(np.ceil(x1)), int(np.ceil(y1))
     roi = depth[top:bottom, left:right]
     valid = np.isfinite(roi) & (roi >= min_depth) & (roi <= max_depth)
     if not valid.any():
         raise ValueError("no_valid_bbox_depth")
-    near_v, near_u = np.unravel_index(np.argmin(np.where(valid, roi, np.inf)), roi.shape)
-    nearest_depth = float(roi[near_v, near_u])
-    foreground_max_depth = nearest_depth + depth_band
-    corner_pixels = [(left, top), (right-1, top), (right-1, bottom-1), (left, bottom-1)]
-    center_pixel = (min(right-1, int((x0+x1)/2)), min(bottom-1, int((y0+y1)/2)))
-    corner_depths, sampled_pixels, edge_jumps, sampling_methods = [], [], [], []
-    for index, corner in enumerate(corner_pixels):
-        line = list(line_pixels(center_pixel, corner))
-        values = np.array([depth[v, u] for u, v in line])
-        line_valid = np.isfinite(values) & (values >= min_depth) & (values <= max_depth)
-        # Only consecutive valid pixels may form an edge: never bridge a hole.
-        pair_valid = line_valid[:-1] & line_valid[1:]
-        jumps = np.zeros(max(0, len(values)-1), dtype=np.float64)
-        jumps[pair_valid] = np.abs(values[1:][pair_valid] - values[:-1][pair_valid])
-        reasonable = line_valid & (values >= nearest_depth) & (values <= foreground_max_depth)
-        candidates = np.flatnonzero(pair_valid & reasonable[:-1]
-                                    & (jumps >= edge_min_jump))
-        if candidates.size:
-            # argmax picks the innermost edge on a tie. Take the center-side pixel.
-            selected = int(candidates[np.argmax(jumps[candidates])])
-            sampling_methods.append("max_depth_jump")
-            edge_jumps.append(float(jumps[selected]))
-        else:
-            candidates = np.flatnonzero(reasonable)
-            if not candidates.size:
-                raise ValueError(f"no_reasonable_corner_depth:{index}")
-            selected = int(candidates[-1])
-            sampling_methods.append("reasonable_depth_fallback")
-            edge_jumps.append(0.0)
-        sampled_pixels.append(line[selected])
-        corner_depths.append(float(values[selected]))
-    pixels = np.array(sampled_pixels + [(int(near_u)+left, int(near_v)+top)],
-                      dtype=np.float64).reshape(-1, 1, 2)
-    depths = np.array(corner_depths + [nearest_depth])
+
+    # Central patch spans roughly 20% of the ROI in each dimension.
+    rh, rw = roi.shape
+    cy, cx = rh // 2, rw // 2
+    dy, dx = max(1, rh // 10), max(1, rw // 10)
+    patch = (slice(max(0, cy-dy), min(rh, cy+dy+1)),
+             slice(max(0, cx-dx), min(rw, cx+dx+1)))
+    seeds = roi[patch][valid[patch]]
+    if seeds.size < 5:
+        raise ValueError("no_valid_center_depth")
+    seed_depth = float(np.median(seeds))
+    # Compare bounds directly to avoid arithmetic on NaN/Inf holes.
+    foreground = valid & (roi >= seed_depth-depth_band) & (roi <= seed_depth+depth_band)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(foreground.astype(np.uint8), 8)
+    central_labels = labels[patch]
+    choices = np.unique(central_labels[central_labels > 0])
+    if choices.size == 0:
+        raise ValueError("no_depth_component")
+    component = max(choices, key=lambda label: stats[label, cv2.CC_STAT_AREA])
+    v, u = np.nonzero(labels == component)
+    if len(u) < min_points:
+        raise ValueError("insufficient_depth_points")
+    # Use the whole selected component: no diagonal-ray or sparse-grid bias.
+    pixels = np.column_stack((u+left, v+top)).astype(np.float64)
+    depths = roi[v, u].astype(np.float64)
     distortion = np.asarray(info.d, dtype=np.float64)
     if not np.isfinite(distortion).all():
         raise ValueError("invalid_distortion")
+    image_points = pixels.reshape(-1, 1, 2)
     if info.distortion_model in ("plumb_bob", "rational_polynomial", ""):
-        rays = cv2.undistortPoints(pixels, k, distortion if distortion.size else None)
+        rays = cv2.undistortPoints(image_points, k, distortion if distortion.size else None)
     elif info.distortion_model == "equidistant" and distortion.size == 4:
-        rays = cv2.fisheye.undistortPoints(pixels, k, distortion)
+        rays = cv2.fisheye.undistortPoints(image_points, k, distortion)
     else:
         raise ValueError("unsupported_distortion_model")
     points = np.column_stack((rays[:, 0, :] * depths[:, None], depths))
     if not np.isfinite(points).all():
         raise ValueError("invalid_unprojected_points")
-    lower, upper = points.min(axis=0), points.max(axis=0)
-    size = upper - lower
+    lower, upper = np.quantile(points, [quantile, 1-quantile], axis=0)
+    size = upper-lower
     if size[0] <= 0 or size[1] <= 0:
         raise ValueError("empty_projected_bbox")
-    return dict(position=((lower + upper) / 2).tolist(), size=size.tolist(),
-                corners=points[:4].tolist(), corner_depths=corner_depths,
-                corner_pixels=[list(pixel) for pixel in corner_pixels],
-                corner_sample_pixels=[list(pixel) for pixel in sampled_pixels],
-                nearest_point=points[4].tolist(), nearest_depth=nearest_depth,
-                nearest_pixel=[int(near_u)+left, int(near_v)+top],
-                foreground_depth_band=float(depth_band), edge_min_jump=float(edge_min_jump),
-                corner_edge_jumps=edge_jumps, corner_sampling_methods=sampling_methods,
+
+    # Preserve fixed ROS diagnostic arrays; these points need not lie inside
+    # the quantile box, and are not measured corners of the physical object.
+    corner_pixels = np.array([(left, top), (right-1, top),
+                              (right-1, bottom-1), (left, bottom-1)])
+    samples = [int(np.argmin(np.sum((pixels-corner)**2, axis=1)))
+               for corner in corner_pixels]
+    nearest = int(np.argmin(depths))
+    return dict(position=((lower+upper)/2).tolist(), size=size.tolist(),
+                corners=points[samples].tolist(), corner_depths=depths[samples].tolist(),
+                corner_pixels=corner_pixels.tolist(),
+                corner_sample_pixels=pixels[samples].astype(int).tolist(),
+                nearest_point=points[nearest].tolist(), nearest_depth=float(depths[nearest]),
+                nearest_pixel=pixels[nearest].astype(int).tolist(),
+                seed_depth=seed_depth, point_count=len(points),
+                foreground_depth_band=float(depth_band), quantile=float(quantile),
                 depth_range=[float(lower[2]), float(upper[2])],
-                method="bbox_center_outward_depth_edges")
+                method="central_depth_component_quantiles")
 
 
 def attach_bboxes3d(items, depth, info, **options):

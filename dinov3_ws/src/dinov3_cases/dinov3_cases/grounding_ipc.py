@@ -40,7 +40,7 @@ def _send(sock, value):
 
 
 class SharedMemoryGroundingDetector:
-    """Own a legacy-environment subprocess and its reusable shared RGB buffer."""
+    """Own an OmDet subprocess and its reusable shared RGB buffer."""
 
     def __init__(
         self,
@@ -217,7 +217,7 @@ def worker_main(fd, detector_factory=None, version=None):
             if detector_factory is None:
                 import tensorrt as trt
                 import torch
-                from .grounded import OmDetDetector
+                from .omdet_trt import OmDetDetector
 
                 if trt.__version__ != "11.1.0.106":
                     raise RuntimeError(

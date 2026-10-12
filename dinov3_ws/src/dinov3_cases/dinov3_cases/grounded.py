@@ -12,7 +12,6 @@ import numpy as np
 from PIL import Image, ImageOps
 import torch
 import torch.nn.functional as F
-from .runtime import GROUNDING_MODEL_ID
 
 
 DEFAULT_PROMPT = "Detect medicine bottle, medicine box, bottle, box."
@@ -88,9 +87,6 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
     return kept
 
 
-from .omdet_trt import OmDetDetector
-
-
 def prepare_object(image, max_side=224, stride=16, minimum=32):
     """Apply the same aspect-preserving resize/padding to references and proposals."""
     if max_side < minimum or stride <= 0:
@@ -116,10 +112,6 @@ def encode_object(encoder, image, max_side, stride):
     if not torch.isfinite(vector).all() or vector.norm() < 1e-8:
         raise ValueError("Invalid object descriptor.")
     return prepared, features, F.normalize(vector, dim=0)
-
-
-def object_descriptor(encoder, image, max_side, stride):
-    return encode_object(encoder, image, max_side, stride)[2]
 
 
 def gallery_signature(root):
@@ -208,7 +200,6 @@ class ObjectGallery:
             margin=gap,
             reason=reason,
             reference=dict(case=label, name=Path(self.paths[best_reference]).name),
-            _reference_index=best_reference,
         )
 
 
@@ -388,7 +379,6 @@ def recognize_objects(
         roi = image.crop(proposal["bbox"])
         prepared, patches, descriptor = encode_object(encoder, roi, max_side, stride)
         classification = gallery.classify(descriptor, threshold, margin)
-        classification.pop("_reference_index", None)
         result = dict(proposal, **classification)
         if diagnostics is not None:
             preview = roi.copy()

@@ -31,7 +31,8 @@ dinov3_cases:
     pose_sync_tolerance: 0.2
     pose_min_depth: 0.1
     pose_max_depth: 5.0
-    # Corner-to-center samples must stay within 8 cm of the ROI nearest valid Z.
+    # Foreground depth tolerance around the central patch median (meters).
     bbox3d_depth_band: 0.08
-    # Minimum adjacent valid depth jump for a center-to-corner edge (meters).
-    bbox3d_edge_min_jump: 0.03
+    bbox3d_min_points: 80
+    # Trim each XYZ axis at 2% / 98%; 0 uses the full component bounds.
+    bbox3d_quantile: 0.02

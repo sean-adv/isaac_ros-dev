@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn.functional as F
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 
 
 def preprocess_image(image, processor):

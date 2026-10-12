@@ -149,10 +149,14 @@ def test_invalid_settings(options):
 def test_ros_2d_and_3d_use_same_tracking_id():
     from std_msgs.msg import Header
     from dinov3_cases.grounded import recognition_message
-    from dinov3_cases.depth_pose import poses_message
+    from dinov3_cases.depth_bbox import bboxes3d_message
 
     item = box()
-    item.update(track_id=42, score=.9, pose=dict(
-        position=[0., 0., 1.], quaternion=[0., 0., 0., 1.], size=[.1, .1, .1]))
+    item.update(track_id=42, score=.9, bbox3d=dict(
+        position=[0., 0., 1.], size=[.1, .1, .1],
+        corner_sample_pixels=[[0, 0], [99, 0], [99, 99], [0, 99]],
+        corners=[[-.05, -.05, 1.], [.05, -.05, 1.],
+                 [.05, .05, 1.], [-.05, .05, 1.]],
+        nearest_pixel=[0, 0], nearest_point=[-.05, -.05, 1.]))
     assert recognition_message([item], Header()).detections[0].id == "42"
-    assert poses_message([item], Header()).detections[0].id == "42"
+    assert bboxes3d_message([item], Header()).detections[0].id == "42"
