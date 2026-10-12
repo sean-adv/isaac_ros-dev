@@ -60,6 +60,16 @@ def test_prompt_error_keeps_worker_available(proxy):
     assert detect(p)
 
 
+@pytest.mark.parametrize("limits", [dict(min_width=41), dict(min_height=21),
+                                   dict(min_area=801)])
+def test_bbox_limits_reach_worker(proxy, limits):
+    p = proxy()
+    image = Image.new("RGB", (40, 20), "red")
+    assert not p.detect(image, "box.", .3, .5, 20, **limits)
+    assert p.detect(image, "box.", .3, .5, 20,
+                    min_width=40, min_height=20, min_area=800)
+
+
 def test_worker_crash_fails_and_releases_shm(proxy):
     p = proxy()
     detect(p)

@@ -62,3 +62,39 @@ def test_sigmoid_class_scores_synonym_nms_and_empty_result():
     assert results[0]['detection_label'] in ['bottle','medicine bottle']
     np.testing.assert_allclose(results[0]['detection_score'],torch.sigmoid(torch.tensor(4.)).item())
     assert not postprocess(boxes,logits,['bottle','medicine bottle'],(200,100),1.,.5,20)
+
+
+def test_postprocess_applies_original_image_bbox_limits():
+    boxes = torch.tensor([[[[.5, .5, .4, .4]]]])
+    logits = torch.tensor([[[[4.]]]])
+    args = (boxes, logits, ['box'], (200, 100), .3, .5, 20)
+    result = postprocess(*args)
+    width = result[0]['bbox'][2] - result[0]['bbox'][0]
+    height = result[0]['bbox'][3] - result[0]['bbox'][1]
+    area = width * height
+    assert postprocess(*args, min_width=width, min_height=height, min_area=area)
+    assert not postprocess(*args, min_width=width + 1)
+    assert not postprocess(*args, min_height=height + 1)
+    assert not postprocess(*args, min_area=area + 1)
+
+
+def test_padding_logits_excluded_before_topk_and_limit():
+    boxes = torch.tensor([[[[.5, .5, .4, .4]]]])
+    logits = torch.tensor([[[[2., 3., 8., 9.]]]])
+    result = postprocess(boxes, logits, ['medicine bottle', 'medicine box'],
+                         (200, 100), .3, .5, 1)
+    assert len(result) == 1
+    assert result[0]['detection_label'] == 'medicine box'
+    assert result[0]['detection_score'] == pytest.approx(torch.sigmoid(torch.tensor(3.)).item())
+
+
+def test_prompt_bank_accepts_short_label_list_with_fixed_capacity(bank_files):
+    path, metadata, _ = bank_files
+    metadata['max_labels'] = 2
+    metadata['max_prompt_tokens'] = 77
+    metadata['profiles'][0]['labels'] = ['box']
+    bank = OfflinePromptBank(path, metadata)
+    assert bank.resolve('box. bottle.')[1]['label_feats'].shape == (2, 1, 512)
+    metadata['max_labels'] = 1
+    with pytest.raises(ValueError, match='label_feats'):
+        OfflinePromptBank(path, metadata)

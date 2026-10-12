@@ -19,6 +19,7 @@ from werkzeug.serving import make_server
 
 from .patches import feature_stride
 from .encoder import Encoder
+from .tracking import ROITracker
 from .runtime import (
     WORKSPACE,
     DINO_ENGINE,
@@ -34,6 +35,7 @@ from .grounded import (
     OmDetDetector,
     ObjectGallery,
     validate_settings,
+    validate_bbox_limits,
     recognize_objects,
     recognition_message,
     ObjectVisualizationSnapshot,
@@ -53,8 +55,16 @@ class CaseNode(Node):
             grounding_box_threshold=0.3,
             grounding_nms_iou=0.5,
             grounding_max_detections=20,
+            grounding_min_bbox_width=0,
+            grounding_min_bbox_height=0,
+            grounding_min_bbox_area=0,
             recognition_threshold=0.75,
             recognition_margin=0.05,
+            tracking_max_missed=5,
+            tracking_iou_threshold=0.2,
+            tracking_roi_padding=0.5,
+            tracking_bbox_min_hit_ratio=0.8,
+            tracking_bbox_min_detections=10,
             image_topic="/camera/color/image_raw",
             pose_enabled=True,
             depth_topic="/camera/depth/image_raw",
@@ -75,6 +85,13 @@ class CaseNode(Node):
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
+        self.tracker = ROITracker(
+            self.param("tracking_max_missed"),
+            self.param("tracking_iou_threshold"),
+            self.param("tracking_roi_padding"),
+            bbox_min_hit_ratio=self.param("tracking_bbox_min_hit_ratio"),
+            bbox_min_detections=self.param("tracking_bbox_min_detections"),
+        )
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
             box_threshold=self.param("grounding_box_threshold"),
@@ -86,6 +103,11 @@ class CaseNode(Node):
             raise ValueError("grounding_nms_iou must be between 0 and 1.")
         if not 1 <= self.param("grounding_max_detections") <= 100:
             raise ValueError("grounding_max_detections must be between 1 and 100.")
+        validate_bbox_limits(
+            self.param("grounding_min_bbox_width"),
+            self.param("grounding_min_bbox_height"),
+            self.param("grounding_min_bbox_area"),
+        )
         if self.param("grounding_execution") not in ("inprocess", "subprocess"):
             raise ValueError("grounding_execution must be inprocess or subprocess.")
         if (
@@ -361,6 +383,7 @@ class CaseNode(Node):
         processed = None
         next_gallery_scan = 0.0
         gallery_revision = 0
+        tracking_context = None
         max_side = INPUT_SIZE
         for _ in self.worker_ticks():
             with self.lock:
@@ -406,6 +429,9 @@ class CaseNode(Node):
                     settings["box_threshold"],
                     self.param("grounding_nms_iou"),
                     self.param("grounding_max_detections"),
+                    min_width=self.param("grounding_min_bbox_width"),
+                    min_height=self.param("grounding_min_bbox_height"),
+                    min_area=self.param("grounding_min_bbox_area"),
                 )
                 detected_at = time.monotonic()
                 diagnostics = []
@@ -422,6 +448,14 @@ class CaseNode(Node):
                     defer_diagnostics=True,
                 )
                 recognized_at = time.monotonic()
+                with self.lock:
+                    if gen != self.generation:
+                        continue
+                    context = (gen, image.size, header.frame_id if header is not None else None)
+                    if context != tracking_context:
+                        self.tracker.reset()
+                        tracking_context = context
+                    self.tracker.update(detections, frame_key=(gen, seq))
                 if self.param("pose_enabled") and header is not None:
                     self.estimate_poses(detections, depth_inputs)
                 else:
@@ -433,18 +467,19 @@ class CaseNode(Node):
                 )
                 overlay = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
                 for index, item in enumerate(detections):
+                    if not item["bbox_visible"]:
+                        continue
                     x0, y0, x1, y1 = item["bbox"]
                     color = (0, 190, 255) if item["label"] == "unknown" else (60, 220, 80)
                     cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, 2)
-                    score = "--" if item["score"] is None else f"{item['score']:.2f}"
-                    label = f"#{index+1} {item['label']} | {item['detection_label']} | det {item['detection_score']:.2f} sim {score}"
+                    label = f"ID {item['track_id']} {item['label']} | {item['detection_label']}"
                     pose = item.get("pose")
                     if pose is not None:
                         px, py, pz = pose["position"]
                         position_label = f"position (m): X={px:.3f} Y={py:.3f} Z={pz:.3f}"
                     else:
                         position_label = "position: N/A"
-                    font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+                    font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
                     (_, text_height), baseline = cv2.getTextSize(
                         label, font, font_scale, thickness
                     )
@@ -462,7 +497,7 @@ class CaseNode(Node):
                             label_y + line_index * line_height,
                         )
                         cv2.putText(
-                            overlay, text, origin, font, font_scale, (0, 0, 0), 4, cv2.LINE_AA
+                            overlay, text, origin, font, font_scale, (0, 0, 0), 3, cv2.LINE_AA
                         )
                         cv2.putText(
                             overlay, text, origin, font, font_scale, color, thickness, cv2.LINE_AA
@@ -470,7 +505,7 @@ class CaseNode(Node):
                 if depth_inputs is not None:
                     _, pose_info = depth_inputs
                     for item in detections:
-                        if item.get("pose") is not None:
+                        if item["bbox_visible"] and item.get("pose") is not None:
                             draw_pose_axes(overlay, item["pose"], pose_info)
                 ok, jpeg = cv2.imencode(
                     ".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]

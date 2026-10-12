@@ -71,7 +71,7 @@ def main():
     result = detector.infer(real_inputs)
     errors.update({'real_' + n: v for n,v in compare_queries({n:result[n].cpu().numpy() for n in ['boxes','logits']},
                                                            dict(boxes=boxes.numpy(),logits=logits.numpy())).items()})
-    # Padding to 77 with a zero task mask must preserve the official trimmed task semantics.
+    # Padding to engine capacity must preserve the official trimmed task semantics.
     trimmed = dict(real_inputs)
     length = int(real_inputs['task_mask'].sum())
     trimmed['task_feats'] = trimmed['task_feats'][:length]

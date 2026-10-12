@@ -37,7 +37,7 @@ async function refreshDetections() {
   for (const item of data.detections) {
     if (!item.label) continue;
     const row = document.createElement('p');
-    row.textContent = item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · 最接近 ' + item.candidate : '') + (item.margin === null ? '' : ' · 差距 ' + item.margin.toFixed(3));
+    row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · 最接近 ' + item.candidate : '') + (item.margin === null ? '' : ' · 差距 ' + item.margin.toFixed(3));
     list.append(row);
   }
 }
@@ -222,7 +222,7 @@ async function refreshObjects() {
       const card = document.createElement('figure');
       card.className = 'reference-card';
       const title = document.createElement('figcaption');
-      title.textContent = '#' + (item.index + 1) + ' · ' + item.label + ' · ' + item.detection_label;
+      title.textContent = (item.track_id == null ? '#' + (item.index + 1) : 'ID ' + item.track_id) + ' · ' + item.label + ' · ' + item.detection_label;
       card.append(title);
       const detail = document.createElement('p');
       detail.textContent = 'bbox [' + item.bbox.join(', ') + '] · ROI ' + item.roi_size.join(' × ') + ' → 輸入 ' + item.input_size.join(' × ') + ' · ' + item.patch_grid.join(' × ') + ' patches';

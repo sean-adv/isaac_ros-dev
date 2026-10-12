@@ -1,9 +1,20 @@
 {
   "profiles": [
     {
-      "prompt": "medicine bottle. medicine box. bottle. box.",
-      "labels": ["medicine bottle", "medicine box", "bottle", "box"],
-      "task": "Detect medicine bottle, medicine box, bottle, box."
+      "prompt": "Detect medicine bottle, medicine box, bottle, box.",
+      "labels": [
+        "medicine bottle",
+        "medicine box",
+        "bottle",
+        "box"
+      ]
+    },
+    {
+      "prompt": "Detect medicine bottle, medicine box.",
+      "labels": [
+        "medicine bottle",
+        "medicine box"
+      ]
     }
   ]
 }

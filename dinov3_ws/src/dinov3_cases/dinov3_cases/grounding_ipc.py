@@ -134,7 +134,8 @@ class SharedMemoryGroundingDetector:
         with self.lock:
             self._request("validate_prompt", prompt=prompt)
 
-    def detect(self, image, prompt, box_threshold, nms_iou, limit):
+    def detect(self, image, prompt, box_threshold, nms_iou, limit,
+               *, min_width=0, min_height=0, min_area=0):
         with self.lock:
             prepare_start = time.monotonic_ns()
             pixels = np.asarray(
@@ -163,6 +164,9 @@ class SharedMemoryGroundingDetector:
                 box_threshold=box_threshold,
                 nms_iou=nms_iou,
                 limit=limit,
+                min_width=min_width,
+                min_height=min_height,
+                min_area=min_area,
             )
             self.last_metrics["shared_copy_ms"] = copy_ms
             self.last_metrics["image_prepare_ms"] = prepare_ms
@@ -268,6 +272,9 @@ def worker_main(fd, detector_factory=None, version=None):
                         request["box_threshold"],
                         request["nms_iou"],
                         request["limit"],
+                        min_width=request.get("min_width", 0),
+                        min_height=request.get("min_height", 0),
+                        min_area=request.get("min_area", 0),
                     )
                     del image
                     result = dict(

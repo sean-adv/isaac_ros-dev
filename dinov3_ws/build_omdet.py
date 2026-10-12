@@ -6,10 +6,145 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = ROOT.parent
 MODEL_ID = "omlab/OmDet-Turbo_tiny_SWIN_T"
+
+
+def capacities(metadata):
+    # Existing engines have class_count and a fixed 77-token task input.
+    max_labels = metadata.get('max_labels', metadata.get('class_count'))
+    max_prompt_tokens = metadata.get('max_prompt_tokens', 77)
+    validate_capacities(max_labels, max_prompt_tokens)
+    return max_labels, max_prompt_tokens
+
+
+def validate_capacities(max_labels, max_prompt_tokens):
+    if isinstance(max_labels, bool) or not isinstance(max_labels, int) or max_labels < 1:
+        raise ValueError('max_labels must be a positive integer')
+    if (isinstance(max_prompt_tokens, bool) or not isinstance(max_prompt_tokens, int)
+            or not 2 <= max_prompt_tokens <= 77):
+        raise ValueError('max_prompt_tokens must be between 2 and 77 (including CLIP start/end tokens)')
+
+
+def load_profiles(path, max_labels):
+    profiles = json.loads(path.read_text())['profiles']
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError('At least one offline prompt profile is required')
+    keys = set()
+    for profile in profiles:
+        if set(profile) - {'prompt', 'labels'}:
+            raise ValueError('Profiles only accept prompt and labels; remove task/output_labels')
+        labels = profile['labels']
+        if (not isinstance(labels, list) or not labels
+                or any(not isinstance(s, str) or not s.strip() for s in labels)
+                or len(set(labels)) != len(labels)):
+            raise ValueError('Labels must be nonempty and unique')
+        if len(labels) > max_labels:
+            raise ValueError(f"Prompt {profile['prompt']!r} has {len(labels)} labels; engine maximum is {max_labels}")
+        if not isinstance(profile['prompt'], str) or not profile['prompt'].strip():
+            raise ValueError('prompt must be a nonempty string')
+        # The exact prompt is both the selection key and the CLIP task sentence.
+        key = tuple(s.strip() for s in profile['prompt'].split('.') if s.strip())
+        if not key or key in keys:
+            raise ValueError('Offline prompt keys must be nonempty and unique')
+        keys.add(key)
+    return profiles
+
+
+def encode_profiles(repo, state, profiles, max_labels, max_prompt_tokens):
+    import torch
+    import torch.nn.functional as F
+    from omdet.modeling.language_backbone.clip.models import clip
+    language, _ = clip.load(str(repo / 'resources/ViT-B-16.pt'), device='cpu', jit=False)
+    language.visual = None
+    language.logit_scale = None
+    language_state = {k.removeprefix('language_backbone.'): v for k, v in state.items()
+                      if k.startswith('language_backbone.')}
+    if language_state:
+        language.load_state_dict(language_state, strict=True)
+    language.eval().float()
+    arrays = {}
+    with torch.inference_mode():
+        for i, profile in enumerate(profiles):
+            label_feats = language(clip.tokenize(profile['labels'], truncate=False)).unsqueeze(1).float()
+            task_tokens = clip.tokenize([profile['prompt']], truncate=False)
+            # CLIP's EOT has the largest vocabulary ID; count includes SOT/EOT.
+            token_count = int(task_tokens.argmax(dim=-1).item()) + 1
+            if token_count > max_prompt_tokens:
+                raise ValueError(f"Prompt {profile['prompt']!r} uses {token_count} tokens; engine maximum is {max_prompt_tokens}")
+            task_feats, task_mask = language(task_tokens, return_tokens=True)
+            task_feats = F.pad(task_feats.float(), (0, 0, 0, 0, 0, max_prompt_tokens-task_feats.shape[0]))
+            task_mask = F.pad(task_mask.to(torch.int32), (0, max_prompt_tokens-task_mask.shape[1]))
+            # Repeating the last valid class preserves encoder max-class scores:
+            # no unrelated class or zero embedding may influence query selection.
+            padding = max_labels - len(profile['labels'])
+            label_feats = torch.cat([label_feats, label_feats[-1:].expand(padding, -1, -1)], dim=0)
+            for name, tensor in [('label_feats', label_feats), ('task_feats', task_feats), ('task_mask', task_mask)]:
+                arrays[f'{i}_{name}'] = tensor.numpy()
+    return arrays
+
+
+def update_prompt_bank(repo, output, profiles, max_labels, max_prompt_tokens):
+    """Encode config prompts within existing capacities; never rebuild engines."""
+    import numpy as np
+    prompt_metadata = json.loads((output / 'prompts.json').read_text())
+    if prompt_metadata['model_id'] != MODEL_ID or capacities(prompt_metadata) != (max_labels, max_prompt_tokens):
+        raise ValueError('Engine capacity/model mismatch: rebuild ONNX and engines with --stage all')
+    engine_metadata = {}
+    for engine in sorted(output.glob('omdet_tiny*.engine')):
+        metadata_path = engine.with_suffix('.json')
+        metadata = json.loads(metadata_path.read_text())
+        if hashlib.sha256(engine.read_bytes()).hexdigest() != metadata['engine_sha256']:
+            raise ValueError(f'Engine checksum mismatch: {engine}')
+        if capacities(metadata) != (max_labels, max_prompt_tokens):
+            print(f'Skipped {engine.name}: different capacities; rebuild that precision before reuse', flush=True)
+            continue
+        engine_metadata[metadata_path.name] = metadata
+    if not engine_metadata:
+        raise ValueError('Prompt-only updates require an OmDet engine with matching capacities; run --stage all first')
+    source_commit = subprocess.check_output(
+        ['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+    for metadata in [prompt_metadata, *engine_metadata.values()]:
+        if metadata['model_id'] != MODEL_ID or capacities(metadata) != (max_labels, max_prompt_tokens):
+            raise ValueError('Engine capacity/model mismatch: rebuild ONNX and engines with --stage all')
+        if metadata['source_commit'] != source_commit:
+            raise ValueError('OmDet source commit differs from engine metadata; use the original source or rebuild')
+    import torch
+    torch.set_num_threads(8)
+    checkpoint_path = repo / 'resources/OmDet-Turbo_tiny_SWIN_T.pth'
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+    arrays = encode_profiles(repo, checkpoint.get('model', checkpoint), profiles, max_labels, max_prompt_tokens)
+    sys.path.insert(0, str(ROOT / 'src/dinov3_cases'))
+    from dinov3_cases.omdet_trt import OfflinePromptBank
+    with tempfile.TemporaryDirectory(prefix='.prompt-update-', dir=output) as directory:
+        staging = Path(directory)
+        np.savez(staging / 'prompts.npz', **arrays)
+        updates = dict(profiles=profiles, max_labels=max_labels, max_prompt_tokens=max_prompt_tokens,
+                       prompt_sha256=hashlib.sha256((staging / 'prompts.npz').read_bytes()).hexdigest(),
+                       prompt_source_commit=source_commit,
+                       prompt_checkpoint_sha256=hashlib.sha256(checkpoint_path.read_bytes()).hexdigest())
+        for name, previous in {'prompts.json': prompt_metadata, **engine_metadata}.items():
+            metadata = dict(previous, **updates)
+            metadata.pop('class_count', None)
+            OfflinePromptBank(staging / 'prompts.npz', metadata)
+            (staging / name).write_text(json.dumps(metadata, indent=2) + '\n')
+        names = ['prompts.npz', 'prompts.json', *engine_metadata]
+        originals = {name: (output / name).read_bytes() for name in names}
+        replaced = []
+        try:
+            for name in names:
+                os.replace(staging / name, output / name)
+                replaced.append(name)
+        except BaseException:
+            for name in reversed(replaced):
+                backup = staging / name
+                backup.write_bytes(originals[name])
+                os.replace(backup, output / name)
+            raise
+    print(f'Updated prompts within max_labels={max_labels}, max_prompt_tokens={max_prompt_tokens}; ONNX/engines unchanged', flush=True)
 
 
 def enforce_fp32_accumulation(model):
@@ -58,16 +193,36 @@ def main():
     parser.add_argument('--prompts', type=Path, default=ROOT / 'config/omdet_prompts.json')
     parser.add_argument('--output', type=Path, default=ROOT / 'artifacts/omdet')
     parser.add_argument('--download', action='store_true')
-    parser.add_argument('--stage', choices=['export', 'engine', 'all'], default='all')
+    parser.add_argument('--stage', choices=['prompts', 'export', 'engine', 'all'], default='all')
+    parser.add_argument('--stage-prompt', dest='stage', action='store_const', const='prompts',
+                        help='Only encode config prompt/labels using existing engine capacities')
+    parser.add_argument('--max-labels', type=int, help='Maximum number of labels accepted by the engine')
+    parser.add_argument('--max-prompt-tokens', type=int, help='Maximum task token length, including CLIP SOT/EOT (2..77)')
     parser.add_argument('--precision', choices=['fp16', 'fp32'], default='fp16')
     parser.add_argument('--reuse-fp16-onnx', action='store_true', help='Reuse existing AutoCast ONNX when rebuilding tactics')
     parser.add_argument('--calibration-images', type=Path, nargs='+', help='Real images for FP16 AutoCast calibration')
     args = parser.parse_args()
     repo, output = args.repo.resolve(), args.output.resolve()
     args.prompts = args.prompts.resolve()
+    if args.stage in ('export', 'all'):
+        if args.max_labels is None or args.max_prompt_tokens is None:
+            parser.error('Building requires --max-labels and --max-prompt-tokens')
+        validate_capacities(args.max_labels, args.max_prompt_tokens)
     if args.calibration_images:
         args.calibration_images = [p.resolve() for p in args.calibration_images]
     output.mkdir(parents=True, exist_ok=True)
+    if args.stage == 'prompts':
+        if args.download:
+            parser.error('--stage prompts is offline; download weights with --stage all first')
+        metadata = json.loads((output / 'prompts.json').read_text())
+        max_labels, max_prompt_tokens = capacities(metadata)
+        if ((args.max_labels is not None and args.max_labels != max_labels)
+                or (args.max_prompt_tokens is not None and args.max_prompt_tokens != max_prompt_tokens)):
+            parser.error('Prompt conversion cannot change existing engine capacities; rebuild with --stage all')
+        profiles = load_profiles(args.prompts, max_labels)
+        sys.path[:0] = [str(repo), str(WORKSPACE / 'detectron2')]
+        update_prompt_bank(repo, output, profiles, max_labels, max_prompt_tokens)
+        return
     if args.stage in ('export', 'all'):
         if args.download:
             from huggingface_hub import hf_hub_download
@@ -77,19 +232,12 @@ def main():
         os.chdir(repo)
         import numpy as np
         import torch
-        import torch.nn.functional as F
         from detectron2.config import get_cfg
         from omdet.omdet_v2_turbo.config import add_omdet_v2_turbo_config
         from omdet.omdet_v2_turbo.infer_model import OmDetV2TurboInfer
-        from omdet.modeling.language_backbone.clip.models import clip
         torch.set_num_threads(8)
         torch.manual_seed(0)
-        profiles = json.loads(args.prompts.read_text())['profiles']
-        if not profiles:
-            raise ValueError('At least one offline prompt profile is required')
-        counts = {len(p['labels']) for p in profiles}
-        if len(counts) != 1 or min(counts) < 1:
-            raise ValueError('Fixed ONNX export requires equal nonzero label counts per profile')
+        profiles = load_profiles(args.prompts, args.max_labels)
         cfg = get_cfg()
         add_omdet_v2_turbo_config(cfg)
         cfg.merge_from_file(str(repo / 'configs/OmDet-Turbo_tiny_SWIN_T.yaml'))
@@ -103,29 +251,11 @@ def main():
         if missing or any(not name.startswith('language_backbone.') for name in unexpected):
             raise RuntimeError(f'Detector weight mismatch: missing={missing}, unexpected={unexpected}')
         print('Ignored checkpoint keys:', unexpected, flush=True)
-        language, _ = clip.load(str(repo / 'resources/ViT-B-16.pt'), device='cpu', jit=False)
-        language.visual = None
-        language.logit_scale = None
-        # Use trained language weights if present, exactly as the official detector does.
-        language_state = {k.removeprefix('language_backbone.'): v for k, v in state.items() if k.startswith('language_backbone.')}
-        if language_state:
-            language.load_state_dict(language_state, strict=True)
-        language.eval().float()
-        arrays = {}
-        with torch.inference_mode():
-            for i, profile in enumerate(profiles):
-                labels = profile['labels']
-                if len(set(labels)) != len(labels) or any(not s.strip() for s in labels):
-                    raise ValueError('Labels must be nonempty and unique')
-                # Explicitly reject truncation: CLIP has a 77 token context.
-                label_feats = language(clip.tokenize(labels, truncate=False)).unsqueeze(1).float()
-                task_feats, task_mask = language(clip.tokenize([profile['task']], truncate=False), return_tokens=True)
-                task_feats = F.pad(task_feats.float(), (0, 0, 0, 0, 0, 77-task_feats.shape[0]))
-                task_mask = F.pad(task_mask.to(torch.int32), (0, 77-task_mask.shape[1]))
-                for name, tensor in [('label_feats', label_feats), ('task_feats', task_feats), ('task_mask', task_mask)]:
-                    arrays[f'{i}_{name}'] = tensor.numpy()
+        # Prompt-only and full export use the same trained official CLIP encoder.
+        arrays = encode_profiles(repo, state, profiles, args.max_labels, args.max_prompt_tokens)
         np.savez(output / 'prompts.npz', **arrays)
-        metadata = dict(model_id=MODEL_ID, profiles=profiles, class_count=min(counts), input_size=640,
+        metadata = dict(model_id=MODEL_ID, profiles=profiles, max_labels=args.max_labels,
+                        max_prompt_tokens=args.max_prompt_tokens, input_size=640,
                         mean=list(cfg.MODEL.PIXEL_MEAN), std=list(cfg.MODEL.PIXEL_STD),
                         source_commit=subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip(),
                         prompt_sha256=hashlib.sha256((output / 'prompts.npz').read_bytes()).hexdigest())
@@ -144,6 +274,11 @@ def main():
         onnx.checker.check_model(str(output / 'omdet_tiny.onnx'))
         print('Exported official ONNX and offline prompt bank', flush=True)
     if args.stage in ('engine', 'all'):
+        source_metadata = json.loads((output / 'prompts.json').read_text())
+        max_labels, max_prompt_tokens = capacities(source_metadata)
+        if ((args.max_labels is not None and args.max_labels != max_labels)
+                or (args.max_prompt_tokens is not None and args.max_prompt_tokens != max_prompt_tokens)):
+            parser.error('Capacity differs from exported ONNX; rerun --stage all or --stage export')
         onnx_path = output / 'omdet_tiny.onnx'
         conversion_metadata = {}
         if args.precision == 'fp16':
@@ -205,6 +340,12 @@ def main():
         onnx_parser = trt.OnnxParser(network, logger)
         if not onnx_parser.parse_from_file(str(onnx_path)):
             raise RuntimeError('\n'.join(str(onnx_parser.get_error(i)) for i in range(onnx_parser.num_errors)))
+        expected_shapes = dict(label_feats=(max_labels, 1, 512),
+                               task_feats=(max_prompt_tokens, 1, 512), task_mask=(1, max_prompt_tokens))
+        actual_shapes = {network.get_input(i).name: tuple(network.get_input(i).shape)
+                         for i in range(network.num_inputs)}
+        if any(actual_shapes.get(name) != shape for name, shape in expected_shapes.items()):
+            raise ValueError('ONNX inputs do not match metadata capacities; rerun --stage export')
         config = builder.create_builder_config()
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
         config.builder_optimization_level = 3

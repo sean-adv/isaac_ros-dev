@@ -16,6 +16,22 @@ cd /workspaces/isaac_ros-dev
 `/images` 提供圖庫管理及 HSV 去背。選取 case 只切換預覽，辨識仍比對全部圖庫。
 門檻、JPEG、推論頻率與 RGB-D 參數在 `config/dinov3_cases.yaml`，可用 `--ros-args -p` 覆寫。
 
+最小 bbox 可設定 `grounding_min_bbox_width`、`grounding_min_bbox_height`（像素）及
+`grounding_min_bbox_area`（平方像素）。三者預設為 `0`，各自表示不限制；
+啟用後，框必須同時滿足所有門檻，等於門檻時保留。尺寸以原圖座標裁切至影像範圍並取整後計算，
+不是 OmDet 的 640×640 或 DINOv3 的 224×224 輸入尺寸。
+小框在套用偵測數量上限及 DINOv3 辨識前移除，single／split、相機與上傳图片均適用。
+例如設定最小寬高 32 像素、面積 1024 平方像素：
+
+```yaml
+grounding_min_bbox_width: 32
+grounding_min_bbox_height: 32
+grounding_min_bbox_area: 1024
+```
+
+修改 config 後重新啟動推論程序；也可在啟動命令加上
+`--ros-args -p grounding_min_bbox_width:=32 -p grounding_min_bbox_height:=32 -p grounding_min_bbox_area:=1024`。
+
 ## 官方匯出與離線提示
 
 來源是 [OmDet 官方儲存庫](https://github.com/om-ai-lab/OmDet)，沿用官方
@@ -24,9 +40,9 @@ cd /workspaces/isaac_ros-dev
 | 輸入 | 尺寸 | 意義 |
 | --- | --- | --- |
 | img_tensor | 1×3×640×640 | RGB，直接 resize，均值／標準差正規化 |
-| label_feats | C×1×512 | CLIP 的類別 EOT 特徵，含 text_projection |
-| task_feats | 77×1×512 | 任務句的 token 特徵，補齊至 77 |
-| task_mask | 1×77 | 有效 token 為 1，padding 為 0 |
+| label_feats | max_labels×1×512 | CLIP 類別 EOT 特徵，含 text_projection |
+| task_feats | max_prompt_tokens×1×512 | 任務句特徵，補至指定容量 |
+| task_mask | 1×max_prompt_tokens | 有效 token 為 1，padding 為 0 |
 
 類別名稱與任務句分開編碼；使用官方修改版 CLIP，並載入 OmDet checkpoint 中的
 `language_backbone` 權重。**不要使用其他 CLIP 的一般 pooled embedding 代替任務 token 特徵。**
@@ -36,24 +52,61 @@ ONNX 不含文字編碼與後處理。TensorRT 11 引擎預設使用 FP16（NVID
 後處理對類別 logits 套用 sigmoid，
 將 normalized cxcywh 還原為原圖 XYXY，再做 NMS 與重複物體抑制。
 
-`config/omdet_prompts.json` 定義離線 profiles：`prompt` 是網頁／ROS 的選擇鍵；
-`labels` 是有序類別列表；`task` 是獨立任務句。預設包含 medicine bottle、medicine box、bottle、box。
-執行時只載入 `prompts.npz`，不載入 tokenizer、CLIP、PyTorch 偵測器或下載任何資源。
-未建置的提示回傳錯誤；偵測門檻直接套用於 OmDet 類別分數。
-`grounding_*` 參數、HTTP 路徑及 IPC 用於 OmDet 偵測流程。
-網頁只提供已建置提示的選單。
-
-新增提示時編輯 JSON，再重建。此版本採固定輸入尺寸，所有 profile 的類別數須相同；
-若類別數改變，必須一起重建 ONNX 和 engine。類別或任務句超過 CLIP 77 tokens 會拒絕，不靜默截斷。
+建置時指定容量，只需在首次建置或增加容量時重建：
 
 ```bash
-# 本工作區已下載官方原始碼及權重；新工作區先 clone 官方 repo 至 OmDet。
-./dinov3_ws/build_omdet.sh --download    # 官方權重 → 離線提示 → ONNX → TensorRT
-# 完全離線重建（使用已有 resources）
-./dinov3_ws/build_omdet.sh
-# 只從已有 ONNX 建置 engine
+./dinov3_ws/build_omdet.sh --max-labels 4 --max-prompt-tokens 77
+# 新工作區下載官方權重：同上加 --download
+```
+
+`--max-labels` 是最大類別數，`--max-prompt-tokens` 是任務文字的最大 token 數，
+包含 CLIP 起訖標記，範圍 2–77；不是字元數。每個類別名稱也受 CLIP 77-token 上限限制。
+容量會記錄在 `prompts.json` 和 engine metadata，決定 ONNX／engine 的固定輸入尺寸。
+只有匯出／完整建置時可設定容量；從已有 ONNX 建 engine 時沿用匯出的容量。
+
+`config/omdet_prompts.json` 每個 profile 只包含 `prompt` 與 `labels`：
+
+```json
+{
+  "profiles": [
+    {
+      "prompt": "Detect medicine bottle, medicine box.",
+      "labels": ["medicine bottle", "medicine box"]
+    }
+  ]
+}
+```
+
+`prompt` 同時是實際任務句和網頁／ROS 選擇鍵；`labels` 是有序的實際輸出類別。
+`config/dinov3_cases.yaml` 的 `grounding_prompt` 指定上述 prompt。
+不再需要 `task`、`output_labels`，也不會自動從 prompt 文字猜測 labels。
+
+日常修改文字或 labels 後只執行：
+
+```bash
+./dinov3_ws/build_omdet.sh --stage-prompt
+# --stage prompts 仍是同一模式的別名
+```
+
+此模式只用已有官方 CLIP／checkpoint 編碼特徵及更新 metadata，不建立偵測模型、
+不匯出 ONNX、不建置 engine、不重新進行 AutoCast 校驗。
+各 profile 可有不同類別數，只要 `len(labels) ≤ max_labels`，且任務文字 token 數不超過
+`max_prompt_tokens`。超限直接報錯，不截斷、不改寫 config，也不替換既有提示產物。
+類別較少時複製本次最後一個有效類別的特徵補足固定槽位；不引入其他類別。
+推論後只取實際 labels 對應分數，再進行 top-k／NMS；不輸出補位槽位。
+任務特徵補零至容量，`task_mask` 標示有效 token。固定容量下減少 labels 不會縮小引擎。
+
+執行前停止推論，完成後重新啟動，讓文字快取與選單重新載入。
+若修改了選擇鍵，也須同步 YAML 的 `grounding_prompt`。
+更新同步覆蓋 `prompts.npz`、`prompts.json` 與容量相同的 `omdet_tiny*.engine` 的 JSON metadata，
+保留 engine／ONNX hash、精度與原建置資訊；資料全部驗證成功後才替換，寫入失敗會回復。
+現有舊引擎會沿用原 `class_count` 作為 `max_labels`，任務容量為 77，不需立即重建。
+若目錄中保留其他容量的舊精度引擎，提示更新會跳過它；須重新建置該精度後才能使用新提示檔。
+官方原始碼 commit 必須與既有引擎相同。换提示後仍應用相關實圖檢查數值與辨識結果。
+
+```bash
+# 從已有 ONNX 建立 FP16 引擎／獨立 FP32 基準：
 ./dinov3_ws/build_omdet.sh --stage engine --precision fp16
-# 建置獨立 FP32 基準（omdet_tiny_fp32.engine）：
 ./dinov3_ws/build_omdet.sh --stage engine --precision fp32
 ```
 
@@ -94,6 +147,43 @@ DINOv3 為 `facebook/dinov3-vits16-pretrain-lvd1689m`，保持 FP16 計算及 FP
 `/medicine_recognition/debug_image` 與 `/dinov3/heatmap/overlay`。
 圖庫位於 `dinov3_cases_data/<case>/*`。
 
+相機辨識使用簡單 ROI 追蹤：以擴張框 IoU 篩選候選，再依原框重疊程度做
+一對一配對；標籤改變或變成 `unknown` 不會直接換 ID。疊圖、網頁結果及
+`/api/detections` 的 `track_id` 與 ROS 2D／3D 訊息的 `detections[].id` 使用相同 ID。
+預設容忍連續 5 個已執行偵測的影格漏偵測，第 6 個漏偵測影格移除追蹤；
+模型跳過的相機影格不計數，重跑同一影格也不增加漏偵測次數。
+漏偵測期間僅保留內部 ROI，不輸出舊框、辨識或姿態。
+切換輸入／設定、上傳新圖片或影像尺寸／frame 改變時清除 ROI，ID 不重複使用。
+可調整 `tracking_max_missed`、`tracking_iou_threshold`（預設 0.2）及
+`tracking_roi_padding`（預設每側擴張原框寬／高的 0.5 倍）。
+這是幾何配對；物件交叉、重疊或移動超出 ROI 時仍可能換 ID，需要實機確認。
+
+### 追蹤穩定後才顯示 bbox
+
+`config/dinov3_cases.yaml` 加入兩個顯示門檻：
+
+```yaml
+tracking_bbox_min_hit_ratio: 0.8
+tracking_bbox_min_detections: 10
+```
+
+每個 track ID 從首次偵測開始，累計「命中的唯一偵測影格數」及
+「已執行偵測的唯一影格總數（包含漏偵測）」。命中率為前者除以後者。
+只有**命中率 > 0.8 且命中幀數 > 10** 時才畫 bbox、ID／商品文字、位置文字與姿態軸。
+因此連續命中到第 10 幀仍不顯示，第 11 幀才顯示；12／15 恰好 80% 不顯示，
+13／16 為 81.25% 才通過。每幀重新判斷，比例降低時會再次隱藏。
+
+模型跳過的相機影格不納入分母，同一影格因圖庫更新而重跑不重複計數。
+尚未顯示的物件仍持續追蹤與辨識；漏偵測時不畫舊框。
+track 到期或輸入／追蹤情境重置後，新 ID 從 1 個命中幀重新累計。
+單張上傳圖片只有一個唯一影格，因此預設不會通過 10 幀門檻；若要顯示單張圖片的框，
+可將 `tracking_bbox_min_detections` 設為 `0`。
+
+這兩個參數控制影像疊圖顯示；`/api/detections`、ROS 2D／3D 結果與商品診斷圖仍保留當次原始辨識資料。
+HTTP 每個 detection 額外含 `track_detected_frames`、`track_total_frames`、
+`track_hit_ratio`、`bbox_visible`，可檢查尚未顯示的原因。
+門檻修改後重新啟動程序，亦可用 `--ros-args -p` 在啟動時覆寫。
+
 ## 已識別物件的 6D 姿態
 
 `run_camera.sh` 預設啟用 `depth_registration:=true`，將 IR 雙目產生的深度對齊到
@@ -122,7 +212,7 @@ Y 形成右手座標系。X 的影像平面主要分量固定為正。相機 opt
 X 向右、Y 向下、Z 向前。沒有 CAD 或物件姿態標定，這個幾何座標系無法代表
 商品標準正面，也不能解決對稱物件的真實朝向；PCA 軸在不同視角可能切換。
 訊息 covariance 使用未經標定的保守常數（位置對角 0.01 m²、旋轉 1 rad²），
-不是感測器精度量測。沒有追蹤器，3D detection 的持續 ID 留空。
+不是感測器精度量測。3D detection 的 ID 沿用同次 2D ROI 追蹤 ID。
 
 只對非 `unknown` 物件估計姿態。RGB／深度必須同尺寸、同 frame，時間差不超過
 `pose_sync_tolerance`（預設 0.05 秒），並有匹配的相機內參。

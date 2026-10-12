@@ -21,15 +21,19 @@ class OfflinePromptBank:
             raise ValueError('Offline OmDet prompt bank checksum mismatch; rebuild the bank and engine together.')
         self.profiles = metadata['profiles']
         self.entries = {}
-        count = metadata['class_count']
+        count = metadata.get('max_labels', metadata.get('class_count'))
+        tokens = metadata.get('max_prompt_tokens', 77)
+        if (isinstance(count, bool) or not isinstance(count, int) or count < 1
+                or isinstance(tokens, bool) or not isinstance(tokens, int) or not 2 <= tokens <= 77):
+            raise ValueError('Invalid OmDet engine capacities')
         with np.load(path, allow_pickle=False) as data:
             for i, profile in enumerate(self.profiles):
                 key = prompt_key(profile['prompt'])
-                if not key or key in self.entries or len(profile['labels']) != count:
+                if not key or key in self.entries or not 1 <= len(profile['labels']) <= count:
                     raise ValueError('Invalid or duplicate offline OmDet profile')
                 features = {name: data[f'{i}_{name}'].copy() for name in ['label_feats', 'task_feats', 'task_mask']}
                 for name, shape, dtype in [('label_feats',(count,1,512),np.float32),
-                                           ('task_feats',(77,1,512),np.float32), ('task_mask',(1,77),np.int32)]:
+                                           ('task_feats',(tokens,1,512),np.float32), ('task_mask',(1,tokens),np.int32)]:
                     value = features[name]
                     if value.shape != shape or value.dtype != dtype or not np.isfinite(value).all():
                         raise ValueError(f'Invalid offline OmDet {name}')
@@ -42,7 +46,7 @@ class OfflinePromptBank:
             return self.entries[prompt_key(prompt)]
         except (KeyError, AttributeError):
             available = [p['prompt'] for p in self.profiles]
-            raise ValueError(f'OmDet uses offline prompts. Available: {available}. Edit config/omdet_prompts.json and run build_omdet.sh to add a prompt.') from None
+            raise ValueError(f'OmDet uses offline prompts. Available: {available}. Select an available grounding_prompt, or edit config/omdet_prompts.json and run build_omdet.sh --stage-prompt (within engine capacities).') from None
 
 
 def prepare_image(image, metadata):
@@ -52,7 +56,8 @@ def prepare_image(image, metadata):
     return torch.from_numpy(pixels.transpose(2, 0, 1).copy()).unsqueeze(0)
 
 
-def postprocess(boxes, logits, labels, size, threshold, nms_iou, limit):
+def postprocess(boxes, logits, labels, size, threshold, nms_iou, limit,
+                *, min_width=0, min_height=0, min_area=0):
     from .grounded import clean_proposals
     from torchvision.ops import batched_nms
     if boxes.ndim == 4:
@@ -60,6 +65,10 @@ def postprocess(boxes, logits, labels, size, threshold, nms_iou, limit):
     if logits.ndim == 4:
         logits = logits[-1]
     boxes, logits = boxes[0].float(), logits[0].float()
+    if not labels or logits.shape[-1] < len(labels):
+        raise ValueError('OmDet labels exceed engine logits capacity')
+    # Only config labels participate in top-k/NMS; repeated padding has no label names.
+    logits = logits[:, :len(labels)]
     if not torch.isfinite(boxes).all() or not torch.isfinite(logits).all():
         raise RuntimeError('Non-finite OmDet outputs')
     scores = logits.sigmoid().flatten()
@@ -74,7 +83,8 @@ def postprocess(boxes, logits, labels, size, threshold, nms_iou, limit):
     keep = batched_nms(xyxy, scores, classes, nms_iou)
     # Also collapse overlapping synonyms for the existing per-object gallery pipeline.
     return clean_proposals(xyxy[keep].cpu().tolist(), scores[keep].cpu().tolist(),
-                           [labels[c] for c in classes[keep].cpu().tolist()], size, nms_iou, limit)
+                           [labels[c] for c in classes[keep].cpu().tolist()], size, nms_iou, limit,
+                           min_width=min_width, min_height=min_height, min_area=min_area)
 
 
 class OmDetDetector:
@@ -108,6 +118,12 @@ class OmDetDetector:
         names = {self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)}
         if names != self.inputs | self.outputs:
             raise ValueError(f'Unexpected OmDet TensorRT tensors: {names}')
+        capacity = self.metadata.get('max_labels', self.metadata.get('class_count'))
+        tokens = self.metadata.get('max_prompt_tokens', 77)
+        for name, expected in [('label_feats', (capacity, 1, 512)),
+                               ('task_feats', (tokens, 1, 512)), ('task_mask', (1, tokens))]:
+            if tuple(self.engine.get_tensor_shape(name)) != expected:
+                raise ValueError(f'OmDet {name} shape does not match metadata capacities')
         self.dtypes = {}
         self.buffers = {}
         for name in names:
@@ -148,8 +164,10 @@ class OmDetDetector:
                 stream.synchronize()
             return {name: self.buffers[name].clone() for name in self.outputs}
 
-    def detect(self, image, prompt, box_threshold, nms_iou, limit):
+    def detect(self, image, prompt, box_threshold, nms_iou, limit,
+               *, min_width=0, min_height=0, min_area=0):
         profile, _ = self.bank.resolve(prompt)
         inputs = dict(self.cached[prompt_key(prompt)], img_tensor=prepare_image(image, self.metadata))
         result = self.infer(inputs)
-        return postprocess(result['boxes'], result['logits'], profile['labels'], image.size, box_threshold, nms_iou, limit)
+        return postprocess(result['boxes'], result['logits'], profile['labels'], image.size, box_threshold, nms_iou, limit,
+                           min_width=min_width, min_height=min_height, min_area=min_area)

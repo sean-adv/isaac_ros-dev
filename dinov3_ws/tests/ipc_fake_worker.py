@@ -15,9 +15,13 @@ class Detector:
         if prompt == "invalid":
             raise ValueError("invalid test prompt")
 
-    def detect(self, image, prompt, box_threshold, nms_iou, limit):
+    def detect(self, image, prompt, box_threshold, nms_iou, limit,
+               *, min_width=0, min_height=0, min_area=0):
         if prompt == "hang":
             time.sleep(5)
+        width, height = image.size
+        if width < min_width or height < min_height or width * height < min_area:
+            return []
         return [dict(bbox=[0, 0, *image.size], color=list(image.getpixel((0, 0))))]
 
 

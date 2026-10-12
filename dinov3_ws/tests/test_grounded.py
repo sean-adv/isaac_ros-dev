@@ -14,6 +14,7 @@ from dinov3_cases.grounded import (
     prepare_object,
     recognize_objects,
     validate_settings,
+    validate_bbox_limits,
     recognition_message,
     object_debug_views,
     ObjectVisualizationSnapshot,
@@ -51,6 +52,33 @@ def test_object_preprocessing_handles_small_and_thin_crops():
         assert max(result.size) == 224
         assert all(n % 16 == 0 for n in result.size)
         assert result.getpixel((result.width - 1, result.height - 1)) == (255, 0, 0)
+
+
+@pytest.mark.parametrize("limits", [dict(min_width=10), dict(min_height=10),
+                                   dict(min_area=100)])
+def test_small_boxes_filtered_after_clipping_before_detection_limit(limits):
+    # The high-score box becomes 9x9 after clipping and must not consume limit=1.
+    boxes = [[-20, -20, 9, 9], [20, 20, 30, 30]]
+    result = clean_proposals(boxes, [.99, .8], ["box", "box"], (50, 50),
+                             limit=1, **limits)
+    assert [item["bbox"] for item in result] == [[20, 20, 30, 30]]
+    assert result[0]["area"] == 100  # Equality with the threshold is retained.
+
+
+def test_bbox_limits_disabled_and_combined():
+    boxes = [[0, 0, 1, 1], [2, 2, 12, 7], [20, 20, 30, 30]]
+    args = (boxes, [.99, .9, .8], ["box"] * 3, (50, 50))
+    assert len(clean_proposals(*args)) == 3
+    assert [item["bbox"] for item in clean_proposals(
+        *args, min_width=10, min_height=5, min_area=100
+    )] == [[20, 20, 30, 30]]
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, float("nan"), float("inf"), True, "10"])
+@pytest.mark.parametrize("name", ["min_width", "min_height", "min_area"])
+def test_invalid_bbox_limits_rejected(name, value):
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        validate_bbox_limits(**{name: value})
 
 
 def test_gallery_multi_class_unknown_and_filesystem_updates(tmp_path):

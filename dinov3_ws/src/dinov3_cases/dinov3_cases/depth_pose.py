@@ -204,7 +204,7 @@ def poses_message(items, header):
             continue
         data = item["pose"]
         detection = Detection3D(header=header)
-        # No tracker is present; leave the persistent detection id empty.
+        detection.id = str(item["track_id"]) if "track_id" in item else ""
         pose = detection.bbox.center
         pose.position.x, pose.position.y, pose.position.z = data["position"]
         (pose.orientation.x, pose.orientation.y,

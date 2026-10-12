@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from .runtime import GROUNDING_MODEL_ID
 
 
-DEFAULT_PROMPT = "medicine bottle. medicine box. bottle. box."
+DEFAULT_PROMPT = "Detect medicine bottle, medicine box, bottle, box."
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
@@ -36,8 +36,17 @@ def validate_settings(prompt, box_threshold, recognition_threshold, margin):
     return prompt.strip().rstrip(".") + "."
 
 
-def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20):
+def validate_bbox_limits(min_width=0, min_height=0, min_area=0):
+    for name, value in (("min_width", min_width), ("min_height", min_height),
+                        ("min_area", min_area)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a nonnegative integer.")
+
+
+def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
+                    *, min_width=0, min_height=0, min_area=0):
     """Clip original-image XYXY boxes; suppress duplicate prompts, never union boxes."""
+    validate_bbox_limits(min_width, min_height, min_area)
     width, height = size
     candidates = []
     for box, score, label in zip(boxes, scores, labels):
@@ -48,12 +57,16 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20):
         x1, y1 = min(width, math.ceil(x1)), min(height, math.ceil(y1))
         if x1 <= x0 or y1 <= y0:
             continue
+        box_width, box_height = x1 - x0, y1 - y0
+        area = box_width * box_height
+        if box_width < min_width or box_height < min_height or area < min_area:
+            continue
         candidates.append(
             dict(
                 bbox=[x0, y0, x1, y1],
                 detection_score=float(score),
                 detection_label=str(label),
-                area=(x1 - x0) * (y1 - y0),
+                area=area,
             )
         )
     kept = []
@@ -406,7 +419,7 @@ def recognition_message(items, header=None):
         x0, y0, x1, y1 = item["bbox"]
         detection = Detection2D()
         detection.header = message.header
-        detection.id = str(index)
+        detection.id = str(item.get("track_id", index))
         detection.bbox.center.position.x = (x0 + x1) / 2.0
         detection.bbox.center.position.y = (y0 + y1) / 2.0
         detection.bbox.size_x = float(x1 - x0)
