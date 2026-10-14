@@ -18,7 +18,7 @@ dinov3_cases:
     # Show bbox only when BOTH strict thresholds are exceeded (>).
     # Count unique inference frames since this track's first detection, including misses.
     tracking_bbox_min_hit_ratio: 0.8
-    tracking_bbox_min_detections: 10
+    tracking_bbox_min_detections: 6
     # Both modes use fixed 224×224 DINOv3 inputs; paths are selected by run.sh.
     inference_hz: 0.0
     preview_max_width: 960

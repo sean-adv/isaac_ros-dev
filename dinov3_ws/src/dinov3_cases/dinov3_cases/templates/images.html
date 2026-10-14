@@ -28,6 +28,23 @@
 <small>標籤支援英文、數字、底線、連字號。去背會新增圖片，原圖保留。</small>
 </p>
 </section>
+{% if camera_enabled %}
+<section id="camera-section">
+<h2>從相機擷取 bbox 圖片</h2>
+<p class="muted">先建立或選擇 label，再選擇 prompt。按下擷取後，OmDet 會偵測當下畫面，將每個 bbox 裁切成 PNG 存入該標籤，再接著去背。</p>
+<form id="camera-label-form">
+<input id="camera-label" aria-label="相機圖片標籤" placeholder="標籤，例如 medicine_01" required pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
+<button id="camera-create">建立／選擇 label</button>
+</form>
+<p id="camera-label-status" class="muted">尚未選擇 label</p>
+<label>OmDet prompt <select id="camera-prompt" disabled><option value="">載入中…</option></select></label>
+<div class="imagebox"><img id="camera-live" src="/camera.mjpg" alt="相機即時畫面"></div>
+<p id="camera-status" role="status">正在確認相機狀態…</p>
+<button id="camera-capture" aria-describedby="camera-capture-help">手動擷取並儲存 bbox 圖片</button>
+<p id="camera-capture-help" role="status">請先建立或選擇 label。</p>
+<p><small>多個 bbox 會各存一張圖片；請確認畫面中的物件皆屬於選定 label。沒有偵測結果時不會新增圖片。</small></p>
+</section>
+{% endif %}
 <p id="message" role="status" aria-live="polite">
 </p>
 <div class="layout">

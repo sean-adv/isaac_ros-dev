@@ -7,6 +7,16 @@ let selected = null,
   loadVersion = 0,
   timer = null,
   busy = false;
+let cameraLabel = '';
+let knownLabels = new Set();
+// Running Flask services may still have the previous HTML template cached.
+if (el('camera-section') && !el('camera-capture-help')) {
+  const help = document.createElement('p');
+  help.id = 'camera-capture-help';
+  help.setAttribute('role', 'status');
+  el('camera-capture').after(help);
+  el('camera-capture').setAttribute('aria-describedby', help.id);
+}
 
 function message(text, error = false) {
   el('message').textContent = text;
@@ -29,6 +39,14 @@ function buttons() {
   el('save').disabled = busy || !selected || !point || !previewUrl;
   el('delete').disabled = busy || !selected;
   el('upload-button').disabled = busy;
+  if (el('camera-section')) {
+    // Keep validation actionable; a disabled button cannot explain what is missing.
+    el('camera-capture').disabled = busy;
+    el('camera-create').disabled = busy;
+    el('camera-label').disabled = busy;
+    el('camera-prompt').disabled = busy || !Array.from(el('camera-prompt').options).some(option => option.value);
+    el('camera-capture-help').textContent = busy ? '處理中，請稍候…' : cameraLabel !== el('camera-label').value || !knownLabels.has(cameraLabel) ? '請先建立或選擇 label。' : !el('camera-prompt').value ? '請先選擇 OmDet prompt。' : '按下按鈕即可擷取並儲存至 ' + cameraLabel + '。';
+  }
 }
 
 function clearPreview() {
@@ -57,6 +75,8 @@ function clearSelection() {
 }
 async function refresh(group = el('cases').value) {
   const data = await (await api('/api/images' + (group ? '?case=' + encodeURIComponent(group) : ''))).json();
+  knownLabels = new Set(data.cases);
+  if (el('camera-section')) syncCameraLabel(el('camera-label').value);
   el('cases').replaceChildren(new Option('請選擇標籤', ''), ...data.cases.map(c => new Option(c, c)));
   el('cases').value = group;
   el('case-list').replaceChildren(...data.cases.map(c => new Option(c, c)));
@@ -97,6 +117,7 @@ async function choose(group, name) {
   el('filename').textContent = group + ' / ' + name + ' · ' + canvas.width + ' × ' + canvas.height;
   el('target-case').value = group;
   el('upload-case').value = group;
+  if (el('camera-section')) syncCameraLabel(group);
   for (const tile of el('gallery').children) tile.setAttribute('aria-pressed', String(tile.querySelector('span').textContent === name));
   message('請在原圖上點選要去除的背景色。');
   buttons();
@@ -182,6 +203,7 @@ el('connected').onchange = schedulePreview;
 el('cases').onchange = () => {
   clearSelection();
   el('upload-case').value = el('cases').value;
+  if (el('camera-section')) syncCameraLabel(el('cases').value);
   refresh().catch(e => message(e.message, true));
 };
 el('reload').onclick = () => {
@@ -261,3 +283,95 @@ el('delete').onclick = async () => {
   }
 };
 refresh().catch(e => message(e.message, true));
+
+function syncCameraLabel(group) {
+  el('camera-label').value = group;
+  cameraLabel = knownLabels.has(group) ? group : '';
+  el('camera-label-status').textContent = cameraLabel ? '擷取圖片將存入：' + cameraLabel : '新 label 請先按「建立／選擇 label」';
+  buttons();
+}
+
+if (el('camera-section')) {
+  el('camera-label').oninput = () => syncCameraLabel(el('camera-label').value);
+  el('camera-prompt').onchange = buttons;
+  el('camera-label-form').onsubmit = async event => {
+    event.preventDefault();
+    if (busy) return;
+    busy = true;
+    buttons();
+    try {
+      const result = await (await api('/api/images/labels', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({case: el('camera-label').value})
+      })).json();
+      knownLabels.add(result.case);
+      syncCameraLabel(result.case);
+      clearSelection();
+      await refresh(cameraLabel);
+      message('標籤已就緒，請選擇 prompt 後擷取。');
+    } catch (e) {
+      message(e.message, true);
+    } finally {
+      busy = false;
+      buttons();
+    }
+  };
+  async function cameraStatus() {
+    try {
+      const status = await (await api('/api/status')).json();
+      const prompts = status.grounding_offline_prompts || [];
+      const previous = el('camera-prompt').value;
+      const current = Array.from(el('camera-prompt').options).map(option => option.value).filter(Boolean);
+      if (JSON.stringify(current) !== JSON.stringify(prompts)) {
+        el('camera-prompt').replaceChildren(new Option('請選擇 prompt', ''), ...prompts.map(p => new Option(p, p)));
+        el('camera-prompt').value = prompts.includes(previous) ? previous : '';
+      }
+      el('camera-status').textContent = !status.camera_connected ? '相機未連線或畫面已過期' : !prompts.length ? 'OmDet 載入中…' : '相機已連線，可手動擷取';
+    } catch (e) {
+      el('camera-status').textContent = e.message;
+    } finally {
+      buttons();
+      setTimeout(cameraStatus, 3000);
+    }
+  }
+  el('camera-capture').onclick = async () => {
+    if (busy) return;
+    syncCameraLabel(el('camera-label').value);
+    if (!cameraLabel) {
+      el('camera-capture-help').textContent = '請先建立或選擇 label，再擷取圖片。';
+      message('請先建立或選擇 label，再擷取圖片。', true);
+      el('camera-label').focus();
+      return;
+    }
+    if (!el('camera-prompt').value) {
+      el('camera-capture-help').textContent = '請先選擇 OmDet prompt；若無選項，請等候模型載入。';
+      message(el('camera-capture-help').textContent, true);
+      el('camera-prompt').focus();
+      return;
+    }
+    busy = true;
+    buttons();
+    message('正在擷取相機畫面並交給 OmDet 偵測…');
+    try {
+      const result = await (await api('/api/images/capture', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({case: cameraLabel, prompt: el('camera-prompt').value})
+      })).json();
+      if (result.names.length) {
+        await refresh(result.case);
+        await choose(result.case, result.names[0]);
+        message('已儲存 ' + result.names.length + ' 張 bbox 圖片至 ' + result.case + '。可在原圖點選背景進行去背。');
+      } else {
+        message('此畫面未偵測到符合 prompt 的物件，未新增圖片。請調整位置或 prompt 後重試。');
+      }
+    } catch (e) {
+      el('camera-status').textContent = e.message;
+      message(e.message, true);
+    } finally {
+      busy = false;
+      buttons();
+    }
+  };
+  buttons();
+  cameraStatus();
+}

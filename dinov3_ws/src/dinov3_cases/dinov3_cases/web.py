@@ -5,6 +5,7 @@ import time
 from io import BytesIO
 from flask import Flask, jsonify, request, Response, render_template
 from PIL import Image, ImageOps
+from werkzeug.exceptions import ServiceUnavailable
 from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
 from .patches import reference_grid_image
 from .grounded import prepare_object, validate_settings
@@ -49,7 +50,32 @@ def create_app(node):
             node.overlay_at = None
             node.status = "Building reference features…"
 
-    register_image_manager(app, node.root, images_changed)
+    def capture_camera(prompt):
+        with node.lock:
+            detector = getattr(node, "grounding_detector", None)
+            frame = node.camera_frame
+            received_at = node.camera_received_at
+            settings = dict(node.grounding_settings)
+        if detector is None:
+            raise ServiceUnavailable("OmDet 載入中，請稍後再試。")
+        if frame is None or received_at is None or time.monotonic() - received_at >= 3:
+            raise ServiceUnavailable("相機尚未連線或畫面已過期，請確認相機訊號。")
+        detector.validate_prompt(prompt)
+        image = Image.fromarray(node.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")).copy()
+        proposals = detector.detect(
+            image, prompt, settings["box_threshold"],
+            node.param("grounding_nms_iou"), node.param("grounding_max_detections"),
+            min_width=node.param("grounding_min_bbox_width"),
+            min_height=node.param("grounding_min_bbox_height"),
+            min_area=node.param("grounding_min_bbox_area"),
+        )
+        return image, proposals
+
+    @app.errorhandler(503)
+    def unavailable(error):
+        return jsonify(error=error.description), 503
+
+    register_image_manager(app, node.root, images_changed, capture=capture_camera)
 
     @app.errorhandler(ValueError)
     def bad_request(error):

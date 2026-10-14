@@ -118,7 +118,7 @@ def png_response(image):
     return response
 
 
-def register_image_manager(app, root, on_change=None):
+def register_image_manager(app, root, on_change=None, capture=None):
     root = Path(root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     mutation_lock = threading.RLock()
@@ -147,7 +147,8 @@ def register_image_manager(app, root, on_change=None):
     @app.get("/images")
     def manager_page():
         return render_template(
-            "images.html", home_label=app.config.get("IMAGE_MANAGER_HOME", "DINOv3 首頁")
+            "images.html", home_label=app.config.get("IMAGE_MANAGER_HOME", "DINOv3 首頁"),
+            camera_enabled=capture is not None
         )
 
     @app.get("/api/images")
@@ -179,6 +180,34 @@ def register_image_manager(app, root, on_change=None):
         with mutation_lock:
             image = load_rgba(image_path(root, group, filename))
         return png_response(image)
+
+    @app.post("/api/images/labels")
+    def create_label():
+        group = payload().get("case")
+        with mutation_lock:
+            group_path(root, group).mkdir(exist_ok=True)
+        return jsonify(ok=True, case=group)
+
+    @app.post("/api/images/capture")
+    def capture_images():
+        if capture is None:
+            return jsonify(error="此圖片管理服務未連接相機，請使用相機主程式的 /images 頁面。"), 503
+        data = payload()
+        group = data.get("case")
+        folder = group_path(root, group)
+        if not folder.is_dir():
+            raise ValueError("請先建立或選擇標籤。")
+        prompt = data.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("請先選擇 OmDet prompt。")
+        image, proposals = capture(prompt)
+        # Crop the very same raw frame sent to OmDet, at its original resolution.
+        crops = [image.crop(item["bbox"]) for item in proposals]
+        with mutation_lock:
+            names = [save(crop, folder, "_bbox") for crop in crops]
+            if names:
+                changed(group)
+        return jsonify(ok=True, case=group, names=names, detections=proposals)
 
     @app.post("/api/images/upload")
     def upload_images():
