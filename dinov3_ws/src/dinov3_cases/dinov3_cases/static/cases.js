@@ -6,8 +6,8 @@ el('bbox-view').onchange = () => {
   const mode = el('bbox-view').value;
   el('overlay').src = '/overlay.mjpg?bbox=' + mode;
   el('bbox-help').textContent = mode === '3d'
-    ? '顯示 3D bbox 投影線框；需有效同步深度、已識別商品與穩定追蹤。沒有可用 3D 框時只顯示影像。'
-    : '顯示原始 2D 框；綠框為已辨識商品，黃框為 unknown。';
+    ? 'Showing projected 3D bounding box wireframes. This requires valid synchronized depth, recognized products, and stable tracking. Only the image is shown when no 3D boxes are available.'
+    : 'Showing original 2D bounding boxes. Green boxes indicate recognized products; yellow boxes indicate unknown objects.';
 };
 el('grounding-form').onsubmit = e => {
   e.preventDefault();
@@ -44,7 +44,7 @@ async function refreshDetections() {
   for (const item of data.detections) {
     if (!item.label) continue;
     const row = document.createElement('p');
-    row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · 最接近 ' + item.candidate : '') + (item.margin === null ? '' : ' · 差距 ' + item.margin.toFixed(3));
+    row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · closest match ' + item.candidate : '') + (item.margin === null ? '' : ' · margin ' + item.margin.toFixed(3));
     list.append(row);
   }
 }
@@ -54,14 +54,14 @@ async function refreshReferences(group, revision, stride) {
   referenceKey = key;
   const version = ++referenceVersion;
   el('reference-gallery').replaceChildren();
-  el('reference-status').textContent = group ? '載入 ' + group + ' 的範例照片…' : '請選擇 case 以查看每張範例照片。';
+  el('reference-status').textContent = group ? 'Loading ' + group + ' reference images…' : 'Select a case to view its reference images.';
   if (!group) return;
   try {
     const r = await fetch('/api/references?case=' + encodeURIComponent(group));
     const d = await r.json();
     if (version !== referenceVersion) return;
     if (!r.ok) throw Error(d.error || r.statusText);
-    el('reference-status').textContent = d.case+' · ' + d.images.length + ' 張範例照片 · 每格 ' + d.patch_size + ' × ' + d.patch_size + ' 像素';
+    el('reference-status').textContent = d.case+' · ' + d.images.length + ' reference images · patch size ' + d.patch_size + ' × ' + d.patch_size + ' pixels';
     for (const item of d.images) {
       const card = document.createElement('figure');
       card.className = 'reference-card';
@@ -74,14 +74,14 @@ async function refreshReferences(group, revision, stride) {
       } else {
         const image = document.createElement('img');
         image.loading = 'lazy';
-        image.alt = item.name + ' 的 patch 分割示意圖';
+        image.alt = item.name + ' patch grid';
         image.src = '/api/references/grid/' + encodeURIComponent(group) + '/' + encodeURIComponent(item.name) + '?v=' + encodeURIComponent(item.version);
         image.onerror = () => {
-          if (version === referenceVersion) caption.textContent += ' · 示意圖載入失敗';
+          if (version === referenceVersion) caption.textContent += ' · Failed to load patch grid';
         };
         card.append(image);
         const details = document.createElement('p');
-        details.textContent = '原圖 ' + item.original_size.join(' × ') + ' → 模型輸入 ' + item.size.join(' × ') + ' · ' + item.rows + ' 列 × ' + item.columns + ' 欄（' + item.rows * item.columns + ' patches）';
+        details.textContent = 'Original ' + item.original_size.join(' × ') + ' → model input ' + item.size.join(' × ') + ' · ' + item.rows + ' rows × ' + item.columns + ' columns (' + item.rows * item.columns + ' patches)';
         card.append(details);
       }
       card.append(caption);
@@ -162,12 +162,12 @@ async function refresh() {
 }
 
 const objectHelp = {
-  heatmap: 'ROI 原圖疊加局部 patch 相似度。固定色階：0（深藍）→ 0.5（綠）→ 1（紅）；負值顯示深藍。',
-  crop: 'OmDet-Turbo-Tiny 在原圖座標中找到的物體裁切，保持原長寬比。',
-  grid: '實際 DINOv3 模型輸入：黃色為 patch 邊界，藍框外為右側／底部補邊。',
-  patches: '每個 ROI patch 與最佳參考圖所有 patch 的最高 cosine similarity；顯示完整模型網格（含補邊）。',
-  similarity: '移除補邊並映射回 ROI 的純相似度圖。固定色階 0–1；負值顯示深藍。',
-  reference: '整體商品特徵比對分數最高的那張參考圖，使用與辨識相同的縮放與補邊。'
+  heatmap: 'Local patch similarity overlaid on the original ROI. Fixed scale: 0 (dark blue) → 0.5 (green) → 1 (red). Negative values appear dark blue.',
+  crop: 'Object crop detected by OmDet-Turbo-Tiny in original image coordinates, preserving its aspect ratio.',
+  grid: 'Actual DINOv3 model input. Yellow lines mark patch boundaries; the area outside the blue box is right/bottom padding.',
+  patches: 'Maximum cosine similarity between each ROI patch and all patches of the best reference image. Shows the full model grid, including padding.',
+  similarity: 'Similarity map with padding removed, mapped back to the ROI. Fixed scale of 0–1; negative values appear dark blue.',
+  reference: 'Reference image with the highest overall product feature similarity, using the same resizing and padding as recognition.'
 };
 let objectBusy = false,
   objectKey = '',
@@ -183,14 +183,14 @@ function updateObjectReferences(cases) {
   const list = JSON.stringify(cases);
   if (select.dataset.list === list) return;
   const selected = select.value;
-  select.replaceChildren(new Option('自動最佳參考圖', ''), ...cases.map(name => new Option(name, name)));
+  select.replaceChildren(new Option('Automatic best reference', ''), ...cases.map(name => new Option(name, name)));
   select.value = cases.includes(selected) ? selected : '';
   select.dataset.list = list;
 }
 async function refreshObjects() {
   if (objectBusy || el('object-section').hidden) return;
   if (!el('object-enabled').checked) {
-    el('object-status').textContent = '診斷圖片已關閉；勾選「開啟診斷圖片」以顯示物體熱圖。';
+    el('object-status').textContent = 'Diagnostic images are disabled. Check "Enable diagnostic images" to show object heatmaps.';
     return;
   }
   objectBusy = true;
@@ -198,27 +198,27 @@ async function refreshObjects() {
   el('object-help').textContent = objectHelp[view];
   const referenceCase = el('object-reference').value;
   const comparisonQuery = referenceCase ? '?reference_case=' + encodeURIComponent(referenceCase) : '';
-  if (referenceCase) el('object-help').textContent = '比對標籤 ' + referenceCase + ' 的全部參考圖片。' + objectHelp[view].replace('最佳參考圖所有 patch', '指定標籤全部參考圖的 patch');
+  if (referenceCase) el('object-help').textContent = 'Comparing all reference images for label ' + referenceCase + '. ' + objectHelp[view].replace('all patches of the best reference image', 'all patches of all reference images under the selected label');
   el('object-scale').hidden = !['heatmap', 'patches', 'similarity'].includes(view);
   try {
     const response = await fetch('/api/object_visualizations' + comparisonQuery);
     const data = await response.json();
     if (data.ready || !response.ok && data.reference_cases) updateObjectReferences(data.reference_cases);
-    if (!response.ok) throw Error(data.error || '無法讀取物體視覺化');
+    if (!response.ok) throw Error(data.error || 'Unable to load object visualizations');
     const key = JSON.stringify([data.revision, view, referenceCase]);
     if (key === objectKey) return;
     if (!data.objects.length) {
       clearObjectUrls();
       el('object-gallery').replaceChildren();
-      el('object-status').textContent = '目前沒有物體結果；請提供目標影像並檢查文字提示與偵測門檻。';
+      el('object-status').textContent = 'No object results yet. Provide a target image and check the text prompt and detection threshold.';
       objectKey = key;
       return;
     }
     const images = await Promise.all(data.objects.map(async item => {
       if (!item.views.includes(view)) return null;
       const image = await fetch('/debug/objects/' + data.revision + '/' + item.index + '/' + view + '.jpg' + comparisonQuery);
-      if (image.status === 410) throw Error('結果已更新，正在取得最新視覺化…');
-      if (!image.ok) throw Error('物體 ' + (item.index + 1) + ' 視覺化讀取失敗');
+      if (image.status === 410) throw Error('Results have changed. Fetching the latest visualizations…');
+      if (!image.ok) throw Error('Object ' + (item.index + 1) + ' visualization failed to load');
       return image.blob();
     }));
     if (!el('object-enabled').checked || view !== el('object-view').value || referenceCase !== el('object-reference').value) return;
@@ -232,13 +232,13 @@ async function refreshObjects() {
       title.textContent = (item.track_id == null ? '#' + (item.index + 1) : 'ID ' + item.track_id) + ' · ' + item.label + ' · ' + item.detection_label;
       card.append(title);
       const detail = document.createElement('p');
-      detail.textContent = 'bbox [' + item.bbox.join(', ') + '] · ROI ' + item.roi_size.join(' × ') + ' → 輸入 ' + item.input_size.join(' × ') + ' · ' + item.patch_grid.join(' × ') + ' patches';
+      detail.textContent = 'bbox [' + item.bbox.join(', ') + '] · ROI ' + item.roi_size.join(' × ') + ' → input ' + item.input_size.join(' × ') + ' · ' + item.patch_grid.join(' × ') + ' patches';
       card.append(detail);
       const score = document.createElement('p');
-      score.textContent = 'det ' + item.detection_score.toFixed(3) + ' · 商品 sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason;
+      score.textContent = 'det ' + item.detection_score.toFixed(3) + ' · product sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason;
       card.append(score);
       const comparison = document.createElement('p');
-      comparison.textContent = item.comparison_reference ? '比對 ' + item.comparison_case + ' · 標籤 sim ' + item.comparison_score.toFixed(3) + ' · ' + item.comparison_reference_count + ' 張參考圖 · 最佳 ' + item.comparison_reference.name : '沒有可用參考圖';
+      comparison.textContent = item.comparison_reference ? 'Comparing ' + item.comparison_case + ' · label sim ' + item.comparison_score.toFixed(3) + ' · ' + item.comparison_reference_count + ' reference images · best ' + item.comparison_reference.name : 'No reference images available';
       card.append(comparison);
       if (images[index]) {
         const image = document.createElement('img');
@@ -249,17 +249,17 @@ async function refreshObjects() {
         card.append(image);
       } else {
         const empty = document.createElement('p');
-        empty.textContent = '沒有參考圖庫，無法計算相似度；可切換裁切原圖或 patch 網格。';
+        empty.textContent = 'No reference gallery is available to calculate similarity. Switch to the original crop or patch grid view.';
         card.append(empty);
       }
       if (item.heatmap_available) {
         const range = document.createElement('small');
-        range.textContent = 'ROI 局部 cosine 範圍 ' + item.similarity_min.toFixed(3) + '–' + item.similarity_max.toFixed(3);
+        range.textContent = 'ROI local cosine range ' + item.similarity_min.toFixed(3) + '–' + item.similarity_max.toFixed(3);
         card.append(range);
       }
       gallery.append(card);
     });
-    el('object-status').textContent = data.objects.length + ' 個物體 · ' + (referenceCase ? '比對 ' + referenceCase : '自動最佳參考圖') + ' · 同一幀結果 #' + data.revision;
+    el('object-status').textContent = data.objects.length + ' objects · ' + (referenceCase ? 'Comparing ' + referenceCase : 'Automatic best reference') + ' · frame result #' + data.revision;
     objectKey = key;
   } catch (error) {
     el('object-status').textContent = error.message;
@@ -275,7 +275,7 @@ el('object-reference').onchange = () => {
   objectKey = '';
   clearObjectUrls();
   el('object-gallery').replaceChildren();
-  el('object-status').textContent = '正在更新標籤熱圖…';
+  el('object-status').textContent = 'Updating label heatmaps…';
   refreshObjects();
 };
 el('object-enabled').onchange = () => {

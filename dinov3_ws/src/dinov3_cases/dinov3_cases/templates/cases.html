@@ -1,32 +1,32 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>DINOv3 Cases</title>
 <link rel="stylesheet" href="/static/cases.css">
 </head>
 <body>
-<h1>OmDet-Turbo-Tiny → DINOv3 物體辨識</h1>
+<h1>OmDet-Turbo-Tiny → DINOv3 Object Recognition</h1>
 <p>
-<a href="/images" style="color:#8ddcc4">圖片管理／HSV 去背／標籤分類</a>
+<a href="/images" style="color:#8ddcc4">Image Manager / HSV Background Removal / Labels</a>
 </p>
-<p id="pipeline-help">先透過文字找出物體，再與所有商品參考圖比對。每個 case 代表一個商品身分。</p>
+<p id="pipeline-help">Detect objects using a text prompt, then compare them with all product reference images. Each case represents one product identity.</p>
 <section id="grounding-section">
-<h2>偵測與辨識設定</h2>
+<h2>Detection and Recognition Settings</h2>
 <form id="grounding-form">
-<label>文字提示 <select id="prompt" name="prompt" required style="width:min(600px,85%)"></select>
+<label>Text prompt <select id="prompt" name="prompt" required style="width:min(600px,85%)"></select>
 </label>
 <br>
-<label>偵測門檻 <input name="box_threshold" type="number" min="0" max="1" step="0.01" required>
+<label>Detection threshold <input name="box_threshold" type="number" min="0" max="1" step="0.01" required>
 </label>
 <br>
-<label>辨識相似度門檻 <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
+<label>Recognition similarity threshold <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
 </label>
-<label>前兩名最小差距 <input name="margin" type="number" min="0" max="2" step="0.01" required>
+<label>Minimum margin between the top two matches <input name="margin" type="number" min="0" max="2" step="0.01" required>
 </label>
-<button>套用設定</button>
+<button>Apply Settings</button>
 </form>
-<small>OmDet 使用預先編碼的離線提示，類別與任務句分開編碼；新增提示須先建置提示特徵。門檻或差距不足時顯示 unknown。</small>
+<small>OmDet uses pre-encoded offline prompts, with labels and task text encoded separately. Build prompt features before adding a new prompt. Results below the similarity threshold or minimum margin are shown as unknown.</small>
 </section>
 <section>
 <h2>1. Reference groups</h2>
@@ -38,16 +38,16 @@
 <select id="cases">
 <option value="">Select case</option>
 </select>
-<button id="select">檢視此圖庫</button>
+<button id="select">View Gallery</button>
 <p>
-<small>每個 case 放同一商品的多角度近距離照片。兩階段模式會比對所有圖庫；這裡的選擇僅切換參考圖預覽。</small>
+<small>Add close-up photos of the same product from multiple angles to each case. The two-stage pipeline compares all galleries. This selection changes the reference preview.</small>
 </p>
 </section>
 <section>
-<h2>範例照片 · Patch 分割示意圖</h2>
-<p id="reference-status" role="status">請選擇 case 以查看每張範例照片。</p>
+<h2>Reference Images · Patch Grids</h2>
+<p id="reference-status" role="status">Select a case to view its reference images.</p>
 <p>
-<small>黃色線為模型輸入的 patch 網格；等比例縮放至 224，再於右側與底部複製邊緣像素，補齊 224×224。</small>
+<small>Yellow lines show the model input patch grid. Images are resized proportionally to fit 224 pixels, then edge-padded on the right and bottom to 224×224.</small>
 </p>
 <div id="reference-gallery" class="reference-gallery">
 </div>
@@ -66,38 +66,38 @@
 <img id="preview" src="/camera.mjpg" alt="Live Orbbec camera">
 </section>
 <section>
-<h2>辨識結果</h2>
+<h2>Recognition Results</h2>
 <p id="status">Connecting…</p>
 <p id="error" role="alert">
 </p>
-<label>框顯示 <select id="bbox-view">
+<label>Bounding box display <select id="bbox-view">
 <option value="2d">2D bbox</option>
-<option value="3d">3D bbox 線框</option>
+<option value="3d">3D bbox wireframe</option>
 </select></label>
-<p id="bbox-help" role="status">顯示原始 2D 框。</p>
-<img id="overlay" src="/overlay.mjpg" alt="物體框選與辨識結果">
+<p id="bbox-help" role="status">Showing original 2D bounding boxes.</p>
+<img id="overlay" src="/overlay.mjpg" alt="Object bounding boxes and recognition results">
 <p>
-<small>det 為 OmDet-Turbo-Tiny 偵測分數；sim 為 DINOv3 圖庫相似度，並非商品辨識機率。綠框為已辨識商品，黃框為 unknown。</small>
+<small>det is the OmDet-Turbo-Tiny detection score. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects.</small>
 </p>
 <div id="recognition-list">
 </div>
 </section>
 
 <section id="object-section">
-<h2>逐物體 DINOv3 視覺化</h2>
+<h2>Per-Object DINOv3 Visualizations</h2>
 <label>
-<input id="object-enabled" type="checkbox" checked>開啟診斷圖片（會增加運算負載）</label>
-<label>比對 reference 標籤 <select id="object-reference">
-<option value="">自動最佳參考圖</option>
+<input id="object-enabled" type="checkbox" checked>Enable diagnostic images (adds processing load)</label>
+<label>Reference label to compare <select id="object-reference">
+<option value="">Automatic best reference</option>
 </select>
 </label>
-<label>顯示內容 <select id="object-view">
-<option value="heatmap">ROI 相似度熱圖疊加</option>
-<option value="crop">OmDet bbox 裁切原圖</option>
-<option value="grid">模型輸入與 patch 網格</option>
-<option value="patches">逐 patch 相似度</option>
-<option value="similarity">純相似度熱圖</option>
-<option value="reference">最佳參考圖</option>
+<label>View <select id="object-view">
+<option value="heatmap">ROI Similarity Heatmap Overlay</option>
+<option value="crop">Original OmDet Bounding Box Crop</option>
+<option value="grid">Model Input and Patch Grid</option>
+<option value="patches">Per-Patch Similarity</option>
+<option value="similarity">Similarity Heatmap</option>
+<option value="reference">Best Reference Image</option>
 </select>
 </label>
 <div id="object-scale" style="max-width:320px">
@@ -112,9 +112,9 @@
 <p id="object-help">
 </p>
 <p>
-<small>自動模式使用各物體的最佳參考圖；指定標籤時，每個 OmDet object 都與該標籤所有圖片的 patch 比對。最佳參考圖視圖顯示該標籤內對各物體最相似的圖片。局部 patch 相似度與整體商品辨識分數不同。網格內藍框為縮放後 ROI 範圍，外側為補邊。</small>
+<small>Automatic mode uses the best reference for each object. Selecting a label compares every OmDet object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
 </p>
-<p id="object-status" role="status">等待物體偵測結果…</p>
+<p id="object-status" role="status">Waiting for object detections…</p>
 <div id="object-gallery" class="reference-gallery">
 </div>
 </section>

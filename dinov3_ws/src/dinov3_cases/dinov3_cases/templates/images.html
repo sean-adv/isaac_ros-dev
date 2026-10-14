@@ -1,60 +1,63 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>圖片管理 · HSV 去背</title>
+<title>Image Manager · HSV Background Removal</title>
 <link rel="stylesheet" href="/static/images.css">
 </head>
 <body>
 <main>
 <header>
 <div>
-<h1>圖片管理 · HSV 去背</h1>
-<p class="muted">依標籤整理圖片，點選背景取色，再產生透明 PNG。</p>
+<h1>Image Manager · HSV Background Removal</h1>
+<p class="muted">Organize images by label, click to sample the background, and create a transparent PNG.</p>
 </div>
 <a href="/">{{ home_label }}</a>
 </header>
 <section>
-<h2>匯入圖片</h2>
+<h2>Import Images</h2>
 <form id="upload">
-<input name="case" id="upload-case" aria-label="上傳標籤" placeholder="標籤，例如 medicine_01" required pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
+<input name="case" id="upload-case" aria-label="Upload label" placeholder="Label, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
 <input name="images" type="file" accept="image/png,image/jpeg,image/webp,image/bmp" multiple required>
-<button id="upload-button">上傳到標籤</button>
+<button id="upload-button">Upload to Label</button>
 </form>
 <datalist id="case-list">
 </datalist>
 <p>
-<small>標籤支援英文、數字、底線、連字號。去背會新增圖片，原圖保留。</small>
+<small>Labels support letters, numbers, underscores, and hyphens. Background removal creates a new image and preserves the original.</small>
 </p>
 </section>
 {% if camera_enabled %}
 <section id="camera-section">
-<h2>從相機擷取 bbox 圖片</h2>
-<p class="muted">先建立或選擇 label，再選擇 prompt。按下擷取後，OmDet 會偵測當下畫面，將每個 bbox 裁切成 PNG 存入該標籤，再接著去背。</p>
+<h2>Capture Bounding Box Images from Camera</h2>
+<p class="muted">Create or select a label, then choose a prompt. Capture sends the current frame to OmDet and saves each bounding box as a cropped PNG under that label, ready for background removal.</p>
 <form id="camera-label-form">
-<input id="camera-label" aria-label="相機圖片標籤" placeholder="標籤，例如 medicine_01" required pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
-<button id="camera-create">建立／選擇 label</button>
+<input id="camera-label" aria-label="Camera image label" placeholder="Label, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
+<button id="camera-create">Create / Select Label</button>
 </form>
-<p id="camera-label-status" class="muted">尚未選擇 label</p>
-<label>OmDet prompt <select id="camera-prompt" disabled><option value="">載入中…</option></select></label>
-<div class="imagebox"><img id="camera-live" src="/camera.mjpg" alt="相機即時畫面"></div>
-<p id="camera-status" role="status">正在確認相機狀態…</p>
-<button id="camera-capture" aria-describedby="camera-capture-help">手動擷取並儲存 bbox 圖片</button>
-<p id="camera-capture-help" role="status">請先建立或選擇 label。</p>
-<p><small>多個 bbox 會各存一張圖片；請確認畫面中的物件皆屬於選定 label。沒有偵測結果時不會新增圖片。</small></p>
+<p id="camera-label-status" class="muted">No label selected</p>
+<label>OmDet prompt <select id="camera-prompt" disabled><option value="">Loading…</option></select></label>
+<div class="imagebox"><img id="camera-live" src="/camera.mjpg" alt="Live camera feed"></div>
+<div class="toolbar"><button id="camera-bbox-preview">Preview Bounding Boxes</button><span id="camera-bbox-status" role="status">Select a prompt to preview.</span></div>
+<div class="imagebox"><img id="camera-bbox-image" hidden alt="OmDet bounding box preview"></div>
+<p class="muted">The preview shows the frame captured when you click the button. Saving captures a new frame.</p>
+<p id="camera-status" role="status">Checking camera status…</p>
+<button id="camera-capture" aria-describedby="camera-capture-help">Capture and Save Bounding Box Images</button>
+<p id="camera-capture-help" role="status">Create or select a label first.</p>
+<p><small>Each bounding box is saved as a separate image. Make sure all objects in the frame belong to the selected label. No images are saved if nothing is detected.</small></p>
 </section>
 {% endif %}
 <p id="message" role="status" aria-live="polite">
 </p>
 <div class="layout">
 <section>
-<h2>標籤與圖片</h2>
+<h2>Labels and Images</h2>
 <div class="toolbar">
-<select id="cases" aria-label="篩選標籤">
-<option value="">請選擇標籤</option>
+<select id="cases" aria-label="Filter by label">
+<option value="">Select a label</option>
 </select>
-<button id="reload">重新整理</button>
+<button id="reload">Refresh</button>
 </div>
 <p id="count" class="muted">
 </p>
@@ -62,50 +65,50 @@
 </div>
 </section>
 <section>
-<h2>點選背景取色</h2>
-<p id="filename" class="muted">先從左側選擇圖片。</p>
+<h2>Click to Sample Background Color</h2>
+<p id="filename" class="muted">Select an image from the gallery first.</p>
 <div class="views">
 <div class="view">
-<p>原圖 · 點選背景</p>
+<p>Original · Click the Background</p>
 <div class="imagebox checker">
-<canvas id="original" hidden aria-label="點選原圖背景取色">
+<canvas id="original" hidden aria-label="Click the original image to sample the background color">
 </canvas>
 </div>
 </div>
 <div class="view">
-<p>去背預覽 · 棋盤格表示透明</p>
+<p>Background Removal Preview · Checkerboard Indicates Transparency</p>
 <div class="imagebox checker">
-<img id="preview" hidden alt="透明背景預覽">
+<img id="preview" hidden alt="Transparent background preview">
 </div>
 </div>
 </div>
 <p>
 <span id="sample">
-</span> <span id="sample-text">尚未選擇背景色</span>
+</span> <span id="sample-text">No background color selected</span>
 </p>
 <div class="controls">
-<label>H 色相容差：<output id="hue-out">15</output>°<input id="hue" type="range" min="0" max="180" value="15">
+<label>H Hue tolerance: <output id="hue-out">15</output>°<input id="hue" type="range" min="0" max="180" value="15">
 </label>
-<label>S 飽和度容差：<output id="saturation-out">50</output>
+<label>S Saturation tolerance: <output id="saturation-out">50</output>
 <input id="saturation" type="range" min="0" max="255" value="50">
 </label>
-<label>V 亮度容差：<output id="value-out">50</output>
+<label>V Brightness tolerance: <output id="value-out">50</output>
 <input id="value" type="range" min="0" max="255" value="50">
 </label>
-<label>邊緣柔化：<output id="feather-out">0</output> px<input id="feather" type="range" min="0" max="10" step="0.5" value="0">
+<label>Edge feathering: <output id="feather-out">0</output> px<input id="feather" type="range" min="0" max="10" step="0.5" value="0">
 </label>
 </div>
 <label>
-<input id="connected" type="checkbox" checked> 僅去除與取色位置連通的背景區域</label>
+<input id="connected" type="checkbox" checked> Remove only background regions connected to the sampled point</label>
 <p>
-<small>取消勾選會去除全圖相近顏色。物體與背景顏色相近時，請降低容差；斷開的背景可儲存後再點選去除。</small>
+<small>Uncheck to remove similar colors throughout the image. Lower the tolerance if the object and background have similar colors. To remove disconnected regions, save the result and sample another region.</small>
 </p>
-<label>新圖片的標籤 <input id="target-case" placeholder="預設使用原圖標籤" pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
+<label>Label for the new image <input id="target-case" placeholder="Defaults to the original image label" pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
 </label>
 <div class="toolbar">
-<button id="save" disabled>儲存新的透明 PNG</button>
-<a id="download" hidden download="cutout.png">下載預覽</a>
-<button id="delete" class="danger" disabled>刪除此圖片</button>
+<button id="save" disabled>Save New Transparent PNG</button>
+<a id="download" hidden download="cutout.png">Download Preview</a>
+<button id="delete" class="danger" disabled>Delete This Image</button>
 </div>
 </section>
 </div>

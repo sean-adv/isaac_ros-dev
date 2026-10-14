@@ -227,7 +227,8 @@ form,
   }
 }
 
-#camera-live {
+#camera-live,
+#camera-bbox-image {
   display: block;
   max-width: 100%;
   max-height: 420px;

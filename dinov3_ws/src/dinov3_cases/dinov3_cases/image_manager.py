@@ -9,17 +9,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 from flask import Flask, jsonify, request, send_file, render_template
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def group_path(root, name):
     if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", name):
-        raise ValueError("標籤限 1–80 個英文字母、數字、底線或連字號。")
+        raise ValueError("Labels must contain 1–80 letters, numbers, underscores, or hyphens.")
     path = root / name
     if path.is_symlink() or path.resolve().parent != root.resolve():
-        raise ValueError("無效的標籤路徑。")
+        raise ValueError("Invalid label path.")
     return path
 
 
@@ -32,7 +32,7 @@ def image_path(root, group, filename):
         or "/" in filename
         or Path(filename).name != filename
     ):
-        raise ValueError("無效的圖片名稱。")
+        raise ValueError("Invalid image filename.")
     path = folder / filename
     if (
         path.is_symlink()
@@ -40,7 +40,7 @@ def image_path(root, group, filename):
         or path.suffix.lower() not in EXTENSIONS
         or not path.is_file()
     ):
-        raise ValueError("圖片不存在或格式不支援。")
+        raise ValueError("Image does not exist or its format is unsupported.")
     return path
 
 
@@ -48,16 +48,16 @@ def load_rgba(source):
     try:
         with Image.open(source) as image:
             if image.width * image.height > 25_000_000:
-                raise ValueError("圖片不得超過 2500 萬像素。")
+                raise ValueError("Images must not exceed 25 megapixels.")
             return ImageOps.exif_transpose(image).convert("RGBA")
     except (OSError, Image.DecompressionBombError) as error:
-        raise ValueError("無法讀取圖片。") from error
+        raise ValueError("Unable to read the image.") from error
 
 
 def remove_background(image, options):
     """Match circular hue and S/V, optionally flood-fill only the clicked region."""
     if not isinstance(options, dict):
-        raise ValueError("請提供去背參數。")
+        raise ValueError("Provide background removal settings.")
 
     def number(name, default, maximum):
         value = options.get(name, default)
@@ -67,13 +67,13 @@ def remove_background(image, options):
             or not np.isfinite(value)
             or not 0 <= value <= maximum
         ):
-            raise ValueError(f"{name} 必須介於 0 到 {maximum}。")
+            raise ValueError(f"{name} must be between 0 and {maximum}.")
         return float(value)
 
     x = number("x", None, image.width - 1)
     y = number("y", None, image.height - 1)
     if not x.is_integer() or not y.is_integer():
-        raise ValueError("取色座標必須是整數。")
+        raise ValueError("Sample coordinates must be integers.")
     x, y = int(x), int(y)
     h = number("hue", 15, 180) / 2  # UI degrees; OpenCV uses half degrees.
     s = number("saturation", 50, 255)
@@ -81,10 +81,10 @@ def remove_background(image, options):
     feather = number("feather", 0, 10)
     connected = options.get("connected", True)
     if not isinstance(connected, bool):
-        raise ValueError("connected 必須是布林值。")
+        raise ValueError("connected must be a boolean.")
     rgba = np.array(image.convert("RGBA"))
     if rgba[y, x, 3] == 0:
-        raise ValueError("請點選尚未透明的背景位置。")
+        raise ValueError("Click a background point that is not already transparent.")
     hsv = cv2.cvtColor(rgba[..., :3], cv2.COLOR_RGB2HSV).astype(np.float32)
     sample = hsv[y, x]
     hue_distance = np.abs(hsv[..., 0] - sample[0])
@@ -130,7 +130,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
     def payload():
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
-            raise ValueError("請提供 JSON 物件。")
+            raise ValueError("Provide a JSON object.")
         return data
 
     def save(image, folder, suffix=""):
@@ -147,7 +147,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
     @app.get("/images")
     def manager_page():
         return render_template(
-            "images.html", home_label=app.config.get("IMAGE_MANAGER_HOME", "DINOv3 首頁"),
+            "images.html", home_label=app.config.get("IMAGE_MANAGER_HOME", "DINOv3 Home"),
             camera_enabled=capture is not None
         )
 
@@ -166,7 +166,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
             if group:
                 folder = group_path(root, group)
                 if not folder.is_dir():
-                    raise ValueError("標籤不存在。")
+                    raise ValueError("Label does not exist.")
                 images = [
                     dict(name=p.name, bytes=p.stat().st_size)
                     for p in sorted(folder.iterdir())
@@ -188,18 +188,40 @@ def register_image_manager(app, root, on_change=None, capture=None):
             group_path(root, group).mkdir(exist_ok=True)
         return jsonify(ok=True, case=group)
 
+    @app.post("/api/images/camera-preview")
+    def camera_bbox_preview():
+        if capture is None:
+            return jsonify(error="This image manager is not connected to a camera."), 503
+        prompt = payload().get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Select an OmDet prompt first.")
+        image, proposals = capture(prompt)
+        preview = image.copy().convert("RGB")
+        draw = ImageDraw.Draw(preview)
+        width = max(2, round(min(preview.size) / 250))
+        for item in proposals:
+            x0, y0, x1, y1 = item["bbox"]
+            text = f"{item['detection_label']} {item['detection_score']:.0%}"
+            box = draw.textbbox((x0, y0), text)
+            draw.rectangle(box, fill="#101821")
+            draw.text((x0, y0), text, fill="#8ddcc4")
+            draw.rectangle((x0, y0, x1 - 1, y1 - 1), outline="#8ddcc4", width=width)
+        response = png_response(preview)
+        response.headers["X-Detection-Count"] = str(len(proposals))
+        return response
+
     @app.post("/api/images/capture")
     def capture_images():
         if capture is None:
-            return jsonify(error="此圖片管理服務未連接相機，請使用相機主程式的 /images 頁面。"), 503
+            return jsonify(error="This image manager is not connected to a camera. Use the /images page of the camera service."), 503
         data = payload()
         group = data.get("case")
         folder = group_path(root, group)
         if not folder.is_dir():
-            raise ValueError("請先建立或選擇標籤。")
+            raise ValueError("Create or select a label first.")
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("請先選擇 OmDet prompt。")
+            raise ValueError("Select an OmDet prompt first.")
         image, proposals = capture(prompt)
         # Crop the very same raw frame sent to OmDet, at its original resolution.
         crops = [image.crop(item["bbox"]) for item in proposals]
@@ -215,7 +237,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
         folder = group_path(root, group)
         files = request.files.getlist("images")
         if not files:
-            raise ValueError("請選擇圖片。")
+            raise ValueError("Select an image.")
         images = [load_rgba(file.stream) for file in files]
         with mutation_lock:
             names = [save(image, folder) for image in images]
@@ -252,7 +274,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
 def create_app(root):
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
-    app.config["IMAGE_MANAGER_HOME"] = "圖片管理首頁"
+    app.config["IMAGE_MANAGER_HOME"] = "Image Manager Home"
 
     @app.errorhandler(ValueError)
     def invalid(error):
@@ -260,7 +282,7 @@ def create_app(root):
 
     @app.errorhandler(413)
     def too_large(error):
-        return jsonify(error="上傳總大小不得超過 64 MB。"), 413
+        return jsonify(error="Total upload size must not exceed 64 MB."), 413
 
     @app.get("/")
     def index():

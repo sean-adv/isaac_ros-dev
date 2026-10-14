@@ -103,3 +103,32 @@ def test_label_validation_and_standalone_mode(tmp_path):
     assert client.get('/api/images').json['cases'] == ['valid']
     assert b'camera-section' not in client.get('/images').data
     assert client.post('/api/images/capture', json={'case': 'valid', 'prompt': 'Detect box.'}).status_code == 503
+
+
+def test_bbox_preview_uses_selected_prompt_without_saving(camera):
+    from io import BytesIO
+    client, node, calls, proposals, pixels = camera
+    response = client.post('/api/images/camera-preview', json={'prompt': 'Detect box.'})
+    assert response.status_code == 200
+    assert response.mimetype == 'image/png'
+    assert response.headers['X-Detection-Count'] == '2'
+    preview = Image.open(BytesIO(response.data))
+    assert preview.size == (16, 12)
+    assert preview.getpixel((2, 9)) == (141, 220, 196)
+    np.testing.assert_array_equal(calls[0][0], pixels)
+    assert calls[0][1][0] == 'Detect box.'
+    assert list(node.root.iterdir()) == []
+    assert node.generation == 0
+    assert node.grounding_settings['prompt'] == 'Detect bottle.'
+    proposals.clear()
+    response = client.post('/api/images/camera-preview', json={'prompt': 'Detect box.'})
+    assert response.headers['X-Detection-Count'] == '0'
+    np.testing.assert_array_equal(np.array(Image.open(BytesIO(response.data))), pixels)
+
+
+@pytest.mark.parametrize('data', [None, [], {}, {'prompt': ''}, {'prompt': 5}, {'prompt': 'unknown'}])
+def test_bbox_preview_rejects_invalid_prompt(camera, data):
+    client, node, calls, _, _ = camera
+    assert client.post('/api/images/camera-preview', json=data).status_code == 400
+    assert calls == []
+    assert list(node.root.iterdir()) == []

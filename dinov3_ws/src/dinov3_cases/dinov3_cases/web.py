@@ -57,9 +57,9 @@ def create_app(node):
             received_at = node.camera_received_at
             settings = dict(node.grounding_settings)
         if detector is None:
-            raise ServiceUnavailable("OmDet 載入中，請稍後再試。")
+            raise ServiceUnavailable("OmDet is loading. Please try again shortly.")
         if frame is None or received_at is None or time.monotonic() - received_at >= 3:
-            raise ServiceUnavailable("相機尚未連線或畫面已過期，請確認相機訊號。")
+            raise ServiceUnavailable("The camera is disconnected or its frame is stale. Check the camera feed.")
         detector.validate_prompt(prompt)
         image = Image.fromarray(node.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")).copy()
         proposals = detector.detect(
@@ -140,7 +140,7 @@ def create_app(node):
         with node.lock:
             stride = node.reference_stride
         if stride is None:
-            return jsonify(error="模型載入中，稍後顯示 patch 網格。"), 503
+            return jsonify(error="The model is loading. Patch grids will be available shortly."), 503
         items = []
         for path in sorted(folder.iterdir()):
             if path.suffix.lower() not in EXTENSIONS or not path.is_file() or path.is_symlink():
@@ -166,7 +166,7 @@ def create_app(node):
         with node.lock:
             stride = node.reference_stride
         if stride is None:
-            return jsonify(error="模型載入中。"), 503
+            return jsonify(error="The model is loading."), 503
         reference = prepare_object(decode_image(path), INPUT_SIZE, stride)
         data = BytesIO()
         reference_grid_image(reference, stride).save(data, format="PNG")
@@ -188,7 +188,7 @@ def create_app(node):
             settings["prompt"] = validate_settings(**settings)
             detector = getattr(node, "grounding_detector", None)
             if detector is None and "prompt" in payload:
-                return jsonify(error="OmDet 載入中，請稍後選擇離線提示。"), 503
+                return jsonify(error="OmDet is loading. Select an offline prompt once it is ready."), 503
             if detector is not None:
                 detector.validate_prompt(settings["prompt"])
             node.grounding_settings = settings

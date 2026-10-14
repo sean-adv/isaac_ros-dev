@@ -7,7 +7,7 @@ let selected = null,
   loadVersion = 0,
   timer = null,
   busy = false;
-let cameraLabel = '';
+let cameraLabel = '', cameraBboxUrl = null;
 let knownLabels = new Set();
 // Running Flask services may still have the previous HTML template cached.
 if (el('camera-section') && !el('camera-capture-help')) {
@@ -18,6 +18,21 @@ if (el('camera-section') && !el('camera-capture-help')) {
   el('camera-capture').setAttribute('aria-describedby', help.id);
 }
 
+if (el('camera-section') && !el('camera-bbox-preview')) {
+  const button = document.createElement('button');
+  button.id = 'camera-bbox-preview';
+  button.textContent = 'Preview Bounding Boxes';
+  const status = document.createElement('p');
+  status.id = 'camera-bbox-status';
+  status.textContent = 'Select a prompt to preview. The preview is a snapshot; saving captures a new frame.';
+  status.setAttribute('role', 'status');
+  const image = document.createElement('img');
+  image.id = 'camera-bbox-image';
+  image.alt = 'OmDet bounding box preview';
+  image.hidden = true;
+  el('camera-status').after(button, status, image);
+}
+
 function message(text, error = false) {
   el('message').textContent = text;
   el('message').className = error ? 'error' : '';
@@ -26,7 +41,7 @@ async function api(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    throw Error(data.error || '請求失敗：' + response.status);
+    throw Error(data.error || 'Request failed: ' + response.status);
   }
   return response;
 }
@@ -42,10 +57,11 @@ function buttons() {
   if (el('camera-section')) {
     // Keep validation actionable; a disabled button cannot explain what is missing.
     el('camera-capture').disabled = busy;
+    el('camera-bbox-preview').disabled = busy;
     el('camera-create').disabled = busy;
     el('camera-label').disabled = busy;
     el('camera-prompt').disabled = busy || !Array.from(el('camera-prompt').options).some(option => option.value);
-    el('camera-capture-help').textContent = busy ? '處理中，請稍候…' : cameraLabel !== el('camera-label').value || !knownLabels.has(cameraLabel) ? '請先建立或選擇 label。' : !el('camera-prompt').value ? '請先選擇 OmDet prompt。' : '按下按鈕即可擷取並儲存至 ' + cameraLabel + '。';
+    el('camera-capture-help').textContent = busy ? 'Processing, please wait…' : cameraLabel !== el('camera-label').value || !knownLabels.has(cameraLabel) ? 'Create or select a label first.' : !el('camera-prompt').value ? 'Select an OmDet prompt first.' : 'Click to capture and save to ' + cameraLabel + '.';
   }
 }
 
@@ -68,8 +84,8 @@ function clearSelection() {
   point = null;
   clearPreview();
   el('original').hidden = true;
-  el('filename').textContent = '先從左側選擇圖片。';
-  el('sample-text').textContent = '尚未選擇背景色';
+  el('filename').textContent = 'Select an image from the gallery first.';
+  el('sample-text').textContent = 'No background color selected';
   el('sample').style.background = 'transparent';
   buttons();
 }
@@ -77,10 +93,10 @@ async function refresh(group = el('cases').value) {
   const data = await (await api('/api/images' + (group ? '?case=' + encodeURIComponent(group) : ''))).json();
   knownLabels = new Set(data.cases);
   if (el('camera-section')) syncCameraLabel(el('camera-label').value);
-  el('cases').replaceChildren(new Option('請選擇標籤', ''), ...data.cases.map(c => new Option(c, c)));
+  el('cases').replaceChildren(new Option('Select a label', ''), ...data.cases.map(c => new Option(c, c)));
   el('cases').value = group;
   el('case-list').replaceChildren(...data.cases.map(c => new Option(c, c)));
-  el('count').textContent = group ? data.images.length + ' 張圖片' : '選擇標籤或上傳圖片以開始';
+  el('count').textContent = group ? data.images.length + ' images' : 'Select a label or upload images to get started';
   el('gallery').replaceChildren();
   for (const item of data.images) {
     const button = document.createElement('button');
@@ -119,7 +135,7 @@ async function choose(group, name) {
   el('upload-case').value = group;
   if (el('camera-section')) syncCameraLabel(group);
   for (const tile of el('gallery').children) tile.setAttribute('aria-pressed', String(tile.querySelector('span').textContent === name));
-  message('請在原圖上點選要去除的背景色。');
+  message('Click the background color you want to remove in the original image.');
   buttons();
 }
 
@@ -153,7 +169,7 @@ async function preview() {
   if (!selected || !point) return;
   const version = previewVersion;
   previewController = new AbortController();
-  message('正在產生去背預覽…');
+  message('Generating background removal preview…');
   try {
     const response = await api('/api/images/preview', {
       method: 'POST',
@@ -170,7 +186,7 @@ async function preview() {
     el('preview').hidden = false;
     el('download').href = previewUrl;
     el('download').hidden = false;
-    message('預覽已更新。可調整容差，或儲存新圖片。');
+    message('Preview updated. Adjust the tolerances or save a new image.');
     buttons();
   } catch (e) {
     if (e.name !== 'AbortError' && version === previewVersion) message(e.message, true);
@@ -184,7 +200,7 @@ el('original').onclick = event => {
     y = Math.min(canvas.height - 1, Math.max(0, Math.floor((event.clientY - rect.top) * canvas.height / rect.height)));
   const rgba = canvas.getContext('2d').getImageData(x, y, 1, 1).data;
   if (rgba[3] === 0) {
-    message('此位置已透明，請點選有顏色的背景。', true);
+    message('This point is already transparent. Click a colored background region.', true);
     return;
   }
   point = {
@@ -192,7 +208,7 @@ el('original').onclick = event => {
     y
   };
   el('sample').style.background = 'rgb(' + Array.from(rgba).slice(0, 3).join(',') + ')';
-  el('sample-text').textContent = 'RGB (' + Array.from(rgba).slice(0, 3).join(', ') + ') · 座標 (' + x + ', ' + y + ')';
+  el('sample-text').textContent = 'RGB (' + Array.from(rgba).slice(0, 3).join(', ') + ') · coordinates (' + x + ', ' + y + ')';
   schedulePreview();
 };
 for (const name of ['hue', 'saturation', 'value', 'feather']) el(name).oninput = () => {
@@ -225,7 +241,7 @@ el('upload').onsubmit = async event => {
     clearSelection();
     await refresh(group);
     event.target.querySelector('input[type=file]').value = '';
-    message('圖片已上傳至 ' + group + '。');
+    message('Images uploaded to ' + group + '.');
   } catch (e) {
     message(e.message, true);
   } finally {
@@ -237,7 +253,7 @@ el('save').onclick = async () => {
   if (busy || !point || !previewUrl) return;
   const data = body();
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(data.target_case)) {
-    message('標籤限 1–80 個英文字母、數字、底線或連字號。', true);
+    message('Labels must contain 1–80 letters, numbers, underscores, or hyphens.', true);
     return;
   }
   busy = true;
@@ -252,7 +268,7 @@ el('save').onclick = async () => {
     })).json();
     await refresh(result.case);
     await choose(result.case, result.name);
-    message('已建立透明 PNG，原圖保留於 ' + data.case+'。');
+    message('Transparent PNG created. The original is preserved in ' + data.case+'.');
   } catch (e) {
     message(e.message, true);
   } finally {
@@ -265,7 +281,7 @@ el('delete').onclick = async () => {
   const item = {
     ...selected
   };
-  if (!confirm('確定永久刪除 ' + item.group + ' / ' + item.name + '？此操作無法復原。')) return;
+  if (!confirm('Permanently delete ' + item.group + ' / ' + item.name + '? This cannot be undone.')) return;
   busy = true;
   buttons();
   try {
@@ -274,7 +290,7 @@ el('delete').onclick = async () => {
     });
     clearSelection();
     await refresh(item.group);
-    message('圖片已刪除。');
+    message('Image deleted.');
   } catch (e) {
     message(e.message, true);
   } finally {
@@ -287,13 +303,53 @@ refresh().catch(e => message(e.message, true));
 function syncCameraLabel(group) {
   el('camera-label').value = group;
   cameraLabel = knownLabels.has(group) ? group : '';
-  el('camera-label-status').textContent = cameraLabel ? '擷取圖片將存入：' + cameraLabel : '新 label 請先按「建立／選擇 label」';
+  el('camera-label-status').textContent = cameraLabel ? 'Captured images will be saved to: ' + cameraLabel : 'For a new label, click "Create / Select Label" first.';
   buttons();
 }
 
 if (el('camera-section')) {
   el('camera-label').oninput = () => syncCameraLabel(el('camera-label').value);
-  el('camera-prompt').onchange = buttons;
+  function clearCameraBbox() {
+    if (cameraBboxUrl) URL.revokeObjectURL(cameraBboxUrl);
+    cameraBboxUrl = null;
+    el('camera-bbox-image').hidden = true;
+    el('camera-bbox-image').removeAttribute('src');
+  }
+  el('camera-prompt').onchange = () => {
+    clearCameraBbox();
+    el('camera-bbox-status').textContent = 'Prompt updated. Preview the bounding boxes again.';
+    buttons();
+  };
+  el('camera-bbox-preview').onclick = async () => {
+    if (busy) return;
+    const prompt = el('camera-prompt').value;
+    if (!prompt) {
+      el('camera-bbox-status').textContent = 'Select an OmDet prompt first.';
+      el('camera-prompt').focus();
+      return;
+    }
+    busy = true;
+    buttons();
+    clearCameraBbox();
+    el('camera-bbox-status').textContent = 'Detecting objects in the camera frame…';
+    try {
+      const response = await api('/api/images/camera-preview', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt})
+      });
+      cameraBboxUrl = URL.createObjectURL(await response.blob());
+      el('camera-bbox-image').src = cameraBboxUrl;
+      el('camera-bbox-image').hidden = false;
+      const count = Number(response.headers.get('X-Detection-Count'));
+      el('camera-bbox-status').textContent = count ? 'Detected ' + count + ' bounding boxes · ' + prompt : 'No objects matching the prompt were detected.';
+    } catch (e) {
+      el('camera-bbox-status').textContent = e.message;
+      message(e.message, true);
+    } finally {
+      busy = false;
+      buttons();
+    }
+  };
   el('camera-label-form').onsubmit = async event => {
     event.preventDefault();
     if (busy) return;
@@ -308,7 +364,7 @@ if (el('camera-section')) {
       syncCameraLabel(result.case);
       clearSelection();
       await refresh(cameraLabel);
-      message('標籤已就緒，請選擇 prompt 後擷取。');
+      message('Label ready. Select a prompt, then capture.');
     } catch (e) {
       message(e.message, true);
     } finally {
@@ -323,10 +379,11 @@ if (el('camera-section')) {
       const previous = el('camera-prompt').value;
       const current = Array.from(el('camera-prompt').options).map(option => option.value).filter(Boolean);
       if (JSON.stringify(current) !== JSON.stringify(prompts)) {
-        el('camera-prompt').replaceChildren(new Option('請選擇 prompt', ''), ...prompts.map(p => new Option(p, p)));
+        el('camera-prompt').replaceChildren(new Option('Select a prompt', ''), ...prompts.map(p => new Option(p, p)));
         el('camera-prompt').value = prompts.includes(previous) ? previous : '';
+        if (previous !== el('camera-prompt').value) clearCameraBbox();
       }
-      el('camera-status').textContent = !status.camera_connected ? '相機未連線或畫面已過期' : !prompts.length ? 'OmDet 載入中…' : '相機已連線，可手動擷取';
+      el('camera-status').textContent = !status.camera_connected ? 'Camera disconnected or frame is stale' : !prompts.length ? 'OmDet is loading…' : 'Camera connected. Ready to capture.';
     } catch (e) {
       el('camera-status').textContent = e.message;
     } finally {
@@ -338,20 +395,20 @@ if (el('camera-section')) {
     if (busy) return;
     syncCameraLabel(el('camera-label').value);
     if (!cameraLabel) {
-      el('camera-capture-help').textContent = '請先建立或選擇 label，再擷取圖片。';
-      message('請先建立或選擇 label，再擷取圖片。', true);
+      el('camera-capture-help').textContent = 'Create or select a label before capturing images.';
+      message('Create or select a label before capturing images.', true);
       el('camera-label').focus();
       return;
     }
     if (!el('camera-prompt').value) {
-      el('camera-capture-help').textContent = '請先選擇 OmDet prompt；若無選項，請等候模型載入。';
+      el('camera-capture-help').textContent = 'Select an OmDet prompt first. If no options are available, wait for the model to load.';
       message(el('camera-capture-help').textContent, true);
       el('camera-prompt').focus();
       return;
     }
     busy = true;
     buttons();
-    message('正在擷取相機畫面並交給 OmDet 偵測…');
+    message('Capturing the camera frame and running OmDet detection…');
     try {
       const result = await (await api('/api/images/capture', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -360,9 +417,9 @@ if (el('camera-section')) {
       if (result.names.length) {
         await refresh(result.case);
         await choose(result.case, result.names[0]);
-        message('已儲存 ' + result.names.length + ' 張 bbox 圖片至 ' + result.case + '。可在原圖點選背景進行去背。');
+        message('Saved ' + result.names.length + ' bounding box images to ' + result.case + '. Click the background in the original image to remove it.');
       } else {
-        message('此畫面未偵測到符合 prompt 的物件，未新增圖片。請調整位置或 prompt 後重試。');
+        message('No objects matching the prompt were detected. No images were saved. Adjust the position or prompt and try again.');
       }
     } catch (e) {
       el('camera-status').textContent = e.message;

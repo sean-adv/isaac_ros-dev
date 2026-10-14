@@ -31,7 +31,7 @@ function page() {
       const data = url === '/api/status' ? state.status : url === '/api/images/capture' ?
         {case: 'medicine', names: []} : url === '/api/images/labels' ?
         {case: JSON.parse(options.body).case} : {cases: ['medicine'], images: []};
-      return {ok: true, json: async () => data};
+      return {ok: true, json: async () => data, blob: async () => new Blob(['preview']), headers: {get: () => '2'}};
     },
   });
   vm.runInContext(source, context);
@@ -100,4 +100,22 @@ test('an uncreated new label prevents capture and duplicate clicks are ignored w
   await pending;
   assert.equal(p.requests.filter(r => r.url === '/api/images/capture').length, 1);
   assert.equal(p.el('camera-capture').disabled, false);
+});
+
+
+test('bbox preview needs only a prompt, shows a result and clears it on prompt changes', async () => {
+  const p = page();
+  await settled();
+  await p.el('camera-bbox-preview').onclick();
+  assert.match(p.el('camera-bbox-status').textContent, /prompt/);
+  assert.equal(p.requests.some(r => r.url === '/api/images/camera-preview'), false);
+  p.el('camera-prompt').value = 'Detect box.';
+  await p.el('camera-bbox-preview').onclick();
+  const request = p.requests.find(r => r.url === '/api/images/camera-preview');
+  assert.deepEqual(JSON.parse(request.options.body), {prompt: 'Detect box.'});
+  assert.equal(p.el('camera-bbox-image').hidden, false);
+  assert.match(p.el('camera-bbox-status').textContent, /2 bounding boxes/);
+  assert.equal(p.requests.some(r => r.url === '/api/images/capture'), false);
+  p.el('camera-prompt').onchange();
+  assert.equal(p.el('camera-bbox-image').hidden, true);
 });
