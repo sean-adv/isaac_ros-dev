@@ -2,7 +2,7 @@ dinov3_cases:
   ros__parameters:
     # Select a precomputed profile from config/omdet_prompts.json.
     grounding_prompt: 'Detect medicine bottle, medicine box.'
-    grounding_box_threshold: 0.3
+    grounding_box_threshold: 0.4
     grounding_nms_iou: 0.5
     grounding_max_detections: 20
     # Original-image bbox after clipping/rounding; pixels / pixels squared.
@@ -10,7 +10,7 @@ dinov3_cases:
     grounding_min_bbox_width: 80
     grounding_min_bbox_height: 80
     grounding_min_bbox_area: 0
-    recognition_threshold: 0.8
+    recognition_threshold: 0.85
     recognition_margin: 0.05
     # Keep IDs across 6 missed inference frames; expand each ROI by 50% per side.
     tracking_max_missed: 6

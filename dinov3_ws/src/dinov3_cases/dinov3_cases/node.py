@@ -28,8 +28,7 @@ from .runtime import (
     TRT_PYTHON,
     INPUT_SIZE,
 )
-from vision_msgs.msg import Detection2DArray
-from dinov3_cases_msgs.msg import Detection3DPointsArray
+from vision_msgs.msg import Detection2DArray, Detection3DArray
 from .depth_sync import matched_inputs
 from .depth_bbox import attach_bboxes3d, bboxes3d_message
 from .web import create_app
@@ -169,7 +168,7 @@ class CaseNode(Node):
             Detection2DArray, "/medicine_recognition/detections", 10
         )
         self.bbox3d_pub = self.create_publisher(
-            Detection3DPointsArray, "/medicine_recognition/detections_3d", 10
+            Detection3DArray, "/medicine_recognition/detections_3d", 10
         )
         self.recognition_debug_pub = self.create_publisher(
             ImageMsg, "/medicine_recognition/debug_image", 1

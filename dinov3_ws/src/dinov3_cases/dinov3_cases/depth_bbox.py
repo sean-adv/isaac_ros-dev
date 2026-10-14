@@ -84,7 +84,7 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     if size[0] <= 0 or size[1] <= 0:
         raise ValueError("empty_projected_bbox")
 
-    # Preserve fixed ROS diagnostic arrays; these points need not lie inside
+    # Preserve internal visualization diagnostics; these points need not lie inside
     # the quantile box, and are not measured corners of the physical object.
     corner_pixels = np.array([(left, top), (right-1, top),
                               (right-1, bottom-1), (left, bottom-1)])
@@ -116,7 +116,7 @@ def attach_bboxes3d(items, depth, info, **options):
 
 
 def bbox_vertices(data):
-    """Eight camera-aligned vertices, shared by ROS output and visualization."""
+    """Eight camera-aligned vertices, used by visualization."""
     lower = np.asarray(data["position"]) - np.asarray(data["size"]) / 2
     upper = np.asarray(data["position"]) + np.asarray(data["size"]) / 2
     return np.array([(x, y, z) for z in (lower[2], upper[2])
@@ -125,38 +125,33 @@ def bbox_vertices(data):
 
 
 def bboxes3d_message(items, header):
-    from dinov3_cases_msgs.msg import Detection3DPoints, Detection3DPointsArray, Point2D
+    """Standard detections: visible-component box center, dimensions and class.
+
+    Positions and dimensions are meters in header.frame_id. The pose uses the
+    box center as its reference point; its identity quaternion describes the
+    camera-aligned box axes, not an estimated physical object orientation.
+    Covariance remains at the message default; uncertainty is not estimated.
+    """
+    from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
     from geometry_msgs.msg import Point
 
-    def pixel(value):
-        return Point2D(x=float(value[0]), y=float(value[1]))
-
-    def point(value):
-        return Point(x=float(value[0]), y=float(value[1]), z=float(value[2]))
-
-    message = Detection3DPointsArray(header=header)
+    message = Detection3DArray(header=header)
     for item in items:
         if item["label"] == "unknown" or "bbox3d" not in item:
             continue
         data = item["bbox3d"]
-        detection = Detection3DPoints(header=header)
+        detection = Detection3D(header=header)
         detection.id = str(item.get("track_id", ""))
         center = detection.bbox.center
-        center.position = point(data["position"])
-        center.orientation.w = 1.0  # Aligned with the camera optical axes.
-        detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z = data["size"]
-        detection.hypothesis.class_id = item["label"]
-        detection.hypothesis.score = float(item["score"] or 0.0)
-        x0, y0, x1, y1 = item["bbox"]
-        detection.bbox_2d.center.position.x = (x0+x1) / 2.0
-        detection.bbox_2d.center.position.y = (y0+y1) / 2.0
-        detection.bbox_2d.size_x, detection.bbox_2d.size_y = float(x1-x0), float(y1-y0)
-        detection.bbox_2d_corners = [pixel(p) for p in
-                                   [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
-        detection.sampled_2d_points = [pixel(p) for p in data["corner_sample_pixels"]]
-        detection.sampled_3d_points = [point(p) for p in data["corners"]]
-        detection.nearest_2d_point = pixel(data["nearest_pixel"])
-        detection.nearest_3d_point = point(data["nearest_point"])
-        detection.bbox_3d_corners = [point(p) for p in bbox_vertices(data)]
+        x, y, z = map(float, data["position"])
+        center.position = Point(x=x, y=y, z=z)
+        center.orientation.w = 1.0
+        detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z = map(float, data["size"])
+        result = ObjectHypothesisWithPose()
+        result.hypothesis.class_id = item["label"]
+        result.hypothesis.score = float(item["score"] or 0.0)
+        result.pose.pose.position = Point(x=x, y=y, z=z)
+        result.pose.pose.orientation.w = 1.0
+        detection.results = [result]
         message.detections.append(detection)
     return message

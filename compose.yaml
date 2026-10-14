@@ -1,0 +1,69 @@
+name: isaac-ros-jazzy
+
+services:
+  isaac-ros:
+    image: advigw/isaac-ros-base-jazzy:1.0.0
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    # The existing Isaac ROS entrypoint maps admin to the host UID/GID.
+    user: root
+    entrypoint: ["/usr/local/bin/scripts/workspace-entrypoint.sh"]
+    # The image creates admin before this command. Persist device group
+    # membership so docker compose exec and VS Code sessions inherit it.
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        for device in /dev/dri/renderD* /dev/dri/card* /dev/nvmap; do
+          [ -c "$$device" ] || continue
+          gid="$$(stat -c '%g' "$$device")"
+          [ "$$gid" != 0 ] || continue
+          group_name="$$(getent group "$$gid" | cut -d: -f1)"
+          if [ -z "$$group_name" ]; then
+            group_name="gpu-device-$$gid"
+            sudo -n groupadd --gid "$$gid" "$$group_name"
+          fi
+          sudo -n usermod -aG "$$group_name" "$${USERNAME:-admin}"
+        done
+        exec sleep infinity
+    working_dir: /workspaces/isaac_ros-dev
+    stdin_open: true
+    tty: true
+    environment:
+      USERNAME: admin
+      HOST_USER_UID: "${HOST_USER_UID:-1000}"
+      HOST_USER_GID: "${HOST_USER_GID:-1000}"
+      ISAAC_ROS_WS: /workspaces/isaac_ros-dev
+      ISAAC_ROS_PLATFORM: arm64-jetpack
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      DISPLAY: "${DISPLAY:-}"
+      XAUTHORITY: /home/admin/.Xauthority
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      ROS_AUTOMATIC_DISCOVERY_RANGE: "${ROS_AUTOMATIC_DISCOVERY_RANGE:-SUBNET}"
+    healthcheck:
+      # PID 1 becomes sleep after user and GPU group initialization finishes.
+      test: ["CMD-SHELL", 'test "$$(cat /proc/1/comm)" = sleep']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    volumes:
+      - type: bind
+        source: "${HOST_WORKSPACE:-/home/ubuntu/workspaces/isaac_ros-dev}"
+        target: /workspaces/isaac_ros-dev
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /dev/bus/usb
+        target: /dev/bus/usb
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/localtime
+        target: /etc/localtime
+        read_only: true
+        bind:
+          create_host_path: false

@@ -28,3 +28,6 @@ __pycache__/
 /.pytest_cache
 /OmDet/
 /dinov3_ws/artifacts/omdet/
+/dinov3_ws/requirements-thor-wheels.local.txt
+trash/
+

@@ -1,4 +1,4 @@
-"""Robust foreground bounds, calibration and the ROS diagnostic contract."""
+"""Robust foreground bounds, calibration and the standard ROS detection contract."""
 
 import cv2
 import numpy as np
@@ -142,8 +142,9 @@ def test_diagnostic_samples_reproject_to_actual_component_pixels(model, coeffici
     np.testing.assert_allclose(pixels.reshape(-1, 2), data["corner_sample_pixels"], atol=1e-5)
 
 
-def test_ros_serialization_preserves_diagnostics_and_quantile_vertices():
+def test_standard_ros_serialization_preserves_pose_class_and_bounds():
     from rclpy.serialization import serialize_message, deserialize_message
+    from vision_msgs.msg import Detection3DArray
 
     depth = scene()
     depth[60, 80] = .95
@@ -152,7 +153,9 @@ def test_ros_serialization_preserves_diagnostics_and_quantile_vertices():
     attach_bboxes3d(items, depth, calibration())
     header = Header(frame_id="camera_color_optical_frame")
     message = bboxes3d_message(items, header)
-    received = deserialize_message(serialize_message(message), type(message))
+    assert isinstance(message, Detection3DArray)
+    received = deserialize_message(serialize_message(message), Detection3DArray)
+    assert received.header == header
     assert received == message
     assert len(received.detections) == 1
     detection = received.detections[0]
@@ -162,19 +165,18 @@ def test_ros_serialization_preserves_diagnostics_and_quantile_vertices():
     assert detection.bbox.center.orientation.w == 1.
     assert detection.bbox.size.x == pytest.approx(.435)
     assert detection.bbox.size.z == 0.
-    assert detection.hypothesis.class_id == "medicine"
-    assert [[p.x, p.y] for p in detection.bbox_2d_corners] == [
-        [25, 30], [135, 30], [135, 90], [25, 90]]
-    assert [[p.x, p.y] for p in detection.sampled_2d_points] == [
-        [35, 40], [124, 40], [124, 79], [35, 79]]
-    np.testing.assert_allclose([[p.x, p.y, p.z] for p in detection.sampled_3d_points],
-                              items[0]["bbox3d"]["corners"])
-    assert [detection.nearest_2d_point.x, detection.nearest_2d_point.y] == [80, 60]
-    assert detection.nearest_3d_point.z == .95
-    vertices = np.array([[p.x, p.y, p.z] for p in detection.bbox_3d_corners])
+    assert len(detection.results) == 1
+    result = detection.results[0]
+    assert result.hypothesis.class_id == "medicine"
+    assert result.hypothesis.score == pytest.approx(.9)
+    assert result.pose.pose == detection.bbox.center
+    assert list(result.pose.covariance) == [0.] * 36
     data = items[0]["bbox3d"]
-    np.testing.assert_allclose(vertices.min(axis=0), np.array(data["position"])-np.array(data["size"])/2)
-    np.testing.assert_allclose(vertices.max(axis=0), np.array(data["position"])+np.array(data["size"])/2)
+    np.testing.assert_allclose(
+        [result.pose.pose.position.x, result.pose.pose.position.y, result.pose.pose.position.z],
+        data["position"])
+    np.testing.assert_allclose(
+        [detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z], data["size"])
     assert "pose" not in items[0] and "pose_status" not in items[0]
     assert not bboxes3d_message([items[1]], header).detections
     assert "bbox3d" in items[1]

@@ -66,8 +66,11 @@ class SharedMemoryGroundingDetector:
         venv = Path(python).absolute().parent.parent
         env["VIRTUAL_ENV"] = str(venv)
         env["PATH"] = f"{venv}/bin:/usr/local/cuda/bin:/usr/bin:/bin"
-        # Load TensorRT libraries from the worker environment.
-        env["LD_LIBRARY_PATH"] = "/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu"
+        # Keep the selected CUDA driver, but load TensorRT from the worker venv.
+        library_paths = [env.get("DINOV3_CUDA_DRIVER_DIR", "")]
+        library_paths.extend(str(p) for p in venv.glob("lib/python*/site-packages/tensorrt_libs"))
+        library_paths.extend(["/usr/local/cuda/lib64", "/usr/lib/aarch64-linux-gnu"])
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(p for p in library_paths if p)
         env["PYTHONPATH"] = os.pathsep.join(
             p
             for p in env.get("PYTHONPATH", "").split(os.pathsep)

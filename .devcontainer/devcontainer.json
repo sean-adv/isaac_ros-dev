@@ -1,0 +1,11 @@
+{
+  "name": "Isaac ROS Jazzy",
+  "dockerComposeFile": "../compose.yaml",
+  "service": "isaac-ros",
+  "workspaceFolder": "/workspaces/isaac_ros-dev",
+  "initializeCommand": "./start.sh --detach",
+  "overrideCommand": false,
+  "shutdownAction": "stopCompose",
+  "remoteUser": "admin",
+  "containerUser": "admin"
+}

@@ -1,0 +1,13 @@
+# 此部署版本的相容性限制，不是完整 lockfile，也不會主動安裝套件。
+# 僅適用 Thor / aarch64 / Python 3.12 / ROS Jazzy。
+# 先安裝平台適用的 torch / torchvision wheel，再搭配 -c 使用。
+# 不在此設定 timm：OmDet 與 TRTMC 的 timm 版本由各自環境決定。
+# 本機 pip metadata 是 2.14.1，torch.__version__ 是 2.14.1+cu130。
+# pip 約束固定公開版本；CUDA 13.0 與 GPU 可用性需額外確認。
+torch==2.14.1
+torchvision==0.29.1
+tensorrt==11.1.0.106
+transformers==5.2.0
+numpy==1.26.4
+opencv-python>=4.8,<4.12
+nvidia-modelopt==0.47.0
