@@ -31,3 +31,5 @@ __pycache__/
 /dinov3_ws/requirements-thor-wheels.local.txt
 trash/
 
+dinov3_trt_venv/
+sam2_trt_inference/
