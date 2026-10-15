@@ -8,7 +8,8 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                     depth_band=0.08, min_points=80, quantile=0.02):
     """Segment around the central median Z and bound its visible point cloud.
 
-    Quantiles trim each XYZ axis independently; this is not a strict enclosure
+    Quantiles determine box sizes and XY centers; Z uses the component mean.
+    The box is not a strict enclosure
     or an estimate of the unseen backside. Four corner-near samples and the
     nearest component point are diagnostics only, not inputs to the bounds.
     """
@@ -81,6 +82,8 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
         raise ValueError("invalid_unprojected_points")
     lower, upper = np.quantile(points, [quantile, 1-quantile], axis=0)
     size = upper-lower
+    position = (lower+upper)/2
+    position[2] = float(np.mean(depths))
     if size[0] <= 0 or size[1] <= 0:
         raise ValueError("empty_projected_bbox")
 
@@ -91,7 +94,7 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     samples = [int(np.argmin(np.sum((pixels-corner)**2, axis=1)))
                for corner in corner_pixels]
     nearest = int(np.argmin(depths))
-    return dict(position=((lower+upper)/2).tolist(), size=size.tolist(),
+    return dict(position=position.tolist(), size=size.tolist(),
                 corners=points[samples].tolist(), corner_depths=depths[samples].tolist(),
                 corner_pixels=corner_pixels.tolist(),
                 corner_sample_pixels=pixels[samples].astype(int).tolist(),
@@ -100,7 +103,7 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                 seed_depth=seed_depth, point_count=len(points),
                 foreground_depth_band=float(depth_band), quantile=float(quantile),
                 depth_range=[float(lower[2]), float(upper[2])],
-                method="central_depth_component_quantiles")
+                method="central_depth_component_mean_z")
 
 
 def attach_bboxes3d(items, depth, info, **options):
@@ -125,10 +128,10 @@ def bbox_vertices(data):
 
 
 def bboxes3d_message(items, header):
-    """Standard detections: visible-component box center, dimensions and class.
+    """Standard detections: visible-component position, dimensions and class.
 
     Positions and dimensions are meters in header.frame_id. The pose uses the
-    box center as its reference point; its identity quaternion describes the
+    quantile XY center and mean depth as its reference point; its quaternion describes the
     camera-aligned box axes, not an estimated physical object orientation.
     Covariance remains at the message default; uncertainty is not estimated.
     """

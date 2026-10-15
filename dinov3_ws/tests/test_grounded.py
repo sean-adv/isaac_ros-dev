@@ -128,7 +128,8 @@ def test_roi_coordinates_identity_and_ros_header(tmp_path):
     msg = recognition_message(result, header)
     assert msg.header == header
     assert [d.results[0].hypothesis.class_id for d in msg.detections] == ["a", "b"]
-    assert [d.id for d in msg.detections] == ["0", "1"]
+    # Frame-local detections have no cross-frame tracking identity.
+    assert [d.id for d in msg.detections] == ["", ""]
     assert all(d.header == header and d.bbox.size_x == 50 for d in msg.detections)
     assert recognition_message([], header).detections == []
 

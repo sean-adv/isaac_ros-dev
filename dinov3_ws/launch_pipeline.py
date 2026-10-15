@@ -5,18 +5,18 @@ import os
 from pathlib import Path
 import sys
 
-from dinov3_cases.runtime import MODES, DINO_ENGINE, TRT_PYTHON
+from dinov3_cases.runtime import MODES, DINO_ENGINE, GROUNDING_PYTHON
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run OmDet-Turbo-Tiny and DINOv3 object recognition."
+        description="Run SAM3 W8A8 and DINOv3 object recognition."
     )
     parser.add_argument(
         "--mode",
         choices=MODES,
-        default="single",
-        help="split: separate TRT 11 processes; single: OmDet and DINOv3 in one node.",
+        default="split",
+        help="split: SAM3 TRT10 worker in DART/.venv + DINOv3 TRT11 node in dinov3_trt11_venv.",
     )
     options, extra_args = parser.parse_known_args()
     workspace = Path(__file__).resolve().parent
@@ -43,7 +43,7 @@ def main():
             "-p",
             f"grounding_execution:={execution}",
             "-p",
-            f"grounding_worker_python:={TRT_PYTHON}",
+            f"grounding_worker_python:={GROUNDING_PYTHON}",
             *extra_args,
         ],
     )

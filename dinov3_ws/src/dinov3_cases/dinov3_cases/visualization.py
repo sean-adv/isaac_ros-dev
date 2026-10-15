@@ -54,7 +54,8 @@ def render_bbox_overlay(image, detections, info=None, mode="2d"):
                 continue
         else:
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, 2)
-        label = f"ID {item['track_id']} {item['label']} | {item['detection_label']}"
+        identity = f"ID {item['track_id']} " if "track_id" in item else ""
+        label = f"{identity}{item['label']} | {item['detection_label']}"
         bbox3d = item.get("bbox3d")
         if bbox3d is not None:
             px, py, pz = bbox3d["position"]

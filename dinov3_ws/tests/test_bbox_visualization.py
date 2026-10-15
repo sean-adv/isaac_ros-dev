@@ -93,3 +93,12 @@ def test_web_modes_serve_separate_cached_images_and_validate_selection(tmp_path)
         frames.close()
     html = client.get('/').data
     assert b'id="bbox-view"' in html and b'value="3d"' in html
+
+
+def test_frame_local_detection_renders_without_track_id():
+    image = np.zeros((200, 300, 3), np.uint8)
+    detection = dict(bbox=[60, 80, 180, 180], label="unknown",
+                     detection_label="person", bbox_visible=True)
+    rendered = render_bbox_overlay(image, [detection])
+    assert not np.array_equal(rendered, image)
+    assert "track_id" not in detection

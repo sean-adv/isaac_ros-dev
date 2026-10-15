@@ -45,3 +45,6 @@ nvidia-modelopt[onnx]==0.47.0
 # 此 extra 會選擇 CUDA / ONNX Runtime 套件，請依目標平台另行安裝，
 # 並確認提供 build_omdet.py 使用的 modelopt.onnx.autocast CLI。
 # 本機使用 nvidia-modelopt 0.47.0
+
+# SAM3 TRT11 strongly typed head conversion
+onnxconverter-common>=1.16,<2

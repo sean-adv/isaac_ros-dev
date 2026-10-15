@@ -194,7 +194,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
             return jsonify(error="This image manager is not connected to a camera."), 503
         prompt = payload().get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Select an OmDet prompt first.")
+            raise ValueError("Select an SAM3 prompt first.")
         image, proposals = capture(prompt)
         preview = image.copy().convert("RGB")
         draw = ImageDraw.Draw(preview)
@@ -221,9 +221,9 @@ def register_image_manager(app, root, on_change=None, capture=None):
             raise ValueError("Create or select a label first.")
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Select an OmDet prompt first.")
+            raise ValueError("Select an SAM3 prompt first.")
         image, proposals = capture(prompt)
-        # Crop the very same raw frame sent to OmDet, at its original resolution.
+        # Crop the very same raw frame sent to SAM3, at its original resolution.
         crops = [image.crop(item["bbox"]) for item in proposals]
         with mutation_lock:
             names = [save(crop, folder, "_bbox") for crop in crops]

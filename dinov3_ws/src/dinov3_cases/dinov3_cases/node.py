@@ -19,16 +19,18 @@ from werkzeug.serving import make_server
 
 from .patches import feature_stride
 from .encoder import Encoder
-from .omdet_trt import OmDetDetector
+from .sam3_trt import Sam3Detector
 from .tracking import ROITracker
 from .runtime import (
     WORKSPACE,
     DINO_ENGINE,
     GROUNDING_ENGINE,
-    TRT_PYTHON,
+    GROUNDING_PYTHON,
     INPUT_SIZE,
 )
 from vision_msgs.msg import Detection2DArray, Detection3DArray
+from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
+from .apriltag import apriltag_message
 from .depth_sync import matched_inputs
 from .depth_bbox import attach_bboxes3d, bboxes3d_message
 from .web import create_app
@@ -49,25 +51,27 @@ class CaseNode(Node):
         super().__init__("dinov3_cases")
         defaults = dict(
             cases_dir=str(WORKSPACE / "dinov3_cases_data"),
-            grounding_execution="inprocess",
-            grounding_worker_python=str(TRT_PYTHON),
+            grounding_execution="subprocess",
+            grounding_worker_python=str(GROUNDING_PYTHON),
             grounding_ipc_timeout=60.0,
             grounding_engine_path=str(GROUNDING_ENGINE),
             grounding_prompt=DEFAULT_PROMPT,
             grounding_box_threshold=0.3,
-            grounding_nms_iou=0.5,
+            grounding_nms_iou=1.0,
             grounding_max_detections=20,
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
             recognition_threshold=0.75,
             recognition_margin=0.05,
+            tracking_enabled=False,
             tracking_max_missed=5,
             tracking_iou_threshold=0.2,
             tracking_roi_padding=0.5,
             tracking_bbox_min_hit_ratio=0.8,
             tracking_bbox_min_detections=10,
             image_topic="/camera/color/image_raw",
+            tag_topic="/tag_detections",
             pose_enabled=True,
             depth_topic="/camera/depth/image_raw",
             depth_camera_info_topic="/camera/depth/camera_info",
@@ -169,6 +173,9 @@ class CaseNode(Node):
         )
         self.bbox3d_pub = self.create_publisher(
             Detection3DArray, "/medicine_recognition/detections_3d", 10
+        )
+        self.tag_pub = self.create_publisher(
+            AprilTagDetectionArray, self.param("tag_topic"), 10
         )
         self.recognition_debug_pub = self.create_publisher(
             ImageMsg, "/medicine_recognition/debug_image", 1
@@ -291,6 +298,8 @@ class CaseNode(Node):
                     self.recognition_pub.publish(recognition_message(detections, header))
                 if self.bbox3d_pub.get_subscription_count():
                     self.bbox3d_pub.publish(bboxes3d_message(detections, header))
+                if self.tag_pub.get_subscription_count():
+                    self.tag_pub.publish(apriltag_message(detections, header))
                 image_publishers = [
                     pub
                     for pub in (self.pub, self.recognition_debug_pub)
@@ -355,8 +364,8 @@ class CaseNode(Node):
             with self.lock:
                 self.reference_stride = stride
                 self.backend_description = encoder.description
-                self.status = "Loading OmDet-Turbo-Tiny model…"
-            detector_class = OmDetDetector
+                self.status = "Loading SAM3 W8A8 model…"
+            detector_class = Sam3Detector
             detector_options = {}
             if self.param("grounding_execution") == "subprocess":
                 from .grounding_ipc import SharedMemoryGroundingDetector
@@ -454,10 +463,14 @@ class CaseNode(Node):
                     if gen != self.generation:
                         continue
                     context = (gen, image.size, header.frame_id if header is not None else None)
-                    if context != tracking_context:
-                        self.tracker.reset()
-                        tracking_context = context
-                    self.tracker.update(detections, frame_key=(gen, seq))
+                    if self.param("tracking_enabled"):
+                        if context != tracking_context:
+                            self.tracker.reset()
+                            tracking_context = context
+                        self.tracker.update(detections, frame_key=(gen, seq))
+                    else:
+                        for item in detections:
+                            item["bbox_visible"] = True
                 if self.param("pose_enabled") and header is not None:
                     self.estimate_bboxes3d(detections, depth_inputs)
                 else:
@@ -511,7 +524,7 @@ class CaseNode(Node):
                         ),
                     )
                     self.status = (
-                        f"OmDet-Turbo-Tiny → {encoder.description} | {len(detections)} objects | "
+                        f"SAM3 W8A8 → {encoder.description} | {len(detections)} objects | "
                         f"{len(set(gallery.labels))} classes / {len(gallery.labels)} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )

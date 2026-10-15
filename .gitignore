@@ -33,3 +33,6 @@ trash/
 
 dinov3_trt_venv/
 sam2_trt_inference/
+DART/
+/dinov3_ws/artifacts/sam3/
+copy/

@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 
 
-DEFAULT_PROMPT = "Detect medicine bottle, medicine box, bottle, box."
+DEFAULT_PROMPT = "medicine bottle, medicine box."
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
@@ -405,13 +405,13 @@ def recognition_message(items, header=None):
     message = Detection2DArray()
     if header is not None:
         message.header = header
-    for index, item in enumerate(items):
+    for item in items:
         if item["label"] == "unknown":
             continue
         x0, y0, x1, y1 = item["bbox"]
         detection = Detection2D()
         detection.header = message.header
-        detection.id = str(item.get("track_id", index))
+        detection.id = str(item.get("track_id", ""))
         detection.bbox.center.position.x = (x0 + x1) / 2.0
         detection.bbox.center.position.y = (y0 + y1) / 2.0
         detection.bbox.size_x = float(x1 - x0)

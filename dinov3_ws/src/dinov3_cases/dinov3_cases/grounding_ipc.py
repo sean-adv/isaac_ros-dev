@@ -40,7 +40,7 @@ def _send(sock, value):
 
 
 class SharedMemoryGroundingDetector:
-    """Own an OmDet subprocess and its reusable shared RGB buffer."""
+    """Own a SAM3 subprocess and its reusable shared RGB buffer."""
 
     def __init__(
         self,
@@ -220,14 +220,14 @@ def worker_main(fd, detector_factory=None, version=None):
             if detector_factory is None:
                 import tensorrt as trt
                 import torch
-                from .omdet_trt import OmDetDetector
+                from .sam3_trt import Sam3Detector
 
-                if trt.__version__ != "11.1.0.106":
+                if trt.__version__.split(".")[0] != "10":
                     raise RuntimeError(
-                        f"Expected TensorRT 11.1.0.106, got {trt.__version__}"
+                        f"Expected TensorRT 10, got {trt.__version__}"
                     )
-                detector_factory = OmDetDetector
-                version = dict(tensorrt=trt.__version__, torch=torch.__version__, pid=os.getpid())
+                detector_factory = Sam3Detector
+                version = dict(tensorrt=trt.__version__, torch=torch.__version__, pid=os.getpid(), python=__import__("sys").executable)
             detector = detector_factory(**config)
             _send(
                 sock, dict(

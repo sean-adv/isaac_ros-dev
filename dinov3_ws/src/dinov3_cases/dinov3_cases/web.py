@@ -57,7 +57,7 @@ def create_app(node):
             received_at = node.camera_received_at
             settings = dict(node.grounding_settings)
         if detector is None:
-            raise ServiceUnavailable("OmDet is loading. Please try again shortly.")
+            raise ServiceUnavailable("SAM3 is loading. Please try again shortly.")
         if frame is None or received_at is None or time.monotonic() - received_at >= 3:
             raise ServiceUnavailable("The camera is disconnected or its frame is stale. Check the camera feed.")
         detector.validate_prompt(prompt)
@@ -109,7 +109,7 @@ def create_app(node):
                 grounding_model_id=GROUNDING_MODEL_ID,
                 grounding_backend="trt",
                 grounding_precision=getattr(getattr(node, "grounding_detector", None), "precision", None),
-                grounding_offline_prompts=getattr(getattr(node, "grounding_detector", None), "offline_prompts", []),
+                grounding_offline_prompts=([node.grounding_settings["prompt"], "medicine bottle, medicine box, bottle, box."] if getattr(node, "grounding_detector", None) is not None else []),
                 grounding_execution=node.param("grounding_execution"),
                 grounding_worker=getattr(
                     getattr(node, "grounding_detector", None), "worker_info", None
@@ -188,7 +188,7 @@ def create_app(node):
             settings["prompt"] = validate_settings(**settings)
             detector = getattr(node, "grounding_detector", None)
             if detector is None and "prompt" in payload:
-                return jsonify(error="OmDet is loading. Select an offline prompt once it is ready."), 503
+                return jsonify(error="SAM3 is loading. Please try again once it is ready."), 503
             if detector is not None:
                 detector.validate_prompt(settings["prompt"])
             node.grounding_settings = settings

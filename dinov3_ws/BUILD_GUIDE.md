@@ -1,3 +1,33 @@
+# 目前部署：SAM3 DARTF W8A8 + DINOv3
+
+偵測器使用本機已完成轉換並驗證的 `DART/dartf/assets_bbox/vision_int8.plan`，搭配同目錄的 FP16 grounding heads、text ONNX、tokenizer 與位置編碼，以及 `DART/dartf/plugins/lq_plugins.so`。
+
+```bash
+./dinov3_ws/run.sh --mode split
+```
+
+SAM3 worker 使用 `DART/.venv/bin/python`（TensorRT 10.13.3.9）；DINOv3 主程序使用 `dinov3_trt11_venv/bin/python`（TensorRT 11）。目前僅支援 `split`，兩種版本的引擎分別在各自環境載入。SAM3 使用套件內的 `sam3_runtime`。
+
+SAM3 輸入為 RGB 1008×1008、bilinear resize、`pixel / 127.5 - 1`。Prompt 為 1–4 個逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`，不需 OmDet 的離線 prompt 建置；主頁可直接修改文字。相機擷取頁提供目前 prompt 與四類 preset。單類使用 K=1 head，2–4 類使用 K=4 head，空類別以 empty prompt 補齊。
+
+預設 confidence threshold 為 0.3，分數為 sigmoid(score) × sigmoid(presence)。NMS IoU 設為 1.0（停用），最小 bbox 寬高為 0；每幀最多保留 20 個框供後續 DINOv3 辨識。可在 `config/dinov3_cases.yaml` 調整。DINOv3 辨識與深度設定沿用現有配置。`tracking_enabled: false` 預設停用 ROI tracking，當幀 bbox 立即顯示，不附追蹤 ID；不載入 mask 或 SAM3 tracker engines。
+
+TRT11 建置腳本僅供另外轉建使用，目前推論直接使用原始 TRT10 引擎。驗證 SAM3 TRT10 direct／IPC 結果、DART bbox smoke 偵測基準與 SAM3 bbox crop → DINOv3 特徵：
+
+```bash
+LD_LIBRARY_PATH="$PWD/dinov3_trt11_venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
+PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases" \
+dinov3_trt11_venv/bin/python dinov3_ws/tests/check_sam3_trt_pipeline.py
+```
+
+驗證結果寫入 `DART/dartf/assets_bbox/pipeline_validation.json`。
+
+本機整合驗證：106 個單元／IPC／rendering 測試通過；SAM3 單類與四類 head 的 direct／shared-memory IPC 結果一致，bbox crop 可輸出 DINOv3 `[196, 384]` 有限特徵。實際 `run.sh` 的 HTTP 上傳、辨識及無追蹤 bbox overlay 已驗證，報告與範例圖位於 `DART/dartf/assets_bbox/app_integration.json`、`app_bbox_smoke.jpg`。
+
+以下為原始建置說明，其中 OmDet 段落僅供舊模型重建參考，已非預設部署。
+
+---
+
 # OmDet + DINOv3 建置與更換 Prompt
 
 本文件整理模型建置、ROS 2／Orbbec 相機設定、啟動方式，以及日常更換 OmDet prompt 的流程。
@@ -182,7 +212,7 @@ cd /workspaces/isaac_ros-dev
 ./dinov3_ws/run.sh
 ```
 
-預設為 `single` 模式。瀏覽器開啟 <http://127.0.0.1:8090>，可使用相機畫面或上傳圖片。
+預設為 `split` 模式。瀏覽器開啟 <http://127.0.0.1:8090>，可使用相機畫面或上傳圖片。
 
 若要使用 `split` 模式，改執行以下指令，不需同時啟動兩種模式：
 
@@ -190,71 +220,12 @@ cd /workspaces/isaac_ros-dev
 ./dinov3_ws/run.sh --mode split
 ```
 
-## 8. 更換 OmDet Prompt
+## 8. 更換 SAM3 Prompt
 
-OmDet 使用離線 prompt bank。新增或修改文字時，需要重新編碼文字特徵；在既有容量內不需重建 engine。
+SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`。
+可在網頁直接更新 prompt；文字特徵會在首次使用時編碼並快取，不需重建引擎。
 
-### 切換已存在的 Prompt
+下次啟動的預設 prompt 設定於 `config/dinov3_cases.yaml` 的 `grounding_prompt`。
+SAM3 不使用 OmDet 的 `omdet_prompts.json` 或離線 prompt bank。
 
-在網頁的 prompt 選單選擇已載入的 profile 即可，不需重新建置。
-若要更改下次啟動的預設選項，修改 [config/dinov3_cases.yaml](config/dinov3_cases.yaml) 的 `grounding_prompt`，再重新啟動服務。
-
-### 新增或修改 Prompt／Labels
-
-1. 在執行 `run.sh` 的終端按 `Ctrl+C`，停止推論程序。
-2. 編輯 [config/omdet_prompts.json](config/omdet_prompts.json)。每個 profile 只填 `prompt` 與 `labels`，例如：
-
-   ```json
-   {
-     "profiles": [
-       {
-         "prompt": "Detect bottle, box.",
-         "labels": ["bottle", "box"]
-       }
-     ]
-   }
-   ```
-
-   `prompt` 同時是實際任務句與網頁／ROS 選擇鍵；`labels` 是有序的輸出類別，必須明確填寫，程式不會從 prompt 自動猜測類別。
-   若要保留原有選項，請保留原 profile，再於 `profiles` 陣列新增一筆。
-
-3. 在工作區根目錄更新離線文字特徵：
-
-   ```bash
-   cd /workspaces/isaac_ros-dev
-   ./dinov3_ws/build_omdet.sh --stage-prompt
-   ```
-
-   `--stage prompts` 是同一模式的別名。此步驟使用已有的官方 CLIP／checkpoint，更新 `prompts.npz`、`prompts.json` 與相同容量 engine 的 JSON metadata，不匯出 ONNX、不重建 engine。
-
-4. 若修改了預設 profile 的 prompt，同步修改 [config/dinov3_cases.yaml](config/dinov3_cases.yaml) 中既有的參數：
-
-   ```yaml
-   grounding_prompt: 'Detect bottle, box.'
-   ```
-
-   此值須對應 prompt bank 裡的 `prompt`；保留 YAML 原本的節點結構與縮排。
-
-5. 重新啟動服務，讓文字特徵快取與網頁選單重新載入：
-
-   ```bash
-   ./dinov3_ws/run.sh
-   ```
-
-6. 使用相關實際圖片確認偵測框、類別與分數。
-
-### 容量限制與重建
-
-以本文件的首次建置指令為例，每個 profile 最多 4 個 labels，任務句最多 77 tokens（含起訖標記）。
-多個 profile 可有不同類別數；限制套用於每個 profile，不是所有 profile 的類別總數。
-實際容量記錄於 `dinov3_ws/artifacts/omdet/prompts.json`。
-
-超限時 `--stage-prompt` 會報錯，不會截斷文字，也不會替換既有提示產物。
-若需要 8 個類別，停止推論後重新完整建置：
-
-```bash
-./dinov3_ws/build_omdet.sh --max-labels 8 --max-prompt-tokens 77
-```
-
-已有權重時不必再加 `--download`。CLIP 的任務句 token 容量上限仍為 77；每個 label 名稱也受 CLIP 的 77-token 上限限制。
-重建完成後同步確認 YAML 的 `grounding_prompt`，再啟動服務。
+更換 `DART/dartf/assets_bbox/` 的模型後，重新啟動服務即可。此目錄須包含原始 TRT10 backbone、兩個 grounding heads、文字模型、tokenizer 與位置編碼；啟動時會檢查完整性。SAM3 固定由 `DART/.venv` 搭配 `DART/dartf/plugins/lq_plugins.so` 載入，不能混用 TRT11 引擎或 plugin。

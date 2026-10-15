@@ -2,7 +2,7 @@ name: isaac-ros-jazzy
 
 services:
   isaac-ros:
-    image: advigw/isaac-ros-base-jazzy:1.0.0
+    image: advigw/isaac-ros-base-jazzy:1.00
     runtime: nvidia
     network_mode: host
     ipc: host

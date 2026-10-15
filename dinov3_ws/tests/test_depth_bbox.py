@@ -31,7 +31,7 @@ def test_flat_surface_uses_component_quantiles_without_inventing_thickness():
     np.testing.assert_allclose(data["size"], [.435, .195, 0.])
     assert data["point_count"] == 3600
     assert data["seed_depth"] == 1.
-    assert data["method"] == "central_depth_component_quantiles"
+    assert data["method"] == "central_depth_component_mean_z"
 
 
 def test_quantile_zero_gives_full_visible_bounds():
@@ -55,6 +55,18 @@ def test_in_band_outlier_is_diagnostic_but_does_not_inflate_thickness():
     assert data["nearest_depth"] == .95
     assert data["nearest_pixel"] == [80, 60]
     np.testing.assert_allclose(data["depth_range"], [1., 1.])
+
+
+
+def test_z_uses_all_component_depths_mean_instead_of_quantile_midpoint():
+    depth = scene()
+    depth[40:44, 35:125] = .95
+    expected_z = float(np.mean(depth[40:80, 35:125]))
+    for quantile in (.02, .2):
+        data = estimate_bbox3d(depth, calibration(), BOX, quantile=quantile)
+        assert data["position"][2] == pytest.approx(expected_z)
+        assert not np.isclose(data["position"][2], np.mean(data["depth_range"]))
+        assert data["point_count"] == 3600
 
 
 def test_disconnected_same_depth_region_is_excluded():
@@ -161,7 +173,7 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
     detection = received.detections[0]
     assert detection.header == header
     assert detection.id == "1"
-    assert detection.bbox.center.position.z == 1.
+    assert detection.bbox.center.position.z == pytest.approx((3599. + .95) / 3600)
     assert detection.bbox.center.orientation.w == 1.
     assert detection.bbox.size.x == pytest.approx(.435)
     assert detection.bbox.size.z == 0.
