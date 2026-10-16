@@ -14,6 +14,9 @@
 <section id="grounding-section">
 <h2>Detection and Recognition Settings</h2>
 <form id="grounding-form">
+<label>SAM3 detection interval <input name="detection_interval" type="number" min="1" step="1" required></label>
+<small>1 = SAM3 on every processed frame. N = SAM3, then N−1 KCF frames. Lost tracking triggers early detection. Camera frames skipped while busy are not counted.</small>
+<br>
 <label>Text prompt <input id="prompt" name="prompt" required maxlength="1000" style="width:min(600px,85%)">
 </label>
 <br>
@@ -77,7 +80,7 @@
 <p id="bbox-help" role="status">Showing original 2D bounding boxes.</p>
 <img id="overlay" src="/overlay.mjpg" alt="Object bounding boxes and recognition results">
 <p>
-<small>det is the SAM3 W8A8 detection score. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects.</small>
+<small>det is the last SAM3 W8A8 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects.</small>
 </p>
 <div id="recognition-list">
 </div>

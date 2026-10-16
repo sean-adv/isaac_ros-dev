@@ -5,6 +5,12 @@ dinov3_cases:
     grounding_box_threshold: 0.7
     grounding_nms_iou: 1.0  # SAM3 default: no NMS
     grounding_max_detections: 20
+    # SAM3 once per N processed frames; KCF updates bboxes between detections.
+    # 1 disables KCF. Lost tracking triggers detection early.
+    grounding_detection_interval: 5
+    # Moving average over raw SAM3/KCF boxes per object; 1 disables smoothing.
+    # Counts unique processed frames. Config only; restart after changes.
+    bbox_smoothing_frames: 3
     # Original-image bbox after clipping/rounding; pixels / pixels squared.
     # 0 disables each threshold. All enabled thresholds must be met (>=).
     grounding_min_bbox_width: 0

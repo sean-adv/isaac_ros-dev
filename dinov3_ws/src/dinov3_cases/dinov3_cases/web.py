@@ -9,6 +9,7 @@ from werkzeug.exceptions import ServiceUnavailable
 from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
 from .patches import reference_grid_image
 from .grounded import prepare_object, validate_settings
+from .kcf import kcf_factory
 from .image_manager import register_image_manager, image_path, EXTENSIONS
 
 
@@ -181,10 +182,12 @@ def create_app(node):
             or not payload
             or set(payload) - set(node.grounding_settings)
         ):
-            raise ValueError("Expected prompt and/or grounding/recognition thresholds.")
+            raise ValueError("Expected prompt, detection_interval and/or grounding/recognition thresholds.")
         with node.lock:
             settings = {**node.grounding_settings, **payload}
             settings["prompt"] = validate_settings(**settings)
+            if settings.get("detection_interval", 1) > 1:
+                kcf_factory()
             detector = getattr(node, "grounding_detector", None)
             if detector is None and "prompt" in payload:
                 return jsonify(error="SAM3 is loading. Please try again once it is ready."), 503

@@ -13,12 +13,15 @@ from PIL import Image, ImageOps
 import torch
 import torch.nn.functional as F
 
+from .kcf import validate_detection_interval
+
 
 DEFAULT_PROMPT = "medicine bottle, medicine box."
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
-def validate_settings(prompt, box_threshold, recognition_threshold, margin):
+def validate_settings(prompt, box_threshold, recognition_threshold, margin, detection_interval=1):
+    validate_detection_interval(detection_interval)
     if not isinstance(prompt, str) or not prompt.strip(" .\t\r\n") or len(prompt) > 1000:
         raise ValueError("Prompt must contain 1–1000 characters.")
     for name, value, upper in [

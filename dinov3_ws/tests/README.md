@@ -27,7 +27,8 @@ dinov3_trt11_venv/bin/python -m pytest -q dinov3_ws/tests
 | `test_apriltag.py` | Isaac ROS 訊息序列化、座標及空結果發布 |
 | `test_bbox_visualization.py` | 2D/3D 框投影與首頁影像切換 |
 | `test_image_manager.py`、`test_camera_capture.py` | 圖庫、去背、相機擷取與 bbox 預覽 |
-| `test_tracking.py` | 可選 ROI tracking 的 ID、門檻與生命週期 |
+| `test_tracking.py` | bbox 移動平均、跨偵測配對與重設；可選 ROI tracking 的 ID、門檻與生命週期 |
+| `test_kcf.py` | SAM3 間隔、KCF 框更新、失敗補偵測、重設與實際 OpenCV 追蹤 |
 
 `ipc_fake_worker.py` 是 IPC 測試必要的子程序 fixture，不能當作一般診斷腳本刪除。
 

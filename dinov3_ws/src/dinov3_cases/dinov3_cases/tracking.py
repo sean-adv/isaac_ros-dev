@@ -1,6 +1,7 @@
 """Small, class-independent ROI tracker; no model or third-party dependencies."""
 
 from dataclasses import dataclass
+from collections import deque
 import math
 
 
@@ -11,6 +12,52 @@ def _iou(a, b):
     union = ((a[2] - a[0]) * (a[3] - a[1])
              + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
     return intersection / union if union > 0 else 0.0
+
+
+class BBoxSmoother:
+    """Average raw boxes per matched object without feeding smoothing into KCF.
+
+    Match geometrically across SAM3 refreshes, including detection reordering.
+    Missing objects lose their history immediately. A repeated frame reuses its
+    result so gallery refreshes cannot add samples or bias the average.
+    """
+
+    def __init__(self, window=3):
+        if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+            raise ValueError("bbox_smoothing_frames must be an integer >= 1.")
+        self.window = window
+        self.matcher = ROITracker(max_missed=0)
+        self.context = None
+        self.frame_key = None
+        self.histories = {}
+        self.boxes = []
+        self.initialized = False
+
+    def update(self, items, frame_key, context):
+        if not self.initialized or context != self.context:
+            self.matcher.reset()
+            self.histories.clear()
+            self.initialized = False
+            self.context = context
+        if not self.initialized or frame_key != self.frame_key:
+            # Keep matching on raw coordinates; recognition/ID fields stay outside.
+            matched = self.matcher.update(
+                [dict(bbox=list(item["bbox"])) for item in items], frame_key=frame_key
+            )
+            histories, boxes = {}, []
+            for item in matched:
+                track_id = item["track_id"]
+                history = self.histories.get(track_id, deque(maxlen=self.window))
+                history.append(tuple(item["bbox"]))
+                histories[track_id] = history
+                mean = [sum(box[i] for box in history) / len(history) for i in range(4)]
+                boxes.append([math.floor(mean[0]), math.floor(mean[1]),
+                              math.ceil(mean[2]), math.ceil(mean[3])])
+            self.histories, self.boxes = histories, boxes
+            self.frame_key = frame_key
+            self.initialized = True
+        return [dict(item, bbox=list(box), area=(box[2] - box[0]) * (box[3] - box[1]))
+                for item, box in zip(items, self.boxes)]
 
 
 @dataclass

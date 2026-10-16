@@ -21,7 +21,8 @@ from .patches import feature_stride
 from .encoder import Encoder
 from .grounding_ipc import SharedMemoryGroundingDetector
 from .frame_pool import SharedFramePool
-from .tracking import ROITracker
+from .tracking import BBoxSmoother, ROITracker
+from .kcf import KCFProposals, kcf_factory
 from .runtime import (
     WORKSPACE,
     DINO_ENGINE,
@@ -59,6 +60,8 @@ class CaseNode(Node):
             grounding_box_threshold=0.3,
             grounding_nms_iou=1.0,
             grounding_max_detections=20,
+            grounding_detection_interval=1,
+            bbox_smoothing_frames=3,
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
@@ -91,6 +94,7 @@ class CaseNode(Node):
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
+        self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
         self.tracker = ROITracker(
             self.param("tracking_max_missed"),
             self.param("tracking_iou_threshold"),
@@ -103,8 +107,11 @@ class CaseNode(Node):
             box_threshold=self.param("grounding_box_threshold"),
             recognition_threshold=self.param("recognition_threshold"),
             margin=self.param("recognition_margin"),
+            detection_interval=self.param("grounding_detection_interval"),
         )
         self.grounding_settings["prompt"] = validate_settings(**self.grounding_settings)
+        if self.grounding_settings["detection_interval"] > 1:
+            kcf_factory()
         if not 0 <= self.param("grounding_nms_iou") <= 1:
             raise ValueError("grounding_nms_iou must be between 0 and 1.")
         if not 1 <= self.param("grounding_max_detections") <= 100:
@@ -447,6 +454,7 @@ class CaseNode(Node):
         next_gallery_scan = 0.0
         gallery_revision = 0
         tracking_context = None
+        proposal_tracker = KCFProposals()
         max_side = INPUT_SIZE
         for _ in self.worker_ticks():
             shared_frame = None
@@ -490,17 +498,23 @@ class CaseNode(Node):
                 # PIL remains only at the existing model adapter boundary.
                 image = Image.fromarray(shared_frame.pixels)
                 depth_inputs = self.depth_inputs_for(frame)
-                proposals = detector.detect(
-                    shared_frame,
-                    settings["prompt"],
-                    settings["box_threshold"],
-                    self.param("grounding_nms_iou"),
-                    self.param("grounding_max_detections"),
-                    min_width=self.param("grounding_min_bbox_width"),
-                    min_height=self.param("grounding_min_bbox_height"),
-                    min_area=self.param("grounding_min_bbox_area"),
+                context = (gen, image.size, header.frame_id if header is not None else None)
+                proposals, proposal_source = proposal_tracker.update(
+                    shared_frame.pixels, (gen, seq), context,
+                    settings["detection_interval"],
+                    lambda: detector.detect(
+                        shared_frame,
+                        settings["prompt"],
+                        settings["box_threshold"],
+                        self.param("grounding_nms_iou"),
+                        self.param("grounding_max_detections"),
+                        min_width=self.param("grounding_min_bbox_width"),
+                        min_height=self.param("grounding_min_bbox_height"),
+                        min_area=self.param("grounding_min_bbox_area"),
+                    ),
                 )
                 detected_at = time.monotonic()
+                proposals = self.bbox_smoother.update(proposals, (gen, seq), context)
                 diagnostics = []
                 detections = recognize_objects(
                     image,
@@ -518,7 +532,6 @@ class CaseNode(Node):
                 with self.lock:
                     if gen != self.generation:
                         continue
-                    context = (gen, image.size, header.frame_id if header is not None else None)
                     if self.param("tracking_enabled"):
                         if context != tracking_context:
                             self.tracker.reset()
@@ -551,7 +564,10 @@ class CaseNode(Node):
                             if previous_completed is None
                             else 1 / max(1e-9, completed_at - previous_completed)
                         ),
-                        grounding_ipc=dict(getattr(detector, "last_metrics", {})),
+                        grounding_ipc=(dict(getattr(detector, "last_metrics", {}))
+                                       if proposal_source == "sam3" else {}),
+                        bbox_source=proposal_source,
+                        detection_interval=settings["detection_interval"],
                         detect_ms=(detected_at - start) * 1000,
                         recognize_ms=(recognized_at - detected_at) * 1000,
                         bbox3d_ms=(bbox3d_at - recognized_at) * 1000,
@@ -564,7 +580,8 @@ class CaseNode(Node):
                         ),
                     )
                     self.status = (
-                        f"SAM3 W8A8 → {encoder.description} | {len(detections)} objects | "
+                        f"{('SAM3 W8A8' if proposal_source == 'sam3' else 'KCF')} → "
+                        f"{encoder.description} | {len(detections)} objects | "
                         f"{len(set(gallery.labels))} classes / {len(gallery.labels)} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )

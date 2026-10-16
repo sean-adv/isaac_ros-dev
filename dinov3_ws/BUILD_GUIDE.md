@@ -17,6 +17,19 @@
 
 預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.7、NMS 停用、每幀最多 20 個框；ROI tracking 預設停用。
 
+SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。設定檔預設 5：第 1、6、11… 個處理影格執行 SAM3，其間根據上次偵測的 bbox 為每個物件建立 OpenCV KCF 追蹤器；設為 1 則每個處理影格都執行 SAM3。計數以實際送入推論的不同影格為準，相機在忙碌時跳過的影格不計入；相同靜態圖片因圖庫重新整理而重跑辨識也不增加計數。
+
+任一 KCF 追蹤失敗或框無效時，當幀提前執行 SAM3，並重新開始計算間隔。每次 SAM3 都會更新所有追蹤器；空偵測會清除舊框。來源、解析度或設定變更時重新偵測。DINOv3 持續使用當幀的追蹤框辨識，深度／3D 框與發布也使用該框。`bbox_source` 表示 `sam3` 或 `kcf`；追蹤期間的 `detection_score` 保留最近一次 SAM3 分數。既有 `tracking_enabled` 仍控制 ID 配對與 bbox 顯示門檻，與 KCF 偵測間隔獨立。
+
+`config/dinov3_cases.yaml` 的 `bbox_smoothing_frames` 控制 bbox 移動平均，預設為 3（設為 1 停用），修改後重新啟動。此設定不顯示在網頁。每個物件取最近 N 個不同處理影格的原始 SAM3／KCF 框平均；不足 N 幀時使用已有樣本。SAM3 更新時依位置配對歷史，物件消失或來源／解析度／設定變更時清除歷史。同一幀重跑不增加樣本。平滑框供辨識裁切、顯示、3D 框與發布使用，KCF 本身仍以原始框運作，與 `tracking_enabled` 無關。
+
+KCF 需要主程序環境安裝 `opencv-contrib-python`（包含 [OpenCV KCF](https://docs.opencv.org/4.x/d2/da2/classcv_1_1TrackerKCF.html)）。若原先使用一般 OpenCV wheel，先移除同名 `cv2` 套件再安裝，避免重疊檔案；不需修改 SAM3 的 DART 環境：
+
+```bash
+dinov3_trt11_venv/bin/python -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python-headless
+dinov3_trt11_venv/bin/python -m pip install 'opencv-contrib-python>=4.8,<4.12'
+```
+
 ## 執行環境與模型
 
 兩個程序固定使用各自的 TensorRT 環境；路徑預設定義於 `src/dinov3_cases/dinov3_cases/runtime.py`。
