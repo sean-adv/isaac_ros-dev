@@ -6,7 +6,7 @@ import threading
 from types import SimpleNamespace
 
 import torch
-from .runtime import MODEL_ID, DINO_ENGINE
+from .runtime import MODEL_ID, DINO_ENGINE, INPUT_SIZE
 
 
 MODEL_SPECS = {
@@ -22,7 +22,7 @@ def validate_shape(shape, minimum, maximum):
     if any(n < low or n > high for n, low, high in zip(shape, minimum, maximum)):
         raise ValueError(
             f"TRT input {shape} is outside {minimum} .. {maximum}; "
-            "use the 224×224 input defined in BUILD_GUIDE.md."
+            "use an input size supported by this engine; see BUILD_GUIDE.md."
         )
 
 
@@ -54,8 +54,8 @@ class TRTBackbone:
             import torch_tensorrt  # Registers serialized TensorRT TorchScript operators.
 
             self.scripted = torch.jit.load(str(path), map_location=self.device).eval()
-            self.minimum = self.maximum = (1, 3, 224, 224)
-            self.description = "Torch-TensorRT vitb16 FP16 (224×224)"
+            self.minimum = self.maximum = (1, 3, INPUT_SIZE, INPUT_SIZE)
+            self.description = f"Torch-TensorRT vitb16 FP16 ({INPUT_SIZE}×{INPUT_SIZE})"
             return
         self.description = f"TensorRT {variant} (FP32 I/O)"
         metadata = path.with_suffix(".json")
@@ -117,7 +117,12 @@ class TRTBackbone:
                 x = pixel_values.to(dtype=torch.float16).contiguous()
                 y = self.scripted(x)
                 torch.cuda.current_stream(self.device).synchronize()
-                expected = (1, 201, self.config.hidden_size)
+                expected = (
+                    1,
+                    (shape[2] // self.config.patch_size) * (shape[3] // self.config.patch_size)
+                    + 1 + self.config.num_register_tokens,
+                    self.config.hidden_size,
+                )
                 if tuple(y.shape) != expected:
                     raise RuntimeError(f"TRT output shape {tuple(y.shape)}, expected {expected}.")
                 return SimpleNamespace(last_hidden_state=y)

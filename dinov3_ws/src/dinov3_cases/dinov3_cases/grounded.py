@@ -13,6 +13,8 @@ from PIL import Image, ImageOps
 import torch
 import torch.nn.functional as F
 
+from .runtime import INPUT_SIZE
+
 from .kcf import validate_detection_interval
 
 
@@ -90,7 +92,7 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
     return kept
 
 
-def prepare_object(image, max_side=224, stride=16, minimum=32):
+def prepare_object(image, max_side=INPUT_SIZE, stride=16, minimum=32):
     """Apply the same aspect-preserving resize/padding to references and proposals."""
     if max_side < minimum or stride <= 0:
         raise ValueError(

@@ -84,7 +84,7 @@ def create_app(node):
 
     @app.get("/")
     def index():
-        return render_template("cases.html")
+        return render_template("cases.html", input_size=INPUT_SIZE)
 
     @app.get("/api/status")
     def status():

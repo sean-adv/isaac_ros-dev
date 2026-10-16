@@ -153,7 +153,7 @@ async function refresh() {
   }
   refreshReferences(s.value || d.selected, d.reference_revision, d.reference_stride);
   el('overlay').style.display = d.overlay_ready ? '' : 'none';
-  if (d.performance && d.performance.result_fps) el('status').textContent += ' | ' + d.performance.result_fps.toFixed(1) + ' FPS | callback→result ' + (d.performance.callback_to_result_ms === null ? '—' : d.performance.callback_to_result_ms.toFixed(0) + ' ms');
+  if (d.performance && d.performance.result_fps) el('status').textContent += ' | ' + d.performance.result_fps.toFixed(1) + ' FPS (3s avg) | callback→result ' + (d.performance.callback_to_result_ms === null ? '—' : d.performance.callback_to_result_ms.toFixed(0) + ' ms');
 }
 
 const objectHelp = {

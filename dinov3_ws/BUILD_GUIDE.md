@@ -37,12 +37,12 @@ dinov3_trt11_venv/bin/python -m pip install 'opencv-contrib-python>=4.8,<4.12'
 | 用途 | Python | 模型／引擎 |
 | --- | --- | --- |
 | SAM3 偵測 | `DART/.venv/bin/python`，TensorRT 10 | `DART/dartf/assets_bbox/vision_int8.plan` |
-| DINOv3 辨識 | `dinov3_trt11_venv/bin/python`，TensorRT 11 | `dinov3_tensorrt/artifacts/thor-vitb/vitb16-fp16-trt.ts` |
+| DINOv3 辨識 | `dinov3_trt11_venv/bin/python`，TensorRT 11 | `dinov3_tensorrt/artifacts/thor-vitb-160/vitb16-fp16-trt.ts` |
 | DINOv3 前處理 | 主程序環境 | `DART/models/dinov3-vitb16` |
 
 SAM3 bundle 還需 `ground_c1m_fp16.plan`、`ground_c4m_fp16.plan`、`text_c16.onnx`（含外部權重）、`bpe_simple_vocab_16e6.txt.gz`、`img_pos_c1.npy`、`img_pos_c4.npy`，以及 `DART/dartf/plugins/lq_plugins.so`。缺少時依 DART 的 `dartf/scripts/build_bbox.sh` 準備；更換模型後重新啟動服務。
 
-SAM3 使用套件內的 `sam3_runtime`，輸入為 RGB 1008×1008、bilinear resize、`pixel / 127.5 - 1`；單類使用 K=1 head，2–4 類使用 K=4 head。DINOv3 將 bbox 與參考圖等比例縮放、補邊至 224×224，再比對 patch 特徵。參考圖庫存於 `dinov3_cases_data/`。
+SAM3 使用套件內的 `sam3_runtime`，輸入為 RGB 1008×1008、bilinear resize、`pixel / 127.5 - 1`；單類使用 K=1 head，2–4 類使用 K=4 head。DINOv3 將 bbox 與參考圖等比例縮放、補邊至 160×160，再比對 patch 特徵。參考圖庫存於 `dinov3_cases_data/`。
 
 主程序依賴見 [requirements.txt](requirements.txt)；先安裝平台相容的 CUDA、PyTorch／torchvision，再安裝一般依賴。ROS 2 Jazzy、cv_bridge、vision_msgs、isaac_ros_apriltag_interfaces 與相機驅動需另外準備。SAM3 worker 沿用 DART 的獨立環境，不能套用 TRT11 的依賴限制。
 
@@ -63,6 +63,14 @@ SAM3 使用套件內的 `sam3_runtime`，輸入為 RGB 1008×1008、bilinear res
 共享池的 slot 在推論與繪圖使用完畢前保持唯讀；socket 僅傳控制與結果。bbox 發布與 JPEG 繪圖各有獨立執行緒。`processing_ms`／`callback_to_result_ms` 截止於辨識與 3D 框完成，`render_ms`／`result_to_overlay_ms` 另計。
 
 ## 可選模型建置
+
+目前服務使用 ViT-B/16 FP16、160×160 輸入，對應 10×10 patch grid。依 `dinov3_tensorrt` 的 Torch-TensorRT CLI 重建並驗證：
+
+```bash
+./dinov3_tensorrt/scripts/run_thor_vitb.sh
+```
+
+產物與精度報告位於 `dinov3_tensorrt/artifacts/thor-vitb-160/`。驗證沿用原有 FP32 比對門檻；輸入降為 160×160 對商品辨識率的影響需以實際圖庫評估。舊 224×224 engine 保留於 `dinov3_tensorrt/artifacts/thor-vitb/`。
 
 目前服務直接載入上表的既有產物。以下工具供另建引擎及驗證使用，產物不會自動取代目前部署。
 
@@ -126,3 +134,5 @@ cd /workspaces/isaac_ros-dev
 
 請在 `orbbec_sdk` 建置，因為 `run_camera.sh` 會載入 `orbbec_sdk/install/setup.bash`。
 目前相機啟動腳本使用 `gemini_330_series.launch.py`；僅上傳圖片時可略過相機建置與啟動。
+
+網頁 FPS 為辨識結果完成率，以最近約 3 秒的完成間隔總數除以總耗時，包含 SAM3／KCF 交替、辨識與排程等待；不是相機輸入或單一模型 FPS。切換輸入／設定時重新計算，首個結果尚無 FPS。API 的 `performance.result_fps` 為平滑值，`result_fps_instant` 保留相鄰結果的瞬時值。

@@ -17,6 +17,7 @@ from sensor_msgs.msg import Image as ImageMsg, CameraInfo
 from std_msgs.msg import Header
 from werkzeug.serving import make_server
 
+from .timing import ResultRate
 from .patches import feature_stride
 from .encoder import Encoder
 from .grounding_ipc import SharedMemoryGroundingDetector
@@ -455,6 +456,7 @@ class CaseNode(Node):
         gallery_revision = 0
         tracking_context = None
         proposal_tracker = KCFProposals()
+        result_rate = ResultRate(window_seconds=3.0)
         max_side = INPUT_SIZE
         for _ in self.worker_ticks():
             shared_frame = None
@@ -559,7 +561,9 @@ class CaseNode(Node):
                     previous_completed = self.performance.get("completed_at")
                     self.performance = dict(
                         completed_at=completed_at,
-                        result_fps=(
+                        result_fps=result_rate.update(completed_at, context),
+                        result_fps_window_seconds=result_rate.window_seconds,
+                        result_fps_instant=(
                             None
                             if previous_completed is None
                             else 1 / max(1e-9, completed_at - previous_completed)
