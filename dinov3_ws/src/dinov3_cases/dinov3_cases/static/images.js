@@ -24,7 +24,7 @@ if (el('camera-section') && !el('camera-bbox-preview')) {
   button.textContent = 'Preview Bounding Boxes';
   const status = document.createElement('p');
   status.id = 'camera-bbox-status';
-  status.textContent = 'Select a prompt to preview. The preview is a snapshot; saving captures a new frame.';
+  status.textContent = 'Enter a prompt to preview. The preview is a snapshot; saving captures a new frame.';
   status.setAttribute('role', 'status');
   const image = document.createElement('img');
   image.id = 'camera-bbox-image';
@@ -60,8 +60,8 @@ function buttons() {
     el('camera-bbox-preview').disabled = busy;
     el('camera-create').disabled = busy;
     el('camera-label').disabled = busy;
-    el('camera-prompt').disabled = busy || !Array.from(el('camera-prompt').options).some(option => option.value);
-    el('camera-capture-help').textContent = busy ? 'Processing, please wait…' : cameraLabel !== el('camera-label').value || !knownLabels.has(cameraLabel) ? 'Create or select a label first.' : !el('camera-prompt').value ? 'Select an SAM3 prompt first.' : 'Click to capture and save to ' + cameraLabel + '.';
+    el('camera-prompt').disabled = busy;
+    el('camera-capture-help').textContent = busy ? 'Processing, please wait…' : cameraLabel !== el('camera-label').value || !knownLabels.has(cameraLabel) ? 'Create or select a label first.' : !el('camera-prompt').value.trim() ? 'Enter a SAM3 prompt first.' : 'Click to capture and save to ' + cameraLabel + '.';
   }
 }
 
@@ -315,16 +315,16 @@ if (el('camera-section')) {
     el('camera-bbox-image').hidden = true;
     el('camera-bbox-image').removeAttribute('src');
   }
-  el('camera-prompt').onchange = () => {
+  el('camera-prompt').oninput = () => {
     clearCameraBbox();
     el('camera-bbox-status').textContent = 'Prompt updated. Preview the bounding boxes again.';
     buttons();
   };
   el('camera-bbox-preview').onclick = async () => {
     if (busy) return;
-    const prompt = el('camera-prompt').value;
+    const prompt = el('camera-prompt').value.trim();
     if (!prompt) {
-      el('camera-bbox-status').textContent = 'Select an SAM3 prompt first.';
+      el('camera-bbox-status').textContent = 'Enter a SAM3 prompt first.';
       el('camera-prompt').focus();
       return;
     }
@@ -364,7 +364,7 @@ if (el('camera-section')) {
       syncCameraLabel(result.case);
       clearSelection();
       await refresh(cameraLabel);
-      message('Label ready. Select a prompt, then capture.');
+      message('Label ready. Enter a prompt, then capture.');
     } catch (e) {
       message(e.message, true);
     } finally {
@@ -375,15 +375,7 @@ if (el('camera-section')) {
   async function cameraStatus() {
     try {
       const status = await (await api('/api/status')).json();
-      const prompts = status.grounding_offline_prompts || [];
-      const previous = el('camera-prompt').value;
-      const current = Array.from(el('camera-prompt').options).map(option => option.value).filter(Boolean);
-      if (JSON.stringify(current) !== JSON.stringify(prompts)) {
-        el('camera-prompt').replaceChildren(new Option('Select a prompt', ''), ...prompts.map(p => new Option(p, p)));
-        el('camera-prompt').value = prompts.includes(previous) ? previous : '';
-        if (previous !== el('camera-prompt').value) clearCameraBbox();
-      }
-      el('camera-status').textContent = !status.camera_connected ? 'Camera disconnected or frame is stale' : !prompts.length ? 'SAM3 is loading…' : 'Camera connected. Ready to capture.';
+      el('camera-status').textContent = !status.camera_connected ? 'Camera disconnected or frame is stale' : 'Camera connected. Ready to capture.';
     } catch (e) {
       el('camera-status').textContent = e.message;
     } finally {
@@ -400,8 +392,8 @@ if (el('camera-section')) {
       el('camera-label').focus();
       return;
     }
-    if (!el('camera-prompt').value) {
-      el('camera-capture-help').textContent = 'Select an SAM3 prompt first. If no options are available, wait for the model to load.';
+    if (!el('camera-prompt').value.trim()) {
+      el('camera-capture-help').textContent = 'Enter a SAM3 prompt first.';
       message(el('camera-capture-help').textContent, true);
       el('camera-prompt').focus();
       return;
@@ -412,7 +404,7 @@ if (el('camera-section')) {
     try {
       const result = await (await api('/api/images/capture', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({case: cameraLabel, prompt: el('camera-prompt').value})
+        body: JSON.stringify({case: cameraLabel, prompt: el('camera-prompt').value.trim()})
       })).json();
       if (result.names.length) {
         await refresh(result.case);

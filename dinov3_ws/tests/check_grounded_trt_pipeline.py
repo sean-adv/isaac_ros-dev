@@ -1,140 +1,109 @@
-"""Smoke check the real OmDet-Turbo-Tiny + ViT-S/16 TRT ROS/HTTP worker."""
-
-import argparse
+"""Real dual-runtime ROS/HTTP smoke, including a deliberately stalled renderer."""
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import time
+from unittest.mock import patch
 
+import cv2
+import numpy as np
 from PIL import Image
 import rclpy
 
 from dinov3_cases.node import CaseNode
-from dinov3_cases.runtime import ARTIFACTS, MODES, DINO_ENGINE, TRT_PYTHON
+from dinov3_cases.runtime import ARTIFACTS, WORKSPACE
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=MODES, default="single")
-    args = parser.parse_args()
-    artifact_dir = ARTIFACTS / "omdet"
-    execution, grounding_engine = MODES[args.mode]
-    image = Image.open(
-        Path(__file__).resolve().parents[2] / "dinov3_cases_data/stomach/1790733215386907348_2.png"
-    ).convert("RGB")
+    image = Image.open(WORKSPACE / 'DART/dartf/data/train2017/000000230971.jpg').convert('RGB')
+    entered, release = threading.Event(), threading.Event()
+    original_encode = cv2.imencode
+
+    def stalled_encode(*args, **kwargs):
+        if threading.current_thread() is node.renderer_worker and not release.is_set():
+            entered.set()
+            if not release.wait(30):
+                raise RuntimeError('Renderer test timed out')
+        return original_encode(*args, **kwargs)
 
     def png():
         data = io.BytesIO()
-        image.save(data, format="PNG")
+        image.save(data, format='PNG')
         data.seek(0)
         return data
 
-    with tempfile.TemporaryDirectory() as tmp:
-        ros_args = [
-            "--ros-args",
-            "-p",
-            f"cases_dir:={tmp}",
-            "-p",
-            "port:=0",
-            "-p",
-            f"engine_path:={DINO_ENGINE}",
-            "-p",
-            f"grounding_engine_path:={grounding_engine}",
-            "-p",
-            f"grounding_execution:={execution}",
-            "-p",
-            f"grounding_worker_python:={TRT_PYTHON}",
-        ]
-        rclpy.init(args=ros_args)
+    with tempfile.TemporaryDirectory() as directory:
+        rclpy.init(args=['--ros-args', '-p', f'cases_dir:={directory}', '-p', 'port:=0',
+                        '-p', 'pose_enabled:=false', '-p', 'grounding_prompt:=person'])
         node = CaseNode()
         client = node.app.test_client()
 
-        def wait():
-            deadline = time.monotonic() + 60
+        def wait_for(predicate, seconds=90):
+            deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
-                status = client.get("/api/status").json
-                assert not status["status"].startswith(("Error:", "Model load failed:")), status
-                detections = client.get("/api/detections").json["detections"]
-                if status["overlay_ready"] and detections:
-                    return status, detections
-                time.sleep(0.1)
-            raise AssertionError(client.get("/api/status").json)
+                rclpy.spin_once(node, timeout_sec=.01)
+                status = client.get('/api/status').json
+                if status['status'].startswith(('Error:', 'Model load failed:')):
+                    raise AssertionError(status['status'])
+                if predicate(status):
+                    return status
+            raise AssertionError(client.get('/api/status').json)
 
         try:
-            assert (
-                client.post(
-                    "/api/cases", data={"case": "sample", "images": (png(), "ref.png")}
-                ).status_code
-                == 200
-            )
-            assert (
-                client.post(
-                    "/api/source", data={"source": "upload", "image": (png(), "target.png")}
-                ).status_code
-                == 200
-            )
-            status, detections = wait()
-            assert status["inference_backend"] == status["grounding_backend"] == "trt"
-            assert status["grounding_model_id"] == "omlab/OmDet-Turbo_tiny_SWIN_T"
-            assert status["model_id"] == "facebook/dinov3-vits16-pretrain-lvd1689m"
-            assert "vits16" in status["backend_description"]
-            import tensorrt
-
-            assert tensorrt.__version__ == "11.1.0.106"
-            assert status["grounding_execution"] == execution
-            assert status["grounding_precision"] == json.loads(grounding_engine.with_suffix(".json").read_text())["precision"]
-            assert client.get("/").status_code == 200
-            assert client.get("/static/cases.js").status_code == 200
-            assert client.get("/images").status_code == 200
-            if args.mode == "split":
-                assert status["grounding_worker"]["tensorrt"] == "11.1.0.106"
-                assert status["performance"]["grounding_ipc"]["frame_id"] > 0
-            else:
-                assert status["grounding_worker"] is None
-            assert any(item["label"] == "sample" for item in detections), detections
-            manifest = client.get("/api/object_visualizations").json
-            assert manifest["objects"]
-            assert all(item["input_size"] == [224, 224] for item in manifest["objects"])
-            revision = manifest["revision"]
-            for view in ("crop", "grid", "heatmap", "reference"):
-                assert client.get(f"/debug/objects/{revision}/0/{view}.jpg").status_code == 200
-            invalid = client.post(
-                "/api/grounding",
-                json={"prompt": "medicine bottle. medicine box. bottle. box. car. truck."},
-            )
-            assert invalid.status_code == 400, invalid.json
-            assert (
-                client.get("/api/status").json["grounding"]["prompt"]
-                == status["grounding"]["prompt"]
-            )
-            assert client.post("/api/grounding", json={"prompt": "box. bottle."}).status_code == 400
-            assert client.post("/api/grounding", json={"box_threshold": 0.32}).status_code == 200
-            changed_status, changed = wait()
-            assert changed_status["grounding"]["prompt"] == status["grounding"]["prompt"]
-            assert changed_status["grounding"]["box_threshold"] == 0.32
-            assert changed_status["grounding_offline_prompts"]
-            assert any(item["label"] == "sample" for item in changed), changed
-            report = {
-                "passed": True,
-                "status": status,
-                "detections": detections,
-                "changed_prompt_detections": changed,
-            }
-            path = artifact_dir / f"integration_{args.mode}_224.json"
-            path.write_text(json.dumps(report, indent=2) + "\n")
-            print(
-                f"PASS: real dual-TRT worker, gallery recognition, per-object previews, prompt update. {path}"
-            )
+            with patch('dinov3_cases.node.cv2.imencode', side_effect=stalled_encode):
+                assert client.post('/api/cases', data={'case': 'sample', 'images': (png(), 'ref.png')}).status_code == 200
+                assert client.post('/api/source', data={'source': 'upload', 'image': (png(), 'target.png')}).status_code == 200
+                status = wait_for(lambda s: s['performance'].get('completed_at') is not None)
+                assert entered.wait(5)
+                detections = client.get('/api/detections').json['detections']
+                assert detections and not status['overlay_ready']
+                assert status['grounding_worker']['tensorrt'].startswith('10.')
+                assert status['grounding_execution'] == 'subprocess'
+                assert status['performance']['render_ms'] is None
+                release.set()
+                wait_for(lambda s: s['overlay_ready'])
+            assert client.get('/overlay.jpg').status_code == 200
+            assert client.get('/overlay.jpg?bbox=3d').status_code == 200
+            assert client.post('/api/source', data={'source': 'camera'}).status_code == 200
+            ros_results = []
+            from vision_msgs.msg import Detection2DArray
+            node.create_subscription(Detection2DArray, '/medicine_recognition/detections',
+                                     lambda msg: ros_results.append(msg.header.frame_id), 10)
+            rows = []
+            for index in range(4):
+                msg = node.bridge.cv2_to_imgmsg(np.asarray(image), encoding='rgb8')
+                msg.header.frame_id = f'memory-smoke-{index}'
+                msg.header.stamp = node.get_clock().now().to_msg()
+                node.on_image(msg)
+                expected = node.frame_seq
+                status = wait_for(lambda s: s['performance'].get('frame_id') == expected)
+                rows.append(status['performance'])
+            wait_for(lambda _: 'memory-smoke-3' in ros_results, seconds=10)
+            report = dict(passed=True, bbox_before_jpeg=True, camera_frames=len(rows),
+                          ros_results=ros_results, worker=status['grounding_worker'], rows=rows)
+            output = ARTIFACTS / 'sam3/memory_pipeline_validation.json'
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(report, indent=2)+'\n')
+            print(json.dumps(report, indent=2))
         finally:
+            release.set()
             node.stop.set()
+            node.image_changed.set()
+            node.preview_changed.set()
+            node.publish_changed.set()
+            node.render_changed.set()
             node.server.shutdown()
-            node.preview_worker.join(5)
-            node.worker.join(60)
-            node.publisher_worker.join(5)
+            node.close_grounding_worker()
+            node.worker.join(15)
+            node.preview_worker.join(3)
+            node.publisher_worker.join(3)
+            node.renderer_worker.join(3)
             node.destroy_node()
             rclpy.shutdown()
+        assert all(slot[0] is None for slot in node.frame_pool.slots)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

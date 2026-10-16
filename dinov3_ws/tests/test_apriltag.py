@@ -44,7 +44,7 @@ def test_serialized_pixel_bounds_and_metric_pose_preserve_headers():
 
 
 @pytest.mark.parametrize("position", [[0., 0., 1.3], [.3, -.4, 1.2]])
-def test_topic_z_matches_overlay_distance_without_modifying_source(position):
+def test_topic_z_is_radial_distance_without_modifying_source(position):
     item = object_detection(bbox3d=dict(position=position.copy()))
     detection, = apriltag_message([item], Header()).detections
     output = detection.pose.pose.pose.position
@@ -75,7 +75,7 @@ def test_publication_worker_publishes_empty_array_to_clear_previous_objects():
     logger = Mock()
     node = SimpleNamespace(
         stop=stop, publish_changed=threading.Event(), lock=threading.Lock(),
-        pending_publication=(None, [], header, 0), generation=0,
+        pending_publication=([], header, 0), generation=0,
         tag_pub=tag_pub, recognition_pub=inactive, bbox3d_pub=inactive,
         pub=inactive, recognition_debug_pub=inactive, bridge=Mock(),
         get_logger=lambda: logger,

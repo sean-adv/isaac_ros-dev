@@ -1,4 +1,4 @@
-"""ROS input, inference scheduling and result publication for both TRT modes."""
+"""ROS input, inference scheduling and result publication with isolated TRT10/TRT11 runtimes."""
 
 import threading
 import time
@@ -19,7 +19,8 @@ from werkzeug.serving import make_server
 
 from .patches import feature_stride
 from .encoder import Encoder
-from .sam3_trt import Sam3Detector
+from .grounding_ipc import SharedMemoryGroundingDetector
+from .frame_pool import SharedFramePool
 from .tracking import ROITracker
 from .runtime import (
     WORKSPACE,
@@ -51,7 +52,6 @@ class CaseNode(Node):
         super().__init__("dinov3_cases")
         defaults = dict(
             cases_dir=str(WORKSPACE / "dinov3_cases_data"),
-            grounding_execution="subprocess",
             grounding_worker_python=str(GROUNDING_PYTHON),
             grounding_ipc_timeout=60.0,
             grounding_engine_path=str(GROUNDING_ENGINE),
@@ -114,8 +114,6 @@ class CaseNode(Node):
             self.param("grounding_min_bbox_height"),
             self.param("grounding_min_bbox_area"),
         )
-        if self.param("grounding_execution") not in ("inprocess", "subprocess"):
-            raise ValueError("grounding_execution must be inprocess or subprocess.")
         if (
             not np.isfinite(self.param("grounding_ipc_timeout"))
             or self.param("grounding_ipc_timeout") <= 0
@@ -146,6 +144,11 @@ class CaseNode(Node):
         self.depth_frames = deque(maxlen=30)
         self.depth_infos = deque(maxlen=8)
         self.performance = {}
+        self.frame_pool = SharedFramePool(slots=3)
+        self.pending_render = None
+        self.render_changed = threading.Event()
+        self.stream_viewers = {}
+        self.stream_requested_at = {}
         self.pending_publication = None
         self.publish_changed = threading.Event()
         self.stop = threading.Event()
@@ -196,6 +199,8 @@ class CaseNode(Node):
         self.preview_worker.start()
         self.publisher_worker = threading.Thread(target=self.run_publications, daemon=True)
         self.publisher_worker.start()
+        self.renderer_worker = threading.Thread(target=self.run_rendering, daemon=True)
+        self.renderer_worker.start()
         self.worker = threading.Thread(target=self.run_grounded_worker, daemon=True)
         self.worker.start()
         self.get_logger().info(f"Browser: http://{self.param('host')}:{self.param('port')}")
@@ -288,7 +293,7 @@ class CaseNode(Node):
                 generation = self.generation
             if pending is None:
                 continue
-            overlay, detections, header, gen = pending
+            detections, header, gen = pending
             if gen != generation:
                 continue
             try:
@@ -300,18 +305,66 @@ class CaseNode(Node):
                     self.bbox3d_pub.publish(bboxes3d_message(detections, header))
                 if self.tag_pub.get_subscription_count():
                     self.tag_pub.publish(apriltag_message(detections, header))
-                image_publishers = [
-                    pub
-                    for pub in (self.pub, self.recognition_debug_pub)
-                    if pub.get_subscription_count()
-                ]
-                if image_publishers:
-                    out = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
-                    out.header = header
-                    for publisher in image_publishers:
-                        publisher.publish(out)
             except Exception as error:
                 self.get_logger().error(f"ROS result publication failed: {error}")
+
+    def wants_stream(self, attribute):
+        # Produce one initial snapshot; otherwise render only for active/recent readers.
+        with self.lock:
+            return (getattr(self, attribute) is None
+                    or self.stream_viewers.get(attribute, 0) > 0
+                    or time.monotonic() - self.stream_requested_at.get(attribute, -float("inf")) < 2)
+
+    def run_rendering(self):
+        """One active and one latest pending job; never block bbox publication."""
+        while not self.stop.is_set():
+            self.render_changed.wait(0.1)
+            self.render_changed.clear()
+            with self.lock:
+                job, self.pending_render = self.pending_render, None
+            if job is None:
+                continue
+            frame, detections, header, gen, seq, info, completed_at = job
+            try:
+                with self.lock:
+                    if gen != self.generation:
+                        continue
+                want2d, want3d = self.wants_stream("jpeg"), self.wants_stream("jpeg3d")
+                publishers = [p for p in (self.pub, self.recognition_debug_pub)
+                              if p.get_subscription_count()]
+                if not (want2d or want3d or publishers):
+                    continue
+                start = time.monotonic()
+                bgr = cv2.cvtColor(frame.pixels, cv2.COLOR_RGB2BGR)
+                overlay = render_bbox_overlay(bgr, detections, info, "2d") if want2d or publishers else None
+                encoded = {}
+                for attribute, wanted, mode in (("jpeg", want2d, "2d"), ("jpeg3d", want3d, "3d")):
+                    if wanted:
+                        pixels = overlay if mode == "2d" else render_bbox_overlay(bgr, detections, info, mode)
+                        ok, data = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")])
+                        if not ok:
+                            raise RuntimeError("JPEG encoding failed")
+                        encoded[attribute] = data.tobytes()
+                with self.lock:
+                    if gen != self.generation:
+                        continue
+                    for attribute, data in encoded.items():
+                        setattr(self, attribute, data)
+                    self.overlay_at = time.monotonic()
+                    if self.performance.get("completed_at") == completed_at:
+                        self.performance["render_ms"] = (self.overlay_at - start) * 1000
+                        self.performance["result_to_overlay_ms"] = (self.overlay_at - completed_at) * 1000
+                        self.performance["overlay_frame_id"] = seq
+                    self.stream_changed.notify_all()
+                if publishers:
+                    out = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
+                    out.header = header if header is not None else Header(stamp=self.get_clock().now().to_msg())
+                    for publisher in publishers:
+                        publisher.publish(out)
+            except Exception as error:
+                self.get_logger().error(f"Result rendering failed: {error}")
+            finally:
+                frame.release()
 
     def run_preview(self):
         processed = -1
@@ -320,7 +373,7 @@ class CaseNode(Node):
             self.preview_changed.clear()
             with self.lock:
                 frame, seq = self.camera_frame, self.camera_seq
-            if frame is None or seq == processed:
+            if frame is None or seq == processed or not self.wants_stream("preview_jpeg"):
                 continue
             try:
                 bgr = self.bridge.imgmsg_to_cv2(frame, desired_encoding="bgr8")
@@ -350,6 +403,13 @@ class CaseNode(Node):
     def destroy_node(self):
         self.stop.set()
         self.close_grounding_worker()
+        self.render_changed.set()
+        self.renderer_worker.join(timeout=3)
+        with self.lock:
+            if self.pending_render is not None:
+                self.pending_render[0].release()
+                self.pending_render = None
+        self.frame_pool.close()
         return super().destroy_node()
 
     def clear_object_debug(self):
@@ -365,18 +425,10 @@ class CaseNode(Node):
                 self.reference_stride = stride
                 self.backend_description = encoder.description
                 self.status = "Loading SAM3 W8A8 model…"
-            detector_class = Sam3Detector
-            detector_options = {}
-            if self.param("grounding_execution") == "subprocess":
-                from .grounding_ipc import SharedMemoryGroundingDetector
-
-                detector_class = SharedMemoryGroundingDetector
-                detector_options = dict(
-                    python=self.param("grounding_worker_python"),
-                    timeout=self.param("grounding_ipc_timeout"),
-                )
-            detector = detector_class(
-                self.param("grounding_engine_path"), encoder.device, **detector_options
+            detector = SharedMemoryGroundingDetector(
+                self.param("grounding_engine_path"), encoder.device,
+                python=self.param("grounding_worker_python"),
+                timeout=self.param("grounding_ipc_timeout"),
             )
             self.grounding_detector = detector
             if self.stop.is_set():
@@ -397,6 +449,7 @@ class CaseNode(Node):
         tracking_context = None
         max_side = INPUT_SIZE
         for _ in self.worker_ticks():
+            shared_frame = None
             with self.lock:
                 gen, frame, seq = self.generation, self.frame, self.frame_seq
                 settings = dict(self.grounding_settings)
@@ -427,15 +480,18 @@ class CaseNode(Node):
                 start = time.monotonic()
                 header = None
                 if isinstance(frame, ImageMsg):
-                    image = Image.fromarray(
-                        self.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")
-                    )
+                    pixels = self.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")
                     header = frame.header
                 else:
-                    image = frame
+                    pixels = np.asarray(frame.convert("RGB"))
+                shared_frame = self.frame_pool.acquire(pixels, frame_id=seq, timestamp=received_at)
+                if shared_frame is None:
+                    continue
+                # PIL remains only at the existing model adapter boundary.
+                image = Image.fromarray(shared_frame.pixels)
                 depth_inputs = self.depth_inputs_for(frame)
                 proposals = detector.detect(
-                    image,
+                    shared_frame,
                     settings["prompt"],
                     settings["box_threshold"],
                     self.param("grounding_nms_iou"),
@@ -480,47 +536,31 @@ class CaseNode(Node):
                 object_snapshot = ObjectVisualizationSnapshot(
                     detections, diagnostics, gallery, max_side, stride
                 )
-                rgb_frame = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-                info = depth_inputs[1] if depth_inputs is not None else None
-                overlay = render_bbox_overlay(rgb_frame, detections, info, "2d")
-                overlay3d = render_bbox_overlay(rgb_frame, detections, info, "3d")
-                ok, jpeg = cv2.imencode(
-                    ".jpg", overlay, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]
-                )
-                if not ok:
-                    raise RuntimeError("JPEG encoding failed.")
-                ok3d, jpeg3d = cv2.imencode(
-                    ".jpg", overlay3d, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]
-                )
-                if not ok3d:
-                    raise RuntimeError("3D JPEG encoding failed.")
                 with self.lock:
                     if gen != self.generation:
                         continue
-                    self.jpeg = jpeg.tobytes()
-                    self.jpeg3d = jpeg3d.tobytes()
                     self.object_debug_revision += 1
                     self.object_debug_snapshot = object_snapshot
                     self.detections = detections
-                    self.overlay_at = time.monotonic()
-                    self.stream_changed.notify_all()
+                    completed_at = time.monotonic()
                     previous_completed = self.performance.get("completed_at")
                     self.performance = dict(
-                        completed_at=self.overlay_at,
+                        completed_at=completed_at,
                         result_fps=(
                             None
                             if previous_completed is None
-                            else 1 / max(1e-9, self.overlay_at - previous_completed)
+                            else 1 / max(1e-9, completed_at - previous_completed)
                         ),
                         grounding_ipc=dict(getattr(detector, "last_metrics", {})),
                         detect_ms=(detected_at - start) * 1000,
                         recognize_ms=(recognized_at - detected_at) * 1000,
                         bbox3d_ms=(bbox3d_at - recognized_at) * 1000,
                         bbox3d_count=sum("bbox3d" in item for item in detections),
-                        render_ms=(self.overlay_at - bbox3d_at) * 1000,
-                        processing_ms=(self.overlay_at - start) * 1000,
+                        render_ms=None,
+                        frame_id=seq,
+                        processing_ms=(completed_at - start) * 1000,
                         callback_to_result_ms=(
-                            None if received_at is None else (self.overlay_at - received_at) * 1000
+                            None if received_at is None else (completed_at - received_at) * 1000
                         ),
                     )
                     self.status = (
@@ -528,7 +568,12 @@ class CaseNode(Node):
                         f"{len(set(gallery.labels))} classes / {len(gallery.labels)} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )
-                    self.pending_publication = (overlay, detections, header, gen)
+                    self.pending_publication = (detections, header, gen)
+                    if self.pending_render is not None:
+                        self.pending_render[0].release()
+                    self.pending_render = (shared_frame.retain(), detections, header, gen,
+                                           seq, depth_inputs[1] if depth_inputs else None, completed_at)
+                    self.render_changed.set()
                     self.publish_changed.set()
                 processed = (gen, seq, gallery_revision)
             except Exception as error:
@@ -543,6 +588,9 @@ class CaseNode(Node):
                 self.get_logger().error(str(error))
                 # Retry failed files/model calls at a bounded rate, including static uploads.
                 self.stop.wait(1.0)
+            finally:
+                if shared_frame is not None:
+                    shared_frame.release()
 
 
 def main(args=None):
@@ -557,6 +605,7 @@ def main(args=None):
         node.image_changed.set()
         node.preview_changed.set()
         node.publish_changed.set()
+        node.render_changed.set()
         with node.stream_changed:
             node.stream_changed.notify_all()
         node.server.shutdown()
@@ -564,6 +613,7 @@ def main(args=None):
         node.preview_worker.join(timeout=2)
         node.worker.join(timeout=10)
         node.publisher_worker.join(timeout=2)
+        node.renderer_worker.join(timeout=3)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

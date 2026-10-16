@@ -20,7 +20,7 @@ function page() {
   for (const id of [...ids, 'hue', 'saturation', 'value', 'feather']) elements.set(id, element(id));
   elements.delete('camera-capture-help'); // Reproduce a service with cached old HTML.
   const requests = [], timers = [];
-  const state = {status: {camera_connected: true, grounding_offline_prompts: ['Detect box.']}};
+  const state = {status: {camera_connected: true}};
   const context = vm.createContext({
     document: {getElementById: id => elements.get(id), createElement: () => element()},
     Option: function(text, value) { return {textContent: text, value}; },
@@ -61,27 +61,29 @@ test('selecting an existing gallery label allows capture without creating it aga
   await settled();
   assert.equal(p.el('camera-label').value, 'medicine');
   p.el('camera-prompt').value = 'Detect box.';
-  p.el('camera-prompt').onchange();
+  p.el('camera-prompt').oninput();
   await p.el('camera-capture').onclick();
   const request = p.requests.find(r => r.url === '/api/images/capture');
   assert.deepEqual(JSON.parse(request.options.body), {case: 'medicine', prompt: 'Detect box.'});
   assert.equal(p.requests.some(r => r.url === '/api/images/labels'), false);
 });
 
-test('status polling preserves prompt menu and does not block capture on a transient status failure', async () => {
+test('status polling preserves a typed prompt and does not block capture on a transient status failure', async () => {
   const p = page();
   await settled();
   p.el('camera-label').value = 'medicine';
   p.el('camera-label').oninput();
-  p.el('camera-prompt').value = 'Detect box.';
-  const replacements = p.el('camera-prompt').replacements;
+  p.el('camera-prompt').value = '  red medicine bottle  ';
+  assert.equal(p.el('camera-prompt').disabled, false);
   await p.timers.shift()();
-  assert.equal(p.el('camera-prompt').replacements, replacements);
-  assert.equal(p.el('camera-prompt').value, 'Detect box.');
+  assert.equal(p.el('camera-prompt').value, '  red medicine bottle  ');
+  assert.equal(p.el('camera-prompt').disabled, false);
   p.state.error = true;
   await p.timers.shift()();
   await p.el('camera-capture').onclick();
-  assert.equal(p.requests.filter(r => r.url === '/api/images/capture').length, 1);
+  const captures = p.requests.filter(r => r.url === '/api/images/capture');
+  assert.equal(captures.length, 1);
+  assert.equal(JSON.parse(captures[0].options.body).prompt, 'red medicine bottle');
 });
 
 test('an uncreated new label prevents capture and duplicate clicks are ignored while saving', async () => {
@@ -116,6 +118,6 @@ test('bbox preview needs only a prompt, shows a result and clears it on prompt c
   assert.equal(p.el('camera-bbox-image').hidden, false);
   assert.match(p.el('camera-bbox-status').textContent, /2 bounding boxes/);
   assert.equal(p.requests.some(r => r.url === '/api/images/capture'), false);
-  p.el('camera-prompt').onchange();
+  p.el('camera-prompt').oninput();
   assert.equal(p.el('camera-bbox-image').hidden, true);
 });

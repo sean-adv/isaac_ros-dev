@@ -1,50 +1,14 @@
-# 可選：OmDet 匯出、離線文字提示更新及 ONNX 處理。
-#   python -m pip install -r dinov3_ws/requirements-build.txt
-# 另需 OmDet 與 detectron2 原始碼，見 README.md。
+# 可選模型建置依賴；平台專用的 torch / torchvision 請先另行安裝。
+#   python -m pip install -c dinov3_ws/constraints-thor.txt -r dinov3_ws/requirements-build.txt
+# DINOv3 另需 TensorRT-Model-Connect 原始碼及其建置依賴，見 BUILD_GUIDE.md。
 -r requirements.txt
 
+# DINOv3 權重下載、ONNX 匯出與 CUDA 驗證。
 huggingface-hub
-onnx
-# 沿用專案 README 與 OmDet 原始碼指定的相容版本。
 timm
-ftfy
-regex
-lmdb
-joblib
-fvcore>=0.1.5,<0.1.6
-iopath>=0.1.7,<0.1.10
-omegaconf>=2.1,<2.4
-hydra-core>=1.1
-pycocotools
-cloudpickle
-termcolor
-yacs
-tabulate
-matplotlib
-requests
-tqdm
-PyYAML
-
-# detectron2 宣告的其餘依賴；先準備這些再用 --no-deps 安裝原始碼。
-tensorboard
-black
-packaging
-
-# 可選：OmDet 建置環境的測試／精度比對依賴。
-# 使用 CPUExecutionProvider；不要同時安裝 onnxruntime 與 onnxruntime-gpu。
-pytest
-scipy
-onnxruntime
-
-# OmDet 目前 TensorRT 11.1 FP16 建置：一般依賴＋TensorRT＋ModelOpt ONNX extra。
-# Thor 部署請搭配 -c dinov3_ws/constraints-thor.txt。
+onnx
+cuda-python==13.0.3
 tensorrt==11.1.0.106
-nvidia-modelopt[onnx]==0.47.0
 
-
-# 此 extra 會選擇 CUDA / ONNX Runtime 套件，請依目標平台另行安裝，
-# 並確認提供 build_omdet.py 使用的 modelopt.onnx.autocast CLI。
-# 本機使用 nvidia-modelopt 0.47.0
-
-# SAM3 TRT11 strongly typed head conversion
+# 可選 SAM3 TRT11 head 轉換；目前 SAM3 推論使用獨立的 TRT10 環境。
 onnxconverter-common>=1.16,<2

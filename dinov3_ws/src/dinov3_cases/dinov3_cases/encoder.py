@@ -1,11 +1,11 @@
-"""DINOv3 TensorRT patch encoder shared by both deployment modes."""
+"""DINOv3 TensorRT patch encoder for gallery and object images."""
 
 import numpy as np
 import torch
 from transformers import AutoImageProcessor
 
 from .patches import run_dino_image
-from .runtime import ARTIFACTS, MODEL_ID, DINO_ENGINE
+from .runtime import MODEL_ID, DINO_ENGINE, DINO_MODEL
 from .trt_backend import TRTBackbone
 
 
@@ -15,7 +15,7 @@ class Encoder:
         self.device = str(self.model.device)
         self.description = self.model.description
         self.processor = AutoImageProcessor.from_pretrained(
-            MODEL_ID, cache_dir=str(ARTIFACTS / "huggingface"), local_files_only=True
+            str(DINO_MODEL), local_files_only=True
         )
 
     @torch.inference_mode()

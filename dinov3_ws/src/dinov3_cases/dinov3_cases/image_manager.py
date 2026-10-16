@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from flask import Flask, jsonify, request, send_file, render_template
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageOps, ImageDraw, ImageFont
 
 EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
@@ -194,17 +194,18 @@ def register_image_manager(app, root, on_change=None, capture=None):
             return jsonify(error="This image manager is not connected to a camera."), 503
         prompt = payload().get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Select an SAM3 prompt first.")
+            raise ValueError("Enter a SAM3 prompt first.")
         image, proposals = capture(prompt)
         preview = image.copy().convert("RGB")
         draw = ImageDraw.Draw(preview)
         width = max(2, round(min(preview.size) / 250))
+        font = ImageFont.load_default(size=max(24, round(min(preview.size) / 30)))
         for item in proposals:
             x0, y0, x1, y1 = item["bbox"]
             text = f"{item['detection_label']} {item['detection_score']:.0%}"
-            box = draw.textbbox((x0, y0), text)
+            box = draw.textbbox((x0, y0), text, font=font)
             draw.rectangle(box, fill="#101821")
-            draw.text((x0, y0), text, fill="#8ddcc4")
+            draw.text((x0, y0), text, fill="#8ddcc4", font=font)
             draw.rectangle((x0, y0, x1 - 1, y1 - 1), outline="#8ddcc4", width=width)
         response = png_response(preview)
         response.headers["X-Detection-Count"] = str(len(proposals))
@@ -221,7 +222,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
             raise ValueError("Create or select a label first.")
         prompt = data.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Select an SAM3 prompt first.")
+            raise ValueError("Enter a SAM3 prompt first.")
         image, proposals = capture(prompt)
         # Crop the very same raw frame sent to SAM3, at its original resolution.
         crops = [image.crop(item["bbox"]) for item in proposals]

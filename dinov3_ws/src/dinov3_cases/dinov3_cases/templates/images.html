@@ -31,15 +31,15 @@
 {% if camera_enabled %}
 <section id="camera-section">
 <h2>Capture Bounding Box Images from Camera</h2>
-<p class="muted">Create or select a label, then choose a prompt. Capture sends the current frame to SAM3 and saves each bounding box as a cropped PNG under that label, ready for background removal.</p>
+<p class="muted">Create or select a label, then enter a prompt. Capture sends the current frame to SAM3 and saves each bounding box as a cropped PNG under that label, ready for background removal.</p>
 <form id="camera-label-form">
 <input id="camera-label" aria-label="Camera image label" placeholder="Label, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}" list="case-list">
 <button id="camera-create">Create / Select Label</button>
 </form>
 <p id="camera-label-status" class="muted">No label selected</p>
-<label>SAM3 prompt <select id="camera-prompt" disabled><option value="">Loading…</option></select></label>
+<label>SAM3 prompt <input id="camera-prompt" type="text" placeholder="Enter an object description" autocomplete="off"></label>
 <div class="imagebox"><img id="camera-live" src="/camera.mjpg" alt="Live camera feed"></div>
-<div class="toolbar"><button id="camera-bbox-preview">Preview Bounding Boxes</button><span id="camera-bbox-status" role="status">Select a prompt to preview.</span></div>
+<div class="toolbar"><button id="camera-bbox-preview">Preview Bounding Boxes</button><span id="camera-bbox-status" role="status">Enter a prompt to preview.</span></div>
 <div class="imagebox"><img id="camera-bbox-image" hidden alt="SAM3 bounding box preview"></div>
 <p class="muted">The preview shows the frame captured when you click the button. Saving captures a new frame.</p>
 <p id="camera-status" role="status">Checking camera status…</p>

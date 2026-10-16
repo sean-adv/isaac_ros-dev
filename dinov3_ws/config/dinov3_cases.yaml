@@ -1,8 +1,8 @@
 dinov3_cases:
   ros__parameters:
     # SAM3: 1–4 comma-separated class names; text features cached per prompt.
-    grounding_prompt: 'medicine bottle, medicine box.'
-    grounding_box_threshold: 0.3
+    grounding_prompt: 'medicine bottle, box.'
+    grounding_box_threshold: 0.7
     grounding_nms_iou: 1.0  # SAM3 default: no NMS
     grounding_max_detections: 20
     # Original-image bbox after clipping/rounding; pixels / pixels squared.
@@ -21,7 +21,7 @@ dinov3_cases:
     # Count unique inference frames since this track's first detection, including misses.
     tracking_bbox_min_hit_ratio: 0.8
     tracking_bbox_min_detections: 6
-    # Both modes use fixed 224×224 DINOv3 inputs; paths are selected by run.sh.
+    # ViT-B/16 uses fixed 224×224 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
     preview_max_width: 960
     jpeg_quality: 80

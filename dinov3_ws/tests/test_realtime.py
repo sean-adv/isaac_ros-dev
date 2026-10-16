@@ -90,7 +90,7 @@ def test_blocked_ros_output_does_not_lock_input_and_skips_pending_frames():
         publish_changed=threading.Event(),
         lock=threading.Lock(),
         generation=0,
-        pending_publication=(None, [], Header(frame_id="first"), 0),
+        pending_publication=([], Header(frame_id="first"), 0),
         recognition_pub=Mock(),
         bbox3d_pub=Mock(),
         pub=Mock(),
@@ -110,8 +110,8 @@ def test_blocked_ros_output_does_not_lock_input_and_skips_pending_frames():
         assert entered.wait(3)
         assert node.lock.acquire(timeout=1), "DDS publication must not hold the input lock"
         try:
-            node.pending_publication = (None, [], Header(frame_id="obsolete"), 0)
-            node.pending_publication = (None, [], Header(frame_id="latest"), 0)
+            node.pending_publication = ([], Header(frame_id="obsolete"), 0)
+            node.pending_publication = ([], Header(frame_id="latest"), 0)
             node.publish_changed.set()
         finally:
             node.lock.release()
@@ -125,3 +125,61 @@ def test_blocked_ros_output_does_not_lock_input_and_skips_pending_frames():
         node.publish_changed.set()
         worker.join(3)
         assert not worker.is_alive()
+
+
+def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased():
+    import numpy as np
+    from std_msgs.msg import Header
+    from dinov3_cases.frame_pool import SharedFramePool
+
+    pool = SharedFramePool()
+    frame = pool.acquire(np.zeros((8, 8, 3), np.uint8))
+    entered, release, published = threading.Event(), threading.Event(), threading.Event()
+    lock = threading.Lock()
+    node = SimpleNamespace(
+        stop=threading.Event(), lock=lock, generation=0,
+        render_changed=threading.Event(), publish_changed=threading.Event(),
+        pending_render=(frame.retain(), [], Header(), 0, 7, None, 1.0),
+        pending_publication=([], Header(frame_id="bbox"), 0),
+        stream_changed=threading.Condition(lock), performance={"completed_at": 1.0},
+        jpeg=None, jpeg3d=None, stream_viewers={}, stream_requested_at={},
+        pub=Mock(), recognition_debug_pub=Mock(), recognition_pub=Mock(), bbox3d_pub=Mock(),
+        tag_pub=Mock(), param=lambda _: 80, bridge=Mock(), get_logger=lambda: Mock(),
+    )
+    node.wants_stream = lambda attr: CaseNode.wants_stream(node, attr)
+    for pub in (node.pub, node.recognition_debug_pub, node.bbox3d_pub, node.tag_pub):
+        pub.get_subscription_count.return_value = 0
+    node.recognition_pub.get_subscription_count.return_value = 1
+    node.recognition_pub.publish.side_effect = lambda _: published.set()
+
+    def encode(*args):
+        entered.set()
+        assert release.wait(3)
+        return True, np.array([1, 2], dtype=np.uint8)
+
+    renderer = threading.Thread(target=CaseNode.run_rendering, args=(node,))
+    publisher = threading.Thread(target=CaseNode.run_publications, args=(node,))
+    try:
+        with patch("dinov3_cases.node.cv2.imencode", side_effect=encode):
+            renderer.start()
+            publisher.start()
+            node.render_changed.set()
+            assert entered.wait(3)
+            frame.release()
+            assert pool.slots[0][1] == 1  # Renderer still owns the raw frame.
+            node.publish_changed.set()
+            assert published.wait(1), "bbox must not wait for JPEG"
+            release.set()
+            with node.stream_changed:
+                assert node.stream_changed.wait_for(lambda: node.jpeg is not None, timeout=3)
+            assert node.performance["overlay_frame_id"] == 7
+    finally:
+        release.set()
+        node.stop.set()
+        node.render_changed.set()
+        node.publish_changed.set()
+        renderer.join(3)
+        publisher.join(3)
+        frame.release()
+        pool.close()
+    assert all(slot[0] is None for slot in pool.slots)

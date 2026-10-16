@@ -6,25 +6,18 @@ import time
 import numpy as np
 import rclpy
 from dinov3_cases import node as pipeline
-from dinov3_cases.runtime import MODES, DINO_ENGINE, TRT_PYTHON, WORKSPACE
+from dinov3_cases.runtime import GROUNDING_ENGINE, DINO_ENGINE, GROUNDING_PYTHON, WORKSPACE
 from dinov3_cases.trt_backend import TRTBackbone
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=MODES, default='single')
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--warmup', type=int, default=10)
     parser.add_argument('--no-pose', action='store_true')
     parser.add_argument('--max-detections', type=int, default=20)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--gpu-grounding-preprocess', action='store_true')
     args = parser.parse_args()
-    if args.gpu_grounding_preprocess:
-        if args.mode != 'single':
-            parser.error('--gpu-grounding-preprocess requires --mode single')
-        from profile_grounding_stages import install_gpu_preprocessing
-        install_gpu_preprocessing()
     extras = {}
     def timed(cls, method, key):
         original = getattr(cls, method)
@@ -36,9 +29,6 @@ def main():
         setattr(cls, method, wrapper)
     timed(pipeline.Encoder, 'encode', 'roi_encode_ms')
     timed(TRTBackbone, '__call__', 'dinov3_trt_ms')
-    if args.mode == 'single':
-        from dinov3_cases.omdet_trt import OmDetDetector
-        timed(OmDetDetector, 'infer', 'omdet_trt_ms')
     class ProfileNode(pipeline.CaseNode):
         @property
         def performance(self):
@@ -66,10 +56,9 @@ def main():
             result = super().depth_inputs_for(frame)
             extras['depth_wait_ms'] = (time.monotonic() - start) * 1000
             return result
-    execution, engine = MODES[args.mode]
     ros_args = ['--ros-args', '--params-file', str(WORKSPACE / 'dinov3_ws/config/dinov3_cases.yaml')]
-    for key, value in dict(port=0, engine_path=DINO_ENGINE, grounding_engine_path=engine,
-                           grounding_execution=execution, grounding_worker_python=TRT_PYTHON,
+    for key, value in dict(port=0, engine_path=DINO_ENGINE, grounding_engine_path=GROUNDING_ENGINE,
+                           grounding_worker_python=GROUNDING_PYTHON,
                            pose_enabled=str(not args.no_pose).lower(), grounding_max_detections=args.max_detections).items():
         ros_args += ['-p', f'{key}:={value}']
     ProfileNode.arrivals = []
@@ -126,11 +115,13 @@ def main():
         node.image_changed.set()
         node.preview_changed.set()
         node.publish_changed.set()
+        node.render_changed.set()
         node.server.shutdown()
         node.worker.join(15)
         node.close_grounding_worker()
         node.preview_worker.join(3)
         node.publisher_worker.join(3)
+        node.renderer_worker.join(3)
         node.destroy_node()
         rclpy.shutdown()
 

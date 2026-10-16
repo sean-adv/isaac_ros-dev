@@ -60,16 +60,14 @@ def render_bbox_overlay(image, detections, info=None, mode="2d"):
         if bbox3d is not None:
             px, py, pz = bbox3d["position"]
             position_label = f"position (m): X={px:.3f} Y={py:.3f} Z={pz:.3f}"
-            distance_label = f"distance: {np.linalg.norm((px, py, pz)):.3f} m"
         else:
             position_label = "position: N/A"
-            distance_label = "distance: N/A"
         font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
         (_, text_height), baseline = cv2.getTextSize(
             label, font, font_scale, thickness
         )
         line_height = text_height + baseline + 8
-        label_lines = (label, position_label, distance_label)
+        label_lines = (label, position_label)
         label_y = max(
             text_height + 6,
             min(y0 - 8, overlay.shape[0] - (len(label_lines) - 1) * line_height - baseline - 6),

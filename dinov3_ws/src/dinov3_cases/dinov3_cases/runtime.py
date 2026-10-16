@@ -4,15 +4,12 @@ from pathlib import Path
 
 WORKSPACE = Path(__file__).resolve().parents[4]
 ARTIFACTS = WORKSPACE / "dinov3_ws/artifacts"
-MODEL_ID = "facebook/dinov3-vits16-pretrain-lvd1689m"
+MODEL_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
 GROUNDING_MODEL_ID = "facebook/sam3"
 INPUT_SIZE = 224
-DINO_ENGINE = ARTIFACTS / "dinov3_facebook_fp16/model.engine"
+DINO_ENGINE = WORKSPACE / "dinov3_tensorrt/artifacts/thor-vitb/vitb16-fp16-trt.ts"
+DINO_MODEL = WORKSPACE / "DART/models/dinov3-vitb16"
 SAM3_ASSETS = WORKSPACE / "DART/dartf/assets_bbox"
 GROUNDING_ENGINE = SAM3_ASSETS / "vision_int8.plan"
-TRT_PYTHON = WORKSPACE / "dinov3_trt11_venv/bin/python"
 GROUNDING_PYTHON = WORKSPACE / "DART/.venv/bin/python"
 SAM3_PLUGIN = WORKSPACE / "DART/dartf/plugins/lq_plugins.so"
-MODES = {
-    "split": ("subprocess", GROUNDING_ENGINE),
-}

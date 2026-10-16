@@ -82,7 +82,7 @@ def main():
                 assert overlap > .95 and score_error < .05, (name, overlap, score_error)
                 crop = image.crop(detection['bbox'])
                 features = encoder.encode(prepare_object(crop))
-                assert features.ndim == 2 and features.shape[-1] == 384
+                assert features.ndim == 2 and features.shape[-1] == 768
                 assert features.isfinite().all()
                 comparisons.append(dict(label=detection['detection_label'], iou=overlap,
                                         score_error=score_error, feature_shape=list(features.shape)))

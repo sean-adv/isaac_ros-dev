@@ -1,5 +1,7 @@
 # OMDet／DINOv3 推論延遲與 FP16／FP32 精度分析：Jetson Thor
 
+> 歷史量測報告：下文「目前」指分析當時的 OmDet／ViT-S 部署。現行 SAM3／ViT-B 的使用與建置請見 [BUILD_GUIDE.md](BUILD_GUIDE.md)；舊 OmDet 程式已移除。
+
 分析日期：2026-10-12（UTC）。分析對象是目前工作區部署的引擎；補測使用現有模型，未重建引擎、變更精度或調整電源／時脈。
 
 ## 1. 結論
@@ -188,17 +190,9 @@ GPU 單一階段延遲 ≥ max(該階段 FLOPs / 對應精度有效算力,
 - [OMDet 混合精度 layer 名稱](artifacts/performance/current_precision_latency/omdet_tiny_layers.json)
 - [OMDet FP32 layer 名稱](artifacts/performance/current_precision_latency/omdet_tiny_fp32_layers.json)
 - [DINOv3 layer 名稱](artifacts/performance/current_precision_latency/dinov3_vits16_fp16_224_layers.json)
-- [量測腳本](tests/analyze_precision_latency.py)
 - [OMDet metadata](artifacts/omdet/omdet_tiny.json)、[DINOv3 metadata](artifacts/tensorrt11/dinov3_vits16_fp16_224.json)
 - [OMDet 建置程式](build_omdet.py)、[OMDet adapter](src/dinov3_cases/dinov3_cases/omdet_trt.py)、[DINOv3 adapter](src/dinov3_cases/dinov3_cases/trt_backend.py)
 
-於工作區根目錄執行，輸出會更新本次分析的產物目錄，既有模型與驗證報告保持原樣：
+此為舊 OmDet 部署的歷史量測；對應的一次性量測腳本已移除，現有 JSON 報告仍保留。當前 SAM3 的測試與量測入口見 [測試說明](tests/README.md)。
 
-```bash
-PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases" \
-LD_LIBRARY_PATH="$PWD/dinov3_trt11_venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
-dinov3_trt11_venv/bin/python dinov3_ws/tests/analyze_precision_latency.py \
-  --warmup 10 --samples 60
-```
-
-量測腳本會驗證 OMDet engine／prompt hash、固定 I/O 與輸出有限值；沒有重新執行完整資料集準確率測試，也沒有重測目前 OMDet 相機端到端流程。DINOv3 的 FP32 引擎基準未部署於目前預設路徑，本次沒有虛構其 FP32 延遲或 FP16 加速倍率。
+當時的量測腳本驗證了 OMDet engine／prompt hash、固定 I/O 與輸出有限值；沒有重新執行完整資料集準確率測試，也沒有重測目前 OMDet 相機端到端流程。DINOv3 的 FP32 引擎基準未部署於目前預設路徑，本次沒有虛構其 FP32 延遲或 FP16 加速倍率。

@@ -39,14 +39,14 @@ def test_rgb_frame_identity_resize_and_shm_cleanup(proxy):
     p = proxy()
     assert p.worker_info["pid"] != os.getpid()
     assert detect(p)[0]["color"] == [255, 0, 0]
-    first_id, first_name = p.last_metrics["frame_id"], p.shm.name
+    first_id, first_name = p.last_metrics["frame_id"], p.pool.slots[0][0].name
     assert detect(p, "blue")[0]["color"] == [0, 0, 255]
-    assert p.shm.name == first_name
+    assert p.pool.slots[0][0].name == first_name
     assert p.last_metrics["frame_id"] > first_id
     assert detect(p, "green", (200, 100))[0]["bbox"] == [0, 0, 200, 100]
     with pytest.raises(FileNotFoundError):
         shared_memory.SharedMemory(name=first_name)
-    last_name = p.shm.name
+    last_name = p.pool.slots[0][0].name
     p.close()
     assert p.process.poll() is not None
     with pytest.raises(FileNotFoundError):
@@ -73,7 +73,7 @@ def test_bbox_limits_reach_worker(proxy, limits):
 def test_worker_crash_fails_and_releases_shm(proxy):
     p = proxy()
     detect(p)
-    name = p.shm.name
+    name = p.pool.slots[0][0].name
     p.process.kill()
     p.process.wait()
     with pytest.raises(RuntimeError, match="IPC failed"):
@@ -116,10 +116,32 @@ def test_close_interrupts_pending_request(proxy):
     while p.sequence == 0 and time.monotonic() < deadline:
         time.sleep(0.01)
     assert p.sequence > 0
-    name = p.shm.name
+    name = p.pool.slots[0][0].name
     p.close()
     thread.join(3)
     assert not thread.is_alive() and errors
     assert p.process.poll() is not None
     with pytest.raises(FileNotFoundError):
         shared_memory.SharedMemory(name=name)
+
+
+def test_external_pool_uses_same_pixels_without_transport_copy(proxy):
+    import numpy as np
+    from dinov3_cases.frame_pool import SharedFramePool
+    pool = SharedFramePool()
+    p = proxy()
+    frames = []
+    try:
+        for i in range(3):
+            frame = pool.acquire(np.full((20, 40, 3), i, np.uint8), frame_id=100+i)
+            frames.append(frame)
+            result = p.detect(frame, "box.", .3, .5, 20)
+            assert result[0]["color"] == [i, i, i]
+            assert p.last_metrics["source_frame_id"] == 100+i
+        assert all(slot[0] is None for slot in p.pool.slots)
+        p.close()
+        np.testing.assert_array_equal(frames[0].pixels, 0)  # Caller owns the pool.
+    finally:
+        for frame in frames:
+            frame.release()
+        pool.close()

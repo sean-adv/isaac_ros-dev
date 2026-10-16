@@ -1,9 +1,10 @@
-"""One in-flight RGB frame in shared memory; metadata over a private socketpair."""
+"""Leased RGB frames in shared memory; metadata over a private socketpair."""
 
 import json
 import os
 from pathlib import Path
 from multiprocessing import shared_memory, resource_tracker
+from .frame_pool import SharedFrame, SharedFramePool
 import socket
 import struct
 import subprocess
@@ -40,7 +41,7 @@ def _send(sock, value):
 
 
 class SharedMemoryGroundingDetector:
-    """Own a SAM3 subprocess and its reusable shared RGB buffer."""
+    """Own the SAM3 subprocess; accept leased frames without another image copy."""
 
     def __init__(
         self,
@@ -52,7 +53,7 @@ class SharedMemoryGroundingDetector:
         worker_module="dinov3_cases.grounding_ipc",
     ):
         self.lock = threading.RLock()
-        self.shm = None
+        self.pool = SharedFramePool()
         self.closed = False
         self.sequence = 0
         self.last_metrics = {}
@@ -95,7 +96,6 @@ class SharedMemoryGroundingDetector:
             if not ready.get("ok"):
                 raise RuntimeError(ready.get("error", "Grounding worker startup failed"))
             self.worker_info = ready["worker"]
-            self.offline_prompts = ready.get("offline_prompts", [])
             self.precision = ready.get("precision")
             self.sock.settimeout(self.timeout)
         except BaseException:
@@ -141,44 +141,46 @@ class SharedMemoryGroundingDetector:
                *, min_width=0, min_height=0, min_area=0):
         with self.lock:
             prepare_start = time.monotonic_ns()
-            pixels = np.asarray(
-                image if image.mode == "RGB" else image.convert("RGB"), dtype=np.uint8
-            )
+            owned = not isinstance(image, SharedFrame)
+            frame = self.pool.acquire(np.asarray(image.convert("RGB"))) if owned else image
+            if frame is None:
+                raise RuntimeError("No free shared frame slot")
             prepare_ms = (time.monotonic_ns() - prepare_start) / 1e6
-            size = pixels.nbytes
-            if size > MAX_IMAGE_BYTES:
-                raise ValueError("RGB frame exceeds 128 MiB shared-memory limit")
-            if self.closed:
-                raise RuntimeError("Grounding worker is closed; restart the pipeline")
-            if self.shm is None or self.shm.size < size:
-                previous = self.shm
-                self.shm = shared_memory.SharedMemory(create=True, size=size)
-                if previous is not None:
-                    previous.close()
-                    previous.unlink()
-            start = time.monotonic_ns()
-            np.ndarray(pixels.shape, dtype=np.uint8, buffer=self.shm.buf)[:] = pixels
-            copy_ms = (time.monotonic_ns() - start) / 1e6
-            reply = self._request(
-                "detect",
-                shm=self.shm.name,
-                shape=list(pixels.shape),
-                prompt=prompt,
-                box_threshold=box_threshold,
-                nms_iou=nms_iou,
-                limit=limit,
-                min_width=min_width,
-                min_height=min_height,
-                min_area=min_area,
-            )
-            self.last_metrics["shared_copy_ms"] = copy_ms
-            self.last_metrics["image_prepare_ms"] = prepare_ms
-            self.last_metrics["image_bytes"] = size
-            self.last_metrics["transport_total_ms"] = copy_ms + self.last_metrics["ipc_overhead_ms"]
-            self.last_metrics["input_and_transport_ms"] = (
-                prepare_ms + self.last_metrics["transport_total_ms"]
-            )
-            return reply["proposals"]
+            try:
+                return self._detect_frame(frame, prompt, box_threshold, nms_iou, limit,
+                                          min_width, min_height, min_area, prepare_ms)
+            finally:
+                if owned:
+                    frame.release()
+
+    def _detect_frame(self, frame, prompt, box_threshold, nms_iou, limit,
+                      min_width, min_height, min_area, prepare_ms):
+        copy_ms = frame.copy_ms
+        reply = self._request(
+            "detect",
+            shm=frame.shm.name,
+            slot=frame.slot,
+            shape=list(frame.shape),
+            source_frame_id=frame.frame_id,
+            timestamp=frame.timestamp,
+            encoding="rgb8",
+            prompt=prompt,
+            box_threshold=box_threshold,
+            nms_iou=nms_iou,
+            limit=limit,
+            min_width=min_width,
+            min_height=min_height,
+            min_area=min_area,
+        )
+        self.last_metrics["shared_copy_ms"] = copy_ms
+        self.last_metrics["image_prepare_ms"] = prepare_ms
+        self.last_metrics["image_bytes"] = int(np.prod(frame.shape))
+        self.last_metrics["source_frame_id"] = frame.frame_id
+        self.last_metrics["transport_total_ms"] = copy_ms + self.last_metrics["ipc_overhead_ms"]
+        self.last_metrics["input_and_transport_ms"] = (
+            prepare_ms + self.last_metrics["transport_total_ms"]
+        )
+        return reply["proposals"]
 
     def close(self):
         # Do not acquire the RPC lock: shutdown must interrupt a pending receive.
@@ -200,20 +202,14 @@ class SharedMemoryGroundingDetector:
                 process.kill()
                 process.wait()
         with self.lock:
-            if self.shm is not None:
-                self.shm.close()
-                try:
-                    self.shm.unlink()
-                except FileNotFoundError:
-                    pass
-                self.shm = None
+            self.pool.close()
 
 
 def worker_main(fd, detector_factory=None, version=None):
     from PIL import Image
 
     sock = socket.socket(fileno=fd)
-    attached = None
+    attached = {}
     try:
         config = _receive(sock)
         try:
@@ -232,7 +228,6 @@ def worker_main(fd, detector_factory=None, version=None):
             _send(
                 sock, dict(
                     ok=True, worker=version,
-                    offline_prompts=getattr(detector, "offline_prompts", []),
                     precision=getattr(detector, "precision", None),
                 )
             )
@@ -255,17 +250,22 @@ def worker_main(fd, detector_factory=None, version=None):
                         or int(np.prod(shape)) > MAX_IMAGE_BYTES
                     ):
                         raise ValueError("Invalid shared RGB image shape")
-                    if attached is None or attached.name != request["shm"]:
-                        if attached is not None:
-                            attached.close()
-                        attached = shared_memory.SharedMemory(name=request["shm"])
-                        # This independent interpreter must not unlink parent-owned SHM at exit.
-                        resource_tracker.unregister(attached._name, "shared_memory")
-                    if int(np.prod(shape)) > attached.size:
+                    name = request["shm"]
+                    slot = request["slot"]
+                    if type(slot) is not int or not 0 <= slot < 3:
+                        raise ValueError("Invalid shared frame slot")
+                    if slot not in attached or attached[slot].name != name:
+                        if slot in attached:
+                            attached[slot].close()
+                        mapping = shared_memory.SharedMemory(name=name)
+                        resource_tracker.unregister(mapping._name, "shared_memory")
+                        attached[slot] = mapping
+                    mapping = attached[slot]
+                    if int(np.prod(shape)) > mapping.size:
                         raise ValueError("Shared RGB shape exceeds allocated memory")
-                    pixels = np.ndarray(shape, dtype=np.uint8, buffer=attached.buf)
-                    # Parent holds its request lock until our response: the buffer
-                    # cannot be overwritten while this image is being consumed.
+                    pixels = np.ndarray(shape, dtype=np.uint8, buffer=mapping.buf)
+                    # The caller retains a frame lease until our response, so its
+                    # slot cannot be reused while this image is being consumed.
                     image = Image.fromarray(pixels)
                     del pixels
                     read_at = time.monotonic_ns()
@@ -302,8 +302,8 @@ def worker_main(fd, detector_factory=None, version=None):
     except (ConnectionError, BrokenPipeError):
         pass
     finally:
-        if attached is not None:
-            attached.close()
+        for mapping in attached.values():
+            mapping.close()
         sock.close()
 
 

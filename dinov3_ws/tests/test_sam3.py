@@ -17,7 +17,8 @@ def test_presence_score_and_original_coordinates():
     detector.lock = threading.RLock()
     detector.tokenizer = type('Tokenizer', (), {'encode': lambda self, text: [1, 2]})()
     detector._text_features = lambda labels: (4, np.zeros((32, 4, 256)), np.zeros((4, 32)))
-    def vision(feeds, want):
+    def vision(feeds, want, device_outputs):
+        assert device_outputs == ["fpn_2"]
         x = feeds['images']
         assert x.shape == (1, 3, 1008, 1008)
         assert np.all(x == -1)
@@ -25,7 +26,7 @@ def test_presence_score_and_original_coordinates():
     detector.vision = vision
     detector.positions = {4: np.zeros(1)}
     def head(feeds, want):
-        assert feeds['img_feat'].shape[0] == 4
+        assert feeds['img_feat'].shape[0] == 1  # Runner expands on device
         return {'scores': np.zeros((4, 1, 1)), 'presence': np.zeros((4, 1)),
                 'boxes': np.tile([[[0.5, 0.5, 0.5, 0.5]]], (4, 1, 1))}
     detector.heads = {4: head}

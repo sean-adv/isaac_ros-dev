@@ -109,8 +109,7 @@ def create_app(node):
                 grounding_model_id=GROUNDING_MODEL_ID,
                 grounding_backend="trt",
                 grounding_precision=getattr(getattr(node, "grounding_detector", None), "precision", None),
-                grounding_offline_prompts=([node.grounding_settings["prompt"], "medicine bottle, medicine box, bottle, box."] if getattr(node, "grounding_detector", None) is not None else []),
-                grounding_execution=node.param("grounding_execution"),
+                grounding_execution="subprocess",
                 grounding_worker=getattr(
                     getattr(node, "grounding_detector", None), "worker_info", None
                 ),
@@ -263,27 +262,39 @@ def create_app(node):
         return jsonify(ok=True)
 
     def stream(attribute):
+        if hasattr(node, "stream_requested_at"):
+            with node.lock:
+                node.stream_requested_at[attribute] = time.monotonic()
         def frames():
-            previous = None
-            while not node.stop.is_set():
-                with node.stream_changed:
-                    node.stream_changed.wait_for(
-                        lambda: node.stop.is_set() or getattr(node, attribute) is not previous,
-                        timeout=0.5,
-                    )
-                    data = getattr(node, attribute)
-                if data is None or data is previous:
+            tracked = hasattr(node, "stream_viewers")
+            if tracked:
+                with node.lock:
+                    node.stream_viewers[attribute] = node.stream_viewers.get(attribute, 0) + 1
+            try:
+                previous = None
+                while not node.stop.is_set():
+                    with node.stream_changed:
+                        node.stream_changed.wait_for(
+                            lambda: node.stop.is_set() or getattr(node, attribute) is not previous,
+                            timeout=0.5,
+                        )
+                        data = getattr(node, attribute)
+                    if data is None or data is previous:
+                        previous = data
+                        continue
                     previous = data
-                    continue
-                previous = data
-                # No per-client frame queue: slow clients pick the newest result next.
-                yield (
-                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                    + str(len(data)).encode()
-                    + b"\r\n\r\n"
-                    + data
-                    + b"\r\n"
-                )
+                    # No per-client frame queue: slow clients pick the newest result next.
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(data)).encode()
+                        + b"\r\n\r\n"
+                        + data
+                        + b"\r\n"
+                    )
+            finally:
+                if tracked:
+                    with node.lock:
+                        node.stream_viewers[attribute] -= 1
 
         return Response(
             frames(),
@@ -365,6 +376,8 @@ def create_app(node):
     def overlay():
         attribute = overlay_attribute()
         with node.lock:
+            if hasattr(node, "stream_requested_at"):
+                node.stream_requested_at[attribute] = time.monotonic()
             data = getattr(node, attribute, None)
         return Response(
             data or b"",

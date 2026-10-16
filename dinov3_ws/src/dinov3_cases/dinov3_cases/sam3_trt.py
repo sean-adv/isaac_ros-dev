@@ -48,7 +48,6 @@ class Sam3Detector:
         opts.intra_op_num_threads = 4
         self.text = ort.InferenceSession(str(self.assets / 'text_c16.onnx'), sess_options=opts, providers=['CPUExecutionProvider'])
         self.precision = 'W8A8 backbone / FP16 head'
-        self.offline_prompts = []
         self.cached_prompt = None
         self.lock = threading.RLock()
 
@@ -84,8 +83,8 @@ class Sam3Detector:
             x = np.ascontiguousarray(pixels.transpose(2, 0, 1), dtype=np.float32)
             x *= np.float32(1 / 127.5)
             x -= np.float32(1)
-            fpn = self.vision({'images': x[None]}, want=['fpn_2'])['fpn_2']
-            out = self.heads[bucket]({'img_feat': np.repeat(fpn, bucket, axis=0),
+            fpn = self.vision({'images': x[None]}, want=['fpn_2'], device_outputs=['fpn_2'])['fpn_2']
+            out = self.heads[bucket]({'img_feat': fpn,
                 'img_pos': self.positions[bucket], 'text_feats': tf, 'text_mask': tm}, want=['scores', 'boxes', 'presence'])
             if not all(np.isfinite(v).all() for v in out.values()):
                 raise RuntimeError('Non-finite SAM3 outputs')

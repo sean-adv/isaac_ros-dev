@@ -2,7 +2,7 @@
 <package format="3">
   <name>dinov3_cases</name>
   <version>0.2.0</version>
-  <description>OmDet and DINOv3 TensorRT object recognition</description>
+  <description>SAM3 and DINOv3 TensorRT object recognition</description>
   <maintainer email="admin@example.com">admin</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>

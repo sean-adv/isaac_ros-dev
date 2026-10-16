@@ -159,15 +159,6 @@ def test_invalid_runtime_settings(key, value):
         validate_settings(**settings)
 
 
-def test_detector_uses_original_image_size_and_class_labels():
-    from dinov3_cases.omdet_trt import postprocess
-    boxes = torch.tensor([[[0.5, 0.5, 0.8, 0.8]]])
-    logits = torch.tensor([[[torch.logit(torch.tensor(0.9))]]])
-    result = postprocess(boxes, logits, ["bottle"], (100, 50), 0.3, 0.5, 20)
-    np.testing.assert_allclose(result[0]["bbox"], [10, 5, 90, 45], atol=1)
-    assert result[0]["detection_label"] == "bottle"
-
-
 def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
     class CountingEncoder(ColorEncoder):
         calls = 0

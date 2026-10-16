@@ -1,4 +1,4 @@
-"""TensorRT adapter for DINOv3 ViT-S/16."""
+"""TensorRT adapters for DINOv3 ViT-B/16 and legacy ViT-S/16 engines."""
 
 import json
 from pathlib import Path
@@ -9,7 +9,11 @@ import torch
 from .runtime import MODEL_ID, DINO_ENGINE
 
 
-MODEL_SPEC = dict(patch_size=16, num_register_tokens=4, hidden_size=384)
+MODEL_SPECS = {
+    MODEL_ID: dict(patch_size=16, num_register_tokens=4, hidden_size=768),
+    "facebook/dinov3-vits16-pretrain-lvd1689m":
+        dict(patch_size=16, num_register_tokens=4, hidden_size=384),
+}
 
 
 def validate_shape(shape, minimum, maximum):
@@ -18,18 +22,18 @@ def validate_shape(shape, minimum, maximum):
     if any(n < low or n > high for n, low, high in zip(shape, minimum, maximum)):
         raise ValueError(
             f"TRT input {shape} is outside {minimum} .. {maximum}; "
-            "use the 224×224 input defined in README.md."
+            "use the 224×224 input defined in BUILD_GUIDE.md."
         )
 
 
 class TRTBackbone:
     def __init__(self, engine_path=DINO_ENGINE, model_id=MODEL_ID):
-        if model_id != MODEL_ID:
+        if model_id not in MODEL_SPECS:
             raise ValueError(f"Unsupported TRT model_id={model_id!r}; expected {MODEL_ID}.")
-        spec = MODEL_SPEC
+        spec = MODEL_SPECS[model_id]
         path = Path(engine_path).expanduser().resolve()
         if not path.is_file():
-            raise FileNotFoundError(f"TRT engine not found: {path}; see README.md.")
+            raise FileNotFoundError(f"TRT engine not found: {path}; see BUILD_GUIDE.md.")
         if not torch.cuda.is_available():
             raise RuntimeError("TensorRT requires a CUDA GPU; no CPU fallback is performed.")
         import tensorrt as trt
@@ -41,7 +45,19 @@ class TRTBackbone:
             num_register_tokens=spec["num_register_tokens"],
             hidden_size=spec["hidden_size"],
         )
-        self.description = "TensorRT vits16 (FP32 I/O)"
+        self.lock = threading.Lock()
+        self.scripted = None
+        variant = "vitb16" if spec["hidden_size"] == 768 else "vits16"
+        if path.suffix == ".ts":
+            if model_id != MODEL_ID:
+                raise ValueError("The Torch-TensorRT artifact requires the ViT-B model_id.")
+            import torch_tensorrt  # Registers serialized TensorRT TorchScript operators.
+
+            self.scripted = torch.jit.load(str(path), map_location=self.device).eval()
+            self.minimum = self.maximum = (1, 3, 224, 224)
+            self.description = "Torch-TensorRT vitb16 FP16 (224×224)"
+            return
+        self.description = f"TensorRT {variant} (FP32 I/O)"
         metadata = path.with_suffix(".json")
         if metadata.is_file():
             info = json.loads(metadata.read_text())
@@ -50,7 +66,7 @@ class TRTBackbone:
             for key in ("patch_size", "num_register_tokens", "hidden_size"):
                 if info.get(key) != spec[key]:
                     raise ValueError(f"Engine metadata {key} mismatch.")
-            self.description = f"TensorRT vits16 {info['precision']}"
+            self.description = f"TensorRT {variant} {info['precision']}"
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.runtime = trt.Runtime(self.logger)
         self.engine = self.runtime.deserialize_cuda_engine(path.read_bytes())
@@ -89,7 +105,6 @@ class TRTBackbone:
         self.context = self.engine.create_execution_context()
         if self.context is None:
             raise RuntimeError("Could not create TensorRT execution context.")
-        self.lock = threading.Lock()
 
     @torch.inference_mode()
     def __call__(self, pixel_values):
@@ -98,6 +113,14 @@ class TRTBackbone:
         if pixel_values.device != self.device:
             raise ValueError(f"TRT input must be on {self.device}, got {pixel_values.device}.")
         with self.lock, torch.cuda.device(self.device):
+            if self.scripted is not None:
+                x = pixel_values.to(dtype=torch.float16).contiguous()
+                y = self.scripted(x)
+                torch.cuda.current_stream(self.device).synchronize()
+                expected = (1, 201, self.config.hidden_size)
+                if tuple(y.shape) != expected:
+                    raise RuntimeError(f"TRT output shape {tuple(y.shape)}, expected {expected}.")
+                return SimpleNamespace(last_hidden_state=y)
             x = pixel_values.to(dtype=torch.float32).contiguous()
             if not self.context.set_input_shape("pixel_values", shape):
                 raise RuntimeError(f"TRT rejected input shape {shape}.")
