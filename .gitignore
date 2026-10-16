@@ -36,3 +36,5 @@ sam2_trt_inference/
 DART/
 /dinov3_ws/artifacts/sam3/
 copy/
+dinov3_tensorrt/
+sam2_trt_inference/
