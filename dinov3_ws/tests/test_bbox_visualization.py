@@ -1,4 +1,4 @@
-"""Calibrated wireframe projection and independent web overlay selection."""
+"""Calibrated wireframe projection and configuration-selected web overlays."""
 from types import SimpleNamespace
 from unittest.mock import patch
 import threading
@@ -68,31 +68,30 @@ def test_modes_share_input_without_drawing_2d_fallback_in_3d():
     del detection["bbox3d"]
     assert np.array_equal(render_bbox_overlay(image, [detection], calibration(), "3d"), image)
     detection = item()
-    detection["label"] = "unknown"
-    assert np.array_equal(render_bbox_overlay(image, [detection], calibration(), "3d"), image)
-    detection = item()
     detection["bbox_visible"] = False
     assert np.array_equal(render_bbox_overlay(image, [detection], calibration(), "3d"), image)
 
 
-def test_web_modes_serve_separate_cached_images_and_validate_selection(tmp_path):
+@pytest.mark.parametrize("mode", ["2d", "3d"])
+def test_web_serves_only_configured_overlay_and_has_no_mode_switch(tmp_path, mode):
     lock = threading.Lock()
+    cached = (mode + "-configured").encode()
     node = SimpleNamespace(root=tmp_path, lock=lock, stream_changed=threading.Condition(lock),
-                           stop=threading.Event(), jpeg=b"two-dimensional", jpeg3d=b"three-dimensional")
+                           stop=threading.Event(), jpeg=cached, bbox_visualization_mode=mode)
     app = create_app(node)
     client = app.test_client()
-    assert client.get('/overlay.jpg').data == b"two-dimensional"
-    assert client.get('/overlay.jpg?bbox=2d').data == b"two-dimensional"
-    assert client.get('/overlay.jpg?bbox=3d').data == b"three-dimensional"
-    assert client.get('/overlay.jpg?bbox=wrong').status_code == 400
-    assert client.get('/overlay.mjpg?bbox=wrong').status_code == 400
-    with app.test_request_context('/overlay.mjpg?bbox=3d'):
+    assert client.get('/overlay.jpg').data == cached
+    # Old browser URLs cannot select another mode or trigger another render.
+    for query in ('2d', '3d', 'wrong'):
+        assert client.get('/overlay.jpg?bbox=' + query).data == cached
+    with app.test_request_context('/overlay.mjpg?bbox=2d'):
         response = app.view_functions['overlay_stream']()
         frames = iter(response.response)
-        assert b"three-dimensional" in next(frames)
+        assert cached in next(frames)
         frames.close()
     html = client.get('/').data
-    assert b'id="bbox-view"' in html and b'value="3d"' in html
+    assert b'id="bbox-view"' not in html
+    assert (b'Showing projected 3D' if mode == '3d' else b'Showing original 2D') in html
 
 
 def test_frame_local_detection_renders_without_track_id():
@@ -102,3 +101,64 @@ def test_frame_local_detection_renders_without_track_id():
     rendered = render_bbox_overlay(image, [detection])
     assert not np.array_equal(rendered, image)
     assert "track_id" not in detection
+
+
+@pytest.mark.parametrize("label", ["medicine", "unknown"])
+@pytest.mark.parametrize("visible", [True, False])
+def test_2d_and_3d_share_visibility_for_all_labels(label, visible):
+    image = np.zeros((120, 160, 3), np.uint8)
+    detection = item()
+    detection.update(label=label, bbox_visible=visible)
+    for mode in ("2d", "3d"):
+        rendered = render_bbox_overlay(image, [detection], calibration(), mode)
+        assert bool(rendered.any()) == visible
+        if visible:
+            color = (0, 190, 255) if label == "unknown" else (60, 220, 80)
+            assert np.any(np.all(rendered == color, axis=2))
+
+
+@pytest.mark.parametrize("model", ["plumb_bob", "equidistant"])
+def test_browser_projection_scales_pixels_without_changing_metric_data(model):
+    from copy import deepcopy
+    from dinov3_cases.visualization import render_display_overlay
+
+    image = np.zeros((120, 160, 3), np.uint8)
+    detection, info = item(), calibration(model)
+    info.d = [.1, -.02, .001, .002] + ([] if model == "equidistant" else [.005])
+    original_detection, original_info = deepcopy(detection), deepcopy(info)
+    project_name = ("dinov3_cases.visualization.cv2.fisheye.projectPoints"
+                    if model == "equidistant" else "dinov3_cases.visualization.cv2.projectPoints")
+    project = cv2.fisheye.projectPoints if model == "equidistant" else cv2.projectPoints
+    projections = []
+
+    def capture(*args, **kwargs):
+        result = project(*args, **kwargs)
+        projections.append(result[0].reshape(-1, 2).copy())
+        return result
+
+    with patch(project_name, side_effect=capture), \
+            patch("dinov3_cases.visualization.render_bbox_overlay",
+                  wraps=render_bbox_overlay) as render:
+        render_bbox_overlay(image, [detection], info, "3d")
+        display = render_display_overlay(image, [detection], info, "3d")
+    assert display.shape == (540, 960, 3)
+    assert display.any() and not image.any()
+    np.testing.assert_allclose(projections[1], projections[0] * [6., 4.5])
+    scaled_item = render.call_args.args[1][0]
+    assert scaled_item["bbox"] == [240, 90, 726, 454]
+    assert scaled_item["bbox3d"] == original_detection["bbox3d"]
+    assert detection == original_detection and info == original_info
+
+
+def test_browser_2d_coordinates_and_resize_before_color_conversion():
+    from dinov3_cases.visualization import render_display_overlay
+
+    rgb = np.full((1080, 1920, 3), [200, 80, 30], dtype=np.uint8)
+    detection = item()
+    with patch("dinov3_cases.visualization.cv2.cvtColor", wraps=cv2.cvtColor) as convert, \
+            patch("dinov3_cases.visualization.cv2.rectangle", wraps=cv2.rectangle) as rectangle:
+        display = render_display_overlay(rgb, [detection], mode="2d")
+    assert convert.call_args.args[0].shape == (540, 960, 3)
+    assert rectangle.call_args.args[1:3] == ((20, 10), (59, 49))
+    assert tuple(display[-1, -1]) == (30, 80, 200)
+    assert tuple(rgb[-1, -1]) == (200, 80, 30)

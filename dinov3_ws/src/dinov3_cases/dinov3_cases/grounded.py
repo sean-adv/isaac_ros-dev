@@ -216,10 +216,8 @@ def object_debug_views(roi, prepared, features, reference_patches, max_side, str
     roi_size = roi.size if roi_size is None else roi_size
     scale = max_side / max(roi_size)
     content_w, content_h = [max(1, round(n * scale)) for n in roi_size]
-    preview = roi.copy()
-    preview.thumbnail((640, 640), Image.Resampling.LANCZOS)
     views = dict(
-        crop=cv2.cvtColor(np.asarray(preview), cv2.COLOR_RGB2BGR),
+        crop=cv2.cvtColor(np.asarray(roi), cv2.COLOR_RGB2BGR),
         grid=cv2.cvtColor(np.asarray(reference_grid_image(prepared, stride)), cv2.COLOR_RGB2BGR),
     )
     # Mark the real ROI's edge; the right/bottom remainder is replicate padding.
@@ -227,7 +225,7 @@ def object_debug_views(roi, prepared, features, reference_patches, max_side, str
     metadata = dict(
         roi_size=list(roi_size),
         input_size=list(prepared.size),
-        preview_size=list(preview.size),
+        preview_size=list(roi.size),
         content_size=[content_w, content_h],
         patch_grid=[gh, gw],
         heatmap_available=reference_patches is not None,
@@ -248,7 +246,7 @@ def object_debug_views(roi, prepared, features, reference_patches, max_side, str
     pixels = cv2.resize(scores, prepared.size, interpolation=cv2.INTER_LINEAR)[
         :content_h, :content_w
     ]
-    mapped = cv2.resize(pixels, preview.size, interpolation=cv2.INTER_LINEAR)
+    mapped = cv2.resize(pixels, roi.size, interpolation=cv2.INTER_LINEAR)
     views["similarity"] = color(mapped)
     views["heatmap"] = cv2.addWeighted(views["crop"], 0.55, views["similarity"], 0.45, 0)
     metadata.update(similarity_min=float(mapped.min()), similarity_max=float(mapped.max()))
@@ -305,15 +303,6 @@ def encode_object_diagnostics(detections, diagnostics):
     images, items = {}, []
     for index, (item, diagnostic) in enumerate(zip(detections, diagnostics)):
         for view, pixels in diagnostic["views"].items():
-            if max(pixels.shape[:2]) > 640:
-                scale = 640 / max(pixels.shape[:2])
-                pixels = cv2.resize(
-                    pixels,
-                    (
-                        max(1, round(pixels.shape[1] * scale)),
-                        max(1, round(pixels.shape[0] * scale)),
-                    ),
-                )
             ok, data = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, 85])
             if not ok:
                 raise RuntimeError(f"Object {index} {view} JPEG encoding failed.")
@@ -386,10 +375,9 @@ def recognize_objects(
         classification = gallery.classify(descriptor, threshold, margin)
         result = dict(proposal, **classification)
         if diagnostics is not None:
-            preview = roi.copy()
-            preview.thumbnail((640, 640), Image.Resampling.LANCZOS)
+            # The crop already owns its pixels; retain it for on-demand diagnostics.
             context = dict(
-                roi=preview,
+                roi=roi,
                 roi_size=roi.size,
                 prepared=prepared,
                 patches=patches,
@@ -403,6 +391,75 @@ def recognize_objects(
         results.append(result)
     return results
 
+
+
+class TrackedObjectRecognizer:
+    """Reuse classifications in stable KCF list order within one tracker set.
+
+    A new tracker-set object (or a new synchronous SAM3 frame) is a new token.
+    No spatial matching or public numeric IDs are used across tracker sets.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.token = None
+        self.classifications = None
+        self.diagnostics = []
+        self.diagnostic_proposals = []
+        self.classification_key = None
+        self.encoded = False
+
+    @property
+    def diagnostic_detections(self):
+        return [dict(proposal, **classification)
+                for proposal, classification in zip(self.diagnostic_proposals,
+                                                      self.classifications or [])]
+
+    def update(self, pixels, proposals, encoder, gallery, max_side, stride,
+               threshold, margin, *, token, gallery_revision):
+        key = (gallery_revision, threshold, margin)
+        self.encoded = False
+        if not proposals:
+            changed = (token != self.token or self.classifications != []
+                       or key != self.classification_key)
+            self.reset()
+            self.token, self.classification_key = token, key
+            self.classifications = []
+            return [], [], changed
+
+        fresh = token != self.token or self.classifications is None
+        if fresh:
+            diagnostics = []
+            detections = recognize_objects(
+                Image.fromarray(pixels), proposals, encoder, gallery, max_side, stride,
+                threshold, margin, diagnostics=diagnostics, defer_diagnostics=True,
+            )
+            fields = ("label", "score", "candidate", "margin", "reason", "reference")
+            classifications = [{k: item[k] for k in fields if k in item}
+                               for item in detections]
+            # Commit only a complete successful recognition of the new set.
+            self.token = token
+            self.diagnostics = diagnostics
+            self.diagnostic_proposals = [dict(p, bbox=list(p["bbox"])) for p in proposals]
+            self.classifications = classifications
+            self.classification_key = key
+            self.encoded = True
+        else:
+            if len(proposals) != len(self.classifications):
+                raise ValueError("KCF object count changed without a new tracker set.")
+            if key != self.classification_key:
+                # Gallery edits can reclassify existing descriptors without a new forward.
+                self.classifications = [
+                    gallery.classify(item["context"]["descriptor"], threshold, margin)
+                    for item in self.diagnostics
+                ]
+                self.classification_key = key
+                return ([dict(p, **c) for p, c in zip(proposals, self.classifications)],
+                        self.diagnostics, True)
+        return ([dict(p, **c) for p, c in zip(proposals, self.classifications)],
+                self.diagnostics, fresh)
 
 def recognition_message(items, header=None):
     from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose

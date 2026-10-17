@@ -56,6 +56,12 @@ small {
   image-rendering: pixelated
 }
 
+#object-gallery img {
+  width: auto;
+  height: auto;
+  max-width: 100%
+}
+
 .reference-card figcaption {
   margin-top: 10px
 }

@@ -53,12 +53,12 @@ def test_lists_every_reference_with_actual_resize_even_without_target(gallery):
     assert "error" in data["images"][0]
     item = data["images"][1]
     assert item["original_size"] == [101, 65]
-    assert item["size"] == [160, 160]
-    assert (item["rows"], item["columns"]) == (10, 10)
+    assert item["size"] == [224, 224]
+    assert (item["rows"], item["columns"]) == (14, 14)
     response = client.get("/api/references/grid/sample/one.png")
     assert response.status_code == 200
     assert response.mimetype == "image/png"
-    assert Image.open(BytesIO(response.data)).size == (160, 160)
+    assert Image.open(BytesIO(response.data)).size == (224, 224)
 
 
 def test_loading_invalid_paths_and_symlinks(gallery):

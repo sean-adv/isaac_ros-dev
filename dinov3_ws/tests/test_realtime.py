@@ -127,7 +127,8 @@ def test_blocked_ros_output_does_not_lock_input_and_skips_pending_frames():
         assert not worker.is_alive()
 
 
-def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased():
+@pytest.mark.parametrize("mode", ["2d", "3d"])
+def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased(mode):
     import numpy as np
     from std_msgs.msg import Header
     from dinov3_cases.frame_pool import SharedFramePool
@@ -142,7 +143,7 @@ def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased():
         pending_render=(frame.retain(), [], Header(), 0, 7, None, 1.0),
         pending_publication=([], Header(frame_id="bbox"), 0),
         stream_changed=threading.Condition(lock), performance={"completed_at": 1.0},
-        jpeg=None, jpeg3d=None, stream_viewers={}, stream_requested_at={},
+        jpeg=None, bbox_visualization_mode=mode, stream_viewers={}, stream_requested_at={},
         pub=Mock(), recognition_debug_pub=Mock(), recognition_pub=Mock(), bbox3d_pub=Mock(),
         tag_pub=Mock(), param=lambda _: 80, bridge=Mock(), get_logger=lambda: Mock(),
     )
@@ -160,7 +161,9 @@ def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased():
     renderer = threading.Thread(target=CaseNode.run_rendering, args=(node,))
     publisher = threading.Thread(target=CaseNode.run_publications, args=(node,))
     try:
-        with patch("dinov3_cases.node.cv2.imencode", side_effect=encode):
+        with patch("dinov3_cases.node.cv2.imencode", side_effect=encode) as jpeg_encode, \
+                patch("dinov3_cases.node.render_display_overlay",
+                      side_effect=lambda pixels, *args: pixels.copy()) as render:
             renderer.start()
             publisher.start()
             node.render_changed.set()
@@ -173,6 +176,9 @@ def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased():
             with node.stream_changed:
                 assert node.stream_changed.wait_for(lambda: node.jpeg is not None, timeout=3)
             assert node.performance["overlay_frame_id"] == 7
+            assert render.call_count == 1
+            assert render.call_args.args[3] == mode
+            assert jpeg_encode.call_count == 1
     finally:
         release.set()
         node.stop.set()
@@ -183,3 +189,42 @@ def test_jpeg_block_does_not_block_bbox_publication_and_frame_is_leased():
         frame.release()
         pool.close()
     assert all(slot[0] is None for slot in pool.slots)
+
+
+@pytest.mark.parametrize("ros_reader", [False, True])
+def test_browser_renders_small_canvas_and_ros_full_size_only_with_subscribers(ros_reader):
+    import numpy as np
+    import cv2
+    from std_msgs.msg import Header
+    from dinov3_cases.visualization import render_bbox_overlay, render_display_overlay
+
+    lock = threading.Lock()
+    frame = Mock(pixels=np.zeros((1080, 1920, 3), np.uint8))
+    publisher = Mock()
+    publisher.get_subscription_count.return_value = int(ros_reader)
+    node = SimpleNamespace(
+        stop=Mock(), lock=lock, generation=0,
+        render_changed=threading.Event(),
+        pending_render=(frame, [], Header(), 0, 7, None, 1.0),
+        stream_changed=threading.Condition(lock), performance={"completed_at": 1.0},
+        jpeg=None, bbox_visualization_mode="3d", wants_stream=lambda _: True,
+        pub=publisher, recognition_debug_pub=Mock(), param=lambda _: 70,
+        bridge=Mock(), get_logger=lambda: Mock(),
+    )
+    node.stop.is_set.side_effect = [False, True]
+    node.recognition_debug_pub.get_subscription_count.return_value = 0
+    node.render_changed.set()
+    with patch("dinov3_cases.node.render_bbox_overlay", wraps=render_bbox_overlay) as full_render, \
+            patch("dinov3_cases.node.render_display_overlay", wraps=render_display_overlay) as small_render:
+        CaseNode.run_rendering(node)
+    assert small_render.call_count == 1
+    assert full_render.call_count == int(ros_reader)
+    decoded = cv2.imdecode(np.frombuffer(node.jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    assert decoded.shape == (540, 960, 3)
+    if ros_reader:
+        assert node.bridge.cv2_to_imgmsg.call_args.args[0].shape == (1080, 1920, 3)
+        publisher.publish.assert_called_once()
+    else:
+        node.bridge.cv2_to_imgmsg.assert_not_called()
+    frame.release.assert_called_once()
+    node.get_logger().error.assert_not_called()

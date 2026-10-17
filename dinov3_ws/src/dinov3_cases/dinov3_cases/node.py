@@ -9,7 +9,6 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
-from PIL import Image
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -24,6 +23,7 @@ from .grounding_ipc import SharedMemoryGroundingDetector
 from .frame_pool import SharedFramePool
 from .tracking import BBoxSmoother, ROITracker
 from .kcf import KCFProposals, kcf_factory
+from .async_kcf import AsyncKCFProposals, validate_replay_limits
 from .runtime import (
     WORKSPACE,
     DINO_ENGINE,
@@ -37,16 +37,26 @@ from .apriltag import apriltag_message
 from .depth_sync import matched_inputs
 from .depth_bbox import attach_bboxes3d, bboxes3d_message
 from .web import create_app
-from .visualization import render_bbox_overlay
+from .visualization import render_bbox_overlay, render_display_overlay
 from .grounded import (
     DEFAULT_PROMPT,
     ObjectGallery,
     validate_settings,
     validate_bbox_limits,
-    recognize_objects,
+    TrackedObjectRecognizer,
     recognition_message,
     ObjectVisualizationSnapshot,
 )
+
+
+def encode_display_jpeg(pixels, quality):
+    """Encode browser images at one fixed size, with at most one resize."""
+    if pixels.shape[:2] != (540, 960):
+        pixels = cv2.resize(pixels, (960, 540), interpolation=cv2.INTER_AREA)
+    ok, data = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise RuntimeError("JPEG encoding failed")
+    return data.tobytes()
 
 
 class CaseNode(Node):
@@ -63,6 +73,10 @@ class CaseNode(Node):
             grounding_max_detections=20,
             grounding_detection_interval=1,
             bbox_smoothing_frames=3,
+            kcf_roi_padding=0.5,
+            opencv_num_threads=0,
+            kcf_replay_max_frames=8,
+            kcf_replay_budget_ms=150.0,
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
@@ -89,12 +103,24 @@ class CaseNode(Node):
             port=8090,
             host="127.0.0.1",
             inference_hz=0.0,
-            preview_max_width=960,
-            jpeg_quality=80,
+            jpeg_quality=70,
+            bbox_visualization_mode="3d",
         )
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
+        self.bbox_visualization_mode = self.param("bbox_visualization_mode")
+        if self.bbox_visualization_mode not in ("2d", "3d"):
+            raise ValueError("bbox_visualization_mode must be 2d or 3d.")
+        opencv_threads = self.param("opencv_num_threads")
+        if isinstance(opencv_threads, bool) or not isinstance(opencv_threads, int) or opencv_threads < 0:
+            raise ValueError("opencv_num_threads must be an integer >= 0 (0 keeps the OpenCV default).")
+        # Set the global OpenCV pool before starting inference/render workers.
+        if opencv_threads > 0:
+            cv2.setNumThreads(opencv_threads)
+        validate_replay_limits(self.param("kcf_replay_max_frames"),
+                               self.param("kcf_replay_budget_ms"))
+        KCFProposals(roi_padding=self.param("kcf_roi_padding"))
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
         self.tracker = ROITracker(
             self.param("tracking_max_missed"),
@@ -129,8 +155,8 @@ class CaseNode(Node):
             raise ValueError("grounding_ipc_timeout must be positive.")
         if not np.isfinite(self.param("inference_hz")) or self.param("inference_hz") < 0:
             raise ValueError("inference_hz must be finite and nonnegative; 0 is unlimited.")
-        if not 1 <= self.param("jpeg_quality") <= 100 or self.param("preview_max_width") < 1:
-            raise ValueError("jpeg_quality must be 1–100 and preview_max_width must be positive.")
+        if not 1 <= self.param("jpeg_quality") <= 100:
+            raise ValueError("jpeg_quality must be 1–100.")
         for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
             if not np.isfinite(self.param(name)) or self.param(name) <= 0:
                 raise ValueError(f"{name} must be finite and positive.")
@@ -166,7 +192,6 @@ class CaseNode(Node):
         self.frame = None
         self.frame_seq = 0
         self.jpeg = None
-        self.jpeg3d = None
         self.clear_object_debug()
         self.detections = []
         self.preview_jpeg = None
@@ -192,7 +217,8 @@ class CaseNode(Node):
             ImageMsg, "/medicine_recognition/debug_image", 1
         )
         image_qos = QoSProfile(
-            history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.BEST_EFFORT
+            history=HistoryPolicy.KEEP_LAST, depth=1,
+            reliability=ReliabilityPolicy.RELIABLE
         )
         self.create_subscription(ImageMsg, self.param("image_topic"), self.on_image, image_qos)
         if self.param("pose_enabled"):
@@ -337,27 +363,23 @@ class CaseNode(Node):
                 with self.lock:
                     if gen != self.generation:
                         continue
-                want2d, want3d = self.wants_stream("jpeg"), self.wants_stream("jpeg3d")
+                want_jpeg = self.wants_stream("jpeg")
                 publishers = [p for p in (self.pub, self.recognition_debug_pub)
                               if p.get_subscription_count()]
-                if not (want2d or want3d or publishers):
+                if not (want_jpeg or publishers):
                     continue
                 start = time.monotonic()
-                bgr = cv2.cvtColor(frame.pixels, cv2.COLOR_RGB2BGR)
-                overlay = render_bbox_overlay(bgr, detections, info, "2d") if want2d or publishers else None
-                encoded = {}
-                for attribute, wanted, mode in (("jpeg", want2d, "2d"), ("jpeg3d", want3d, "3d")):
-                    if wanted:
-                        pixels = overlay if mode == "2d" else render_bbox_overlay(bgr, detections, info, mode)
-                        ok, data = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")])
-                        if not ok:
-                            raise RuntimeError("JPEG encoding failed")
-                        encoded[attribute] = data.tobytes()
+                jpeg = None
+                if want_jpeg:
+                    display = render_display_overlay(
+                        frame.pixels, detections, info, self.bbox_visualization_mode
+                    )
+                    jpeg = encode_display_jpeg(display, self.param("jpeg_quality"))
                 with self.lock:
                     if gen != self.generation:
                         continue
-                    for attribute, data in encoded.items():
-                        setattr(self, attribute, data)
+                    if want_jpeg:
+                        self.jpeg = jpeg
                     self.overlay_at = time.monotonic()
                     if self.performance.get("completed_at") == completed_at:
                         self.performance["render_ms"] = (self.overlay_at - start) * 1000
@@ -365,6 +387,9 @@ class CaseNode(Node):
                         self.performance["overlay_frame_id"] = seq
                     self.stream_changed.notify_all()
                 if publishers:
+                    # Full-resolution debug output is rendered only for ROS readers.
+                    bgr = cv2.cvtColor(frame.pixels, cv2.COLOR_RGB2BGR)
+                    overlay = render_bbox_overlay(bgr, detections, info, self.bbox_visualization_mode)
                     out = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
                     out.header = header if header is not None else Header(stamp=self.get_clock().now().to_msg())
                     for publisher in publishers:
@@ -385,16 +410,9 @@ class CaseNode(Node):
                 continue
             try:
                 bgr = self.bridge.imgmsg_to_cv2(frame, desired_encoding="bgr8")
-                width = max(1, int(self.param("preview_max_width")))
-                if bgr.shape[1] > width:
-                    bgr = cv2.resize(bgr, (width, round(bgr.shape[0] * width / bgr.shape[1])))
-                ok, data = cv2.imencode(
-                    ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.param("jpeg_quality")]
-                )
-                if not ok:
-                    raise ValueError("Could not encode camera frame")
+                jpeg = encode_display_jpeg(bgr, self.param("jpeg_quality"))
                 with self.lock:
-                    self.preview_jpeg = data.tobytes()
+                    self.preview_jpeg = jpeg
                     self.preview_error = None
                     self.stream_changed.notify_all()
             except Exception as e:
@@ -407,6 +425,9 @@ class CaseNode(Node):
         close = getattr(detector, "close", None)
         if close is not None:
             close()
+        proposals = getattr(self, "proposal_tracker", None)
+        if proposals is not None:
+            proposals.close()
 
     def destroy_node(self):
         self.stop.set()
@@ -455,7 +476,15 @@ class CaseNode(Node):
         next_gallery_scan = 0.0
         gallery_revision = 0
         tracking_context = None
-        proposal_tracker = KCFProposals()
+        proposal_tracker = AsyncKCFProposals(
+            wake=self.image_changed.set,
+            roi_padding=self.param("kcf_roi_padding"),
+            max_replay_frames=self.param("kcf_replay_max_frames"),
+            replay_budget_ms=self.param("kcf_replay_budget_ms"),
+        )
+        self.proposal_tracker = proposal_tracker
+        recognizer = TrackedObjectRecognizer()
+        recognition_frame_id = None
         result_rate = ResultRate(window_seconds=3.0)
         max_side = INPUT_SIZE
         for _ in self.worker_ticks():
@@ -485,10 +514,16 @@ class CaseNode(Node):
                         if gen == self.generation:
                             self.status = f"Ready: {len(set(gallery.labels))} classes. Waiting for target image…"
                     continue
-                if processed == (gen, seq, gallery_revision):
+                if (processed == (gen, seq, gallery_revision)
+                        and not proposal_tracker.has_result()):
                     continue
                 start = time.monotonic()
-                header = None
+                header = frame.header if isinstance(frame, ImageMsg) else None
+                image_size = (frame.width, frame.height) if header is not None else frame.size
+                context = (gen, image_size, header.frame_id if header is not None else None)
+                if proposal_tracker.waiting_for_initial_detection(
+                        context, settings["detection_interval"]):
+                    continue  # Camera callbacks keep only the newest input meanwhile.
                 if isinstance(frame, ImageMsg):
                     pixels = self.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")
                     header = frame.header
@@ -497,39 +532,43 @@ class CaseNode(Node):
                 shared_frame = self.frame_pool.acquire(pixels, frame_id=seq, timestamp=received_at)
                 if shared_frame is None:
                     continue
-                # PIL remains only at the existing model adapter boundary.
-                image = Image.fromarray(shared_frame.pixels)
                 depth_inputs = self.depth_inputs_for(frame)
-                context = (gen, image.size, header.frame_id if header is not None else None)
-                proposals, proposal_source = proposal_tracker.update(
-                    shared_frame.pixels, (gen, seq), context,
-                    settings["detection_interval"],
-                    lambda: detector.detect(
-                        shared_frame,
-                        settings["prompt"],
-                        settings["box_threshold"],
-                        self.param("grounding_nms_iou"),
-                        self.param("grounding_max_detections"),
-                        min_width=self.param("grounding_min_bbox_width"),
-                        min_height=self.param("grounding_min_bbox_height"),
-                        min_area=self.param("grounding_min_bbox_area"),
-                    ),
+                # Capture settings by value: the job may outlive this loop iteration.
+                request = dict(
+                    prompt=settings["prompt"], box_threshold=settings["box_threshold"],
+                    nms_iou=self.param("grounding_nms_iou"),
+                    limit=self.param("grounding_max_detections"),
+                    min_width=self.param("grounding_min_bbox_width"),
+                    min_height=self.param("grounding_min_bbox_height"),
+                    min_area=self.param("grounding_min_bbox_area"),
                 )
+
+                def detect(frame, request=request):
+                    proposals = detector.detect(frame, **request)
+                    return proposals, dict(getattr(detector, "last_metrics", {}))
+
+                result = proposal_tracker.update(
+                    shared_frame.pixels, (gen, seq), context,
+                    settings["detection_interval"], detect, frame=shared_frame,
+                )
+                if result is None:
+                    continue  # Wait for the initial detection without publishing empty results.
+                proposals, proposal_source = result
                 detected_at = time.monotonic()
                 proposals = self.bbox_smoother.update(proposals, (gen, seq), context)
-                diagnostics = []
-                detections = recognize_objects(
-                    image,
-                    proposals,
-                    encoder,
-                    gallery,
-                    max_side,
-                    stride,
-                    settings["recognition_threshold"],
-                    settings["margin"],
-                    diagnostics=diagnostics,
-                    defer_diagnostics=True,
+                # KCF preserves proposal order for the active set. A handoff gives
+                # a different object token, even when box count/order look unchanged.
+                recognition_token = (proposal_tracker.active, context,
+                                     seq if settings["detection_interval"] == 1 else None)
+                detections, diagnostics, recognition_changed = recognizer.update(
+                    shared_frame.pixels, proposals, encoder, gallery, max_side, stride,
+                    settings["recognition_threshold"], settings["margin"],
+                    token=recognition_token, gallery_revision=gallery_revision,
                 )
+                if recognizer.encoded:
+                    recognition_frame_id = seq
+                elif not proposals:
+                    recognition_frame_id = None
                 recognized_at = time.monotonic()
                 with self.lock:
                     if gen != self.generation:
@@ -548,14 +587,17 @@ class CaseNode(Node):
                     for item in detections:
                         item["bbox3d_status"] = "disabled" if not self.param("pose_enabled") else "no_camera_depth"
                 bbox3d_at = time.monotonic()
-                object_snapshot = ObjectVisualizationSnapshot(
-                    detections, diagnostics, gallery, max_side, stride
-                )
+                # Diagnostic crops/features stay on their recognition frame;
+                # never relabel an old crop as the current KCF image.
+                object_snapshot = (ObjectVisualizationSnapshot(
+                    recognizer.diagnostic_detections, diagnostics, gallery, max_side, stride
+                ) if recognition_changed else None)
                 with self.lock:
                     if gen != self.generation:
                         continue
-                    self.object_debug_revision += 1
-                    self.object_debug_snapshot = object_snapshot
+                    if recognition_changed:
+                        self.object_debug_revision += 1
+                        self.object_debug_snapshot = object_snapshot
                     self.detections = detections
                     completed_at = time.monotonic()
                     previous_completed = self.performance.get("completed_at")
@@ -568,9 +610,13 @@ class CaseNode(Node):
                             if previous_completed is None
                             else 1 / max(1e-9, completed_at - previous_completed)
                         ),
-                        grounding_ipc=(dict(getattr(detector, "last_metrics", {}))
+                        grounding_ipc=(dict(proposal_tracker.last_metrics)
                                        if proposal_source == "sam3" else {}),
+                        grounding_schedule=proposal_tracker.scheduler_metrics(),
                         bbox_source=proposal_source,
+                        recognition_source=("none" if not proposals else "dino" if recognizer.encoded else
+                                            "reclassified" if recognition_changed else "cached"),
+                        recognition_frame_id=recognition_frame_id,
                         detection_interval=settings["detection_interval"],
                         detect_ms=(detected_at - start) * 1000,
                         recognize_ms=(recognized_at - detected_at) * 1000,
@@ -585,7 +631,7 @@ class CaseNode(Node):
                     )
                     self.status = (
                         f"{('SAM3 W8A8' if proposal_source == 'sam3' else 'KCF')} → "
-                        f"{encoder.description} | {len(detections)} objects | "
+                        f"{encoder.description}{'' if recognizer.encoded else ' (cached)'} | {len(detections)} objects | "
                         f"{len(set(gallery.labels))} classes / {len(gallery.labels)} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )
@@ -601,7 +647,6 @@ class CaseNode(Node):
                 with self.lock:
                     if gen == self.generation:
                         self.jpeg = None
-                        self.jpeg3d = None
                         self.clear_object_debug()
                         self.detections = []
                         self.overlay_at = None

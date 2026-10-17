@@ -1,5 +1,7 @@
 """2D rectangles and projected 3D box wireframes on a matching RGB frame."""
 
+from types import SimpleNamespace
+
 import cv2
 import numpy as np
 from .depth_bbox import bbox_vertices
@@ -48,7 +50,7 @@ def render_bbox_overlay(image, detections, info=None, mode="2d"):
         x0, y0, x1, y1 = item["bbox"]
         color = (0, 190, 255) if item["label"] == "unknown" else (60, 220, 80)
         if mode == "3d":
-            if item["label"] == "unknown" or "bbox3d" not in item or info is None:
+            if "bbox3d" not in item or info is None:
                 continue
             if not draw_bbox3d(overlay, item["bbox3d"], info, color):
                 continue
@@ -56,34 +58,41 @@ def render_bbox_overlay(image, detections, info=None, mode="2d"):
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, 2)
         identity = f"ID {item['track_id']} " if "track_id" in item else ""
         label = f"{identity}{item['label']} | {item['detection_label']}"
-        bbox3d = item.get("bbox3d")
-        if bbox3d is not None:
-            px, py, pz = bbox3d["position"]
-            position_label = f"position (m): X={px:.3f} Y={py:.3f} Z={pz:.3f}"
-        else:
-            position_label = "position: N/A"
         font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
-        (_, text_height), baseline = cv2.getTextSize(
+        (text_width, text_height), baseline = cv2.getTextSize(
             label, font, font_scale, thickness
         )
-        line_height = text_height + baseline + 8
-        label_lines = (label, position_label)
-        label_y = max(
-            text_height + 6,
-            min(y0 - 8, overlay.shape[0] - (len(label_lines) - 1) * line_height - baseline - 6),
+        origin = (
+            max(4, min(x0, overlay.shape[1] - text_width - 4)),
+            max(text_height + 6, min(y0 - 8, overlay.shape[0] - baseline - 6)),
         )
-        for line_index, text in enumerate(label_lines):
-            (text_width, _), _ = cv2.getTextSize(
-                text, font, font_scale, thickness
-            )
-            origin = (
-                max(4, min(x0, overlay.shape[1] - text_width - 4)),
-                label_y + line_index * line_height,
-            )
-            cv2.putText(
-                overlay, text, origin, font, font_scale, (0, 0, 0), 3, cv2.LINE_AA
-            )
-            cv2.putText(
-                overlay, text, origin, font, font_scale, color, thickness, cv2.LINE_AA
-            )
+        cv2.putText(
+            overlay, label, origin, font, font_scale, (0, 0, 0), 3, cv2.LINE_AA
+        )
+        cv2.putText(
+            overlay, label, origin, font, font_scale, color, thickness, cv2.LINE_AA
+        )
     return overlay
+
+
+def render_display_overlay(rgb, detections, info=None, mode="3d"):
+    """Render browser pixels without changing source boxes or metric 3D data."""
+    height, width = rgb.shape[:2]
+    sx, sy = 960 / width, 540 / height
+    pixels = (cv2.resize(rgb, (960, 540), interpolation=cv2.INTER_AREA)
+              if (width, height) != (960, 540) else rgb)
+    bgr = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
+    scaled_detections = [
+        dict(item, bbox=[round(value * (sx if i % 2 == 0 else sy))
+                         for i, value in enumerate(item["bbox"])])
+        for item in detections
+    ]
+    scaled_info = None
+    if info is not None:
+        k = np.asarray(info.k, dtype=np.float64).reshape(3, 3).copy()
+        k[0, :] *= sx
+        k[1, :] *= sy
+        # Distortion and metric geometry do not change when resizing the image.
+        scaled_info = SimpleNamespace(k=k.reshape(-1).tolist(), d=info.d,
+                                      distortion_model=info.distortion_model)
+    return render_bbox_overlay(bgr, scaled_detections, scaled_info, mode)

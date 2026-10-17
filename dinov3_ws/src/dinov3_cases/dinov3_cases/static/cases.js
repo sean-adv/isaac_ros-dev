@@ -2,13 +2,6 @@ const el = id => document.getElementById(id);
 let referenceKey = '',
   referenceVersion = 0;
 let groundingLoaded = false;
-el('bbox-view').onchange = () => {
-  const mode = el('bbox-view').value;
-  el('overlay').src = '/overlay.mjpg?bbox=' + mode;
-  el('bbox-help').textContent = mode === '3d'
-    ? 'Showing projected 3D bounding box wireframes. This requires valid synchronized depth, recognized products, and stable tracking. Only the image is shown when no 3D boxes are available.'
-    : 'Showing original 2D bounding boxes. Green boxes indicate recognized products; yellow boxes indicate unknown objects.';
-};
 el('grounding-form').onsubmit = e => {
   e.preventDefault();
   const values = Object.fromEntries(new FormData(e.target));
@@ -254,7 +247,7 @@ async function refreshObjects() {
       }
       gallery.append(card);
     });
-    el('object-status').textContent = data.objects.length + ' objects · ' + (referenceCase ? 'Comparing ' + referenceCase : 'Automatic best reference') + ' · frame result #' + data.revision;
+    el('object-status').textContent = data.objects.length + ' objects · ' + (referenceCase ? 'Comparing ' + referenceCase : 'Automatic best reference') + ' · recognition snapshot #' + data.revision;
     objectKey = key;
   } catch (error) {
     el('object-status').textContent = error.message;

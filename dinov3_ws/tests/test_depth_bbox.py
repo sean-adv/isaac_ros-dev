@@ -169,7 +169,7 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
     received = deserialize_message(serialize_message(message), Detection3DArray)
     assert received.header == header
     assert received == message
-    assert len(received.detections) == 1
+    assert len(received.detections) == 2
     detection = received.detections[0]
     assert detection.header == header
     assert detection.id == "1"
@@ -190,7 +190,13 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
     np.testing.assert_allclose(
         [detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z], data["size"])
     assert "pose" not in items[0] and "pose_status" not in items[0]
-    assert not bboxes3d_message([items[1]], header).detections
+    unknown = received.detections[1]
+    assert unknown.id == "2"
+    assert unknown.results[0].hypothesis.class_id == "unknown"
+    assert len(bboxes3d_message([items[1]], header).detections) == 1
+    for item in items:
+        item["bbox_visible"] = False
+    assert not bboxes3d_message(items, header).detections
     assert "bbox3d" in items[1]
     assert not bboxes3d_message([], header).detections
 

@@ -175,8 +175,8 @@ def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
     # The pixels displayed as reference must be the same cached input used for encoding.
     (tmp_path / "red/one.png").unlink()
     encoder.calls = 0
-    roi = Image.new("RGB", (43, 79), "red")
-    proposals = clean_proposals([[0, 0, 43, 79]], [0.9], ["bottle"], roi.size)
+    roi = Image.new("RGB", (843, 1079), "red")
+    proposals = clean_proposals([[0, 0, 843, 1079]], [0.9], ["bottle"], roi.size)
     diagnostics = []
     result = recognize_objects(roi, proposals, encoder, gallery, 64, 16, 0.75, 0.05, diagnostics)
     assert encoder.calls == 1
@@ -184,9 +184,12 @@ def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
     assert "_reference_index" not in result[0]
     views, metadata = diagnostics[0]["views"], diagnostics[0]["metadata"]
     assert set(views) == {"crop", "grid", "patches", "heatmap", "similarity", "reference"}
-    assert views["heatmap"].shape == (79, 43, 3)
+    assert views["heatmap"].shape == (1079, 843, 3)
+    assert views["crop"].shape == (1079, 843, 3)
+    assert views["similarity"].shape == (1079, 843, 3)
+    assert metadata["preview_size"] == [843, 1079]
     assert views["grid"].shape == (64, 64, 3)
-    assert metadata["content_size"] == [35, 64]
+    assert metadata["content_size"] == [50, 64]
     assert metadata["patch_grid"] == [4, 4]
     assert metadata["similarity_min"] == pytest.approx(1.0)
 
@@ -215,8 +218,14 @@ def test_empty_gallery_and_large_crop_visualizations():
     )
     assert result[0]["reason"] == "empty_gallery"
     assert set(diagnostics[0]["views"]) == {"crop", "grid"}
-    assert diagnostics[0]["views"]["crop"].shape == (640, 320, 3)
+    assert diagnostics[0]["views"]["crop"].shape == (3000, 1500, 3)
+    assert diagnostics[0]["context"]["roi"].size == roi.size
+    assert diagnostics[0]["metadata"]["preview_size"] == [1500, 3000]
     assert not diagnostics[0]["metadata"]["heatmap_available"]
+    snapshot = ObjectVisualizationSnapshot(result, diagnostics, ObjectGallery(), 64, 16)
+    _, images = snapshot.render()
+    from io import BytesIO
+    assert Image.open(BytesIO(images[0, "crop"])).size == roi.size
 
 
 def test_selected_label_compares_every_object_and_all_reference_images_without_forward(tmp_path):

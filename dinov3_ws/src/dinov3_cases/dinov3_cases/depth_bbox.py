@@ -140,7 +140,7 @@ def bboxes3d_message(items, header):
 
     message = Detection3DArray(header=header)
     for item in items:
-        if item["label"] == "unknown" or "bbox3d" not in item:
+        if not item.get("bbox_visible", True) or "bbox3d" not in item:
             continue
         data = item["bbox3d"]
         detection = Detection3D(header=header)

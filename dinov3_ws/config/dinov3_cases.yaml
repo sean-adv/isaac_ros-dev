@@ -1,13 +1,24 @@
 dinov3_cases:
   ros__parameters:
     # SAM3: 1–4 comma-separated class names; text features cached per prompt.
-    grounding_prompt: 'medicine bottle, box.'
-    grounding_box_threshold: 0.7
+    grounding_prompt: 'medicine box.'
+    grounding_box_threshold: 0.1
     grounding_nms_iou: 1.0  # SAM3 default: no NMS
     grounding_max_detections: 20
-    # SAM3 once per N processed frames; KCF updates bboxes between detections.
-    # 1 disables KCF. Lost tracking triggers detection early.
+    # Submit background SAM3 every N processed frames; KCF continues while it runs.
+    # One job at a time; results replay through buffered frames before handoff.
+    # DINO runs on handoff; KCF frames reuse that set's classifications.
+    # 1 disables KCF and uses synchronous SAM3. Lost tracking requests detection early.
     grounding_detection_interval: 30
+    # Fixed KCF crop: expand each side by this fraction; clipped to image bounds.
+    kcf_roi_padding: 0.3
+    # Replay limits per background job; excludes SAM3 and KCF initialization.
+    # Time limit is checked between KCF updates. Restart to apply.
+    kcf_replay_max_frames: 8
+    kcf_replay_budget_ms: 150.0
+    # OpenCV internal pool in the main process; independent workers remain concurrent.
+    # 0 preserves the library default. Restart to apply.
+    opencv_num_threads: 1
     # Moving average over raw SAM3/KCF boxes per object; 1 disables smoothing.
     # Counts unique processed frames. Config only; restart after changes.
     bbox_smoothing_frames: 3
@@ -27,10 +38,12 @@ dinov3_cases:
     # Count unique inference frames since this track's first detection, including misses.
     tracking_bbox_min_hit_ratio: 0.8
     tracking_bbox_min_detections: 6
-    # ViT-B/16 uses fixed 160×160 inputs; run.sh selects the Torch-TensorRT artifact.
+    # ViT-B/16 uses fixed 224×224 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
-    preview_max_width: 960
-    jpeg_quality: 80
+    # Preview and the configured overlay JPEG have fixed 960x540 output.
+    jpeg_quality: 70
+    # Select one overlay for browser and ROS debug images: 2d or 3d. Restart to apply.
+    bbox_visualization_mode: "3d"
     # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
     # Legacy pose_* names now configure corner/nearest-depth 3D boxes.
     pose_enabled: true
