@@ -1,7 +1,6 @@
 """Local image gallery and HSV background removal, independent of ROS/model loading."""
 
 import io
-import re
 import threading
 import uuid
 from pathlib import Path
@@ -9,49 +8,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 from flask import Flask, jsonify, request, send_file, render_template
-from PIL import Image, ImageOps, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont
 
-EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-
-
-def group_path(root, name):
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", name):
-        raise ValueError("Labels must contain 1–80 letters, numbers, underscores, or hyphens.")
-    path = root / name
-    if path.is_symlink() or path.resolve().parent != root.resolve():
-        raise ValueError("Invalid label path.")
-    return path
-
-
-def image_path(root, group, filename):
-    folder = group_path(root, group)
-    if (
-        not isinstance(filename, str)
-        or not filename
-        or "\\" in filename
-        or "/" in filename
-        or Path(filename).name != filename
-    ):
-        raise ValueError("Invalid image filename.")
-    path = folder / filename
-    if (
-        path.is_symlink()
-        or path.resolve().parent != folder.resolve()
-        or path.suffix.lower() not in EXTENSIONS
-        or not path.is_file()
-    ):
-        raise ValueError("Image does not exist or its format is unsupported.")
-    return path
-
-
-def load_rgba(source):
-    try:
-        with Image.open(source) as image:
-            if image.width * image.height > 25_000_000:
-                raise ValueError("Images must not exceed 25 megapixels.")
-            return ImageOps.exif_transpose(image).convert("RGBA")
-    except (OSError, Image.DecompressionBombError) as error:
-        raise ValueError("Unable to read the image.") from error
+from .gallery_files import (
+    group_path, image_path, load_image as load_rgba, gallery_groups, gallery_images,
+)
 
 
 def remove_background(image, options):
@@ -154,13 +115,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
     @app.get("/api/images")
     def list_images():
         with mutation_lock:
-            groups = sorted(
-                p.name
-                for p in root.iterdir()
-                if p.is_dir()
-                and not p.is_symlink()
-                and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", p.name)
-            )
+            groups = [path.name for path in gallery_groups(root)]
             group = request.args.get("case", "")
             images = []
             if group:
@@ -169,8 +124,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
                     raise ValueError("Label does not exist.")
                 images = [
                     dict(name=p.name, bytes=p.stat().st_size)
-                    for p in sorted(folder.iterdir())
-                    if p.suffix.lower() in EXTENSIONS and p.is_file() and not p.is_symlink()
+                    for p in gallery_images(folder)
                 ]
         return jsonify(cases=groups, images=images)
 

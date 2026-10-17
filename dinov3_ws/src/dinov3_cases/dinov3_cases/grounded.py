@@ -1,10 +1,6 @@
 """Text-guided proposals followed by per-object DINOv3 gallery retrieval."""
 
 import math
-import re
-import copy
-import threading
-from collections import OrderedDict
 from pathlib import Path
 
 import cv2
@@ -14,12 +10,17 @@ import torch
 import torch.nn.functional as F
 
 from .runtime import INPUT_SIZE
+from .gallery_files import EXTENSIONS, gallery_groups, gallery_images
+# Preserve existing imports used by integrations and diagnostic tools.
+from .object_visualization import (
+    ObjectVisualizationSnapshot, build_object_diagnostic,
+    encode_object_diagnostics, object_debug_views,
+)
 
 from .kcf import validate_detection_interval
 
 
 DEFAULT_PROMPT = "medicine bottle, medicine box."
-EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 def validate_settings(prompt, box_threshold, recognition_threshold, margin, detection_interval=1):
@@ -119,18 +120,25 @@ def encode_object(encoder, image, max_side, stride):
     return prepared, features, F.normalize(vector, dim=0)
 
 
+def compute_lab_histogram(image):
+    """L1-normalized joint L/a/b histogram (8x16x16), excluding transparent pixels.
+
+    Use the original crop before model resize/padding so padding cannot bias color.
+    """
+    rgba = np.asarray(image.convert("RGBA"))
+    mask = (rgba[..., 3] > 0).astype(np.uint8)
+    if not mask.any():
+        raise ValueError("Cannot compute Lab histogram for a fully transparent image.")
+    lab = cv2.cvtColor(rgba[..., :3], cv2.COLOR_RGB2LAB)
+    histogram = cv2.calcHist([lab], [0, 1, 2], mask, [8, 16, 16], [0, 256] * 3)
+    histogram = histogram.reshape(-1)
+    return histogram / histogram.sum()
+
+
 def gallery_signature(root):
     entries = []
-    for folder in sorted(Path(root).iterdir()):
-        if (
-            folder.is_symlink()
-            or not folder.is_dir()
-            or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", folder.name)
-        ):
-            continue
-        for path in sorted(folder.iterdir()):
-            if path.is_symlink() or not path.is_file() or path.suffix.lower() not in EXTENSIONS:
-                continue
+    for folder in gallery_groups(root):
+        for path in gallery_images(folder):
             stat = path.stat()
             entries.append((folder.name, str(path), stat.st_mtime_ns, stat.st_size))
     return tuple(entries)
@@ -144,6 +152,7 @@ class ObjectGallery:
         self.paths = []
         self.patch_banks = []
         self.reference_inputs = []
+        self.lab_histograms = None
 
     def refresh(self, root, encoder, max_side, stride):
         signature = gallery_signature(root)
@@ -151,38 +160,48 @@ class ObjectGallery:
         if key == self.key:
             return False
         features, labels, patch_banks, reference_inputs = [], [], [], []
+        lab_histograms = []
         for label, filename, _, _ in signature:
             with Image.open(filename) as source:
                 if source.width * source.height > 25_000_000:
                     raise ValueError(f"Reference exceeds 25 megapixels: {filename}")
-                image = ImageOps.exif_transpose(source).convert("RGB")
+                image = ImageOps.exif_transpose(source).convert("RGBA")
             prepared, patches, descriptor = encode_object(encoder, image, max_side, stride)
+            lab_histograms.append(compute_lab_histogram(image))
             features.append(descriptor)
             patch_banks.append(patches)
             reference_inputs.append(prepared)
             labels.append(label)
         # Publish a complete gallery only after all references have encoded successfully.
         self.features = torch.stack(features) if features else None
+        self.lab_histograms = np.stack(lab_histograms) if lab_histograms else None
         self.labels, self.key = labels, key
         self.paths = [entry[1] for entry in signature]
         self.patch_banks = patch_banks
         self.reference_inputs = reference_inputs
         return True
 
-    def best_reference(self, descriptor, case=""):
+    def similarities(self, descriptor, lab_histogram):
+        """Fuse each reference's DINO cosine with its Lab Bhattacharyya coefficient."""
+        dino = (self.features @ descriptor).clamp(-1, 1).cpu().numpy()
+        lab = np.sqrt(self.lab_histograms * lab_histogram).sum(axis=1).clip(0, 1)
+        return 0.8 * dino + 0.2 * lab, dino, lab
+
+    def best_reference(self, descriptor, case="", *, lab_histogram):
         indices = [i for i, label in enumerate(self.labels) if not case or label == case]
         if not indices:
             return None, None
-        scores = (self.features[indices] @ descriptor).clamp(-1, 1)
-        best = int(scores.argmax())
-        return indices[best], float(scores[best])
+        scores, _, _ = self.similarities(descriptor, lab_histogram)
+        best = max(indices, key=lambda i: scores[i])
+        return best, float(scores[best])
 
-    def classify(self, descriptor, threshold, margin):
+    def classify(self, descriptor, threshold, margin, *, lab_histogram):
         if self.features is None:
             return dict(
                 label="unknown", score=None, candidate=None, margin=None, reason="empty_gallery"
             )
-        similarities = (self.features @ descriptor).clamp(-1, 1).cpu().tolist()
+        scores, dino, lab = self.similarities(descriptor, lab_histogram)
+        similarities = scores.tolist()
         by_class = {}
         for label, score in zip(self.labels, similarities):
             by_class[label] = max(by_class.get(label, -1.0), score)
@@ -193,167 +212,22 @@ class ObjectGallery:
             key=lambda i: similarities[i],
         )
         gap = score - ranked[1][1] if len(ranked) > 1 else None
-        reason = (
-            "low_similarity"
-            if score < threshold
-            else "ambiguous" if gap is not None and gap < margin else "matched"
-        )
+        if score < threshold:
+            reason = "low_similarity"
+        elif gap is not None and gap < margin:
+            reason = "ambiguous"
+        else:
+            reason = "matched"
         return dict(
             label=label if reason == "matched" else "unknown",
             score=score,
+            dino_score=float(dino[best_reference]),
+            lab_score=float(lab[best_reference]),
             candidate=label,
             margin=gap,
             reason=reason,
             reference=dict(case=label, name=Path(self.paths[best_reference]).name),
         )
-
-
-def object_debug_views(roi, prepared, features, reference_patches, max_side, stride, roi_size=None):
-    """Use the existing forward's patch tokens; remove input padding before ROI mapping."""
-    from .patches import compute_similarity_maps, reference_grid_image
-
-    gh, gw = prepared.height // stride, prepared.width // stride
-    roi_size = roi.size if roi_size is None else roi_size
-    scale = max_side / max(roi_size)
-    content_w, content_h = [max(1, round(n * scale)) for n in roi_size]
-    views = dict(
-        crop=cv2.cvtColor(np.asarray(roi), cv2.COLOR_RGB2BGR),
-        grid=cv2.cvtColor(np.asarray(reference_grid_image(prepared, stride)), cv2.COLOR_RGB2BGR),
-    )
-    # Mark the real ROI's edge; the right/bottom remainder is replicate padding.
-    cv2.rectangle(views["grid"], (0, 0), (content_w - 1, content_h - 1), (255, 130, 50), 1)
-    metadata = dict(
-        roi_size=list(roi_size),
-        input_size=list(prepared.size),
-        preview_size=list(roi.size),
-        content_size=[content_w, content_h],
-        patch_grid=[gh, gw],
-        heatmap_available=reference_patches is not None,
-    )
-    if reference_patches is None:
-        return views, metadata
-    scores = (
-        compute_similarity_maps(features.reshape(1, gh, gw, -1), reference_patches)[0].cpu().numpy()
-    )
-    if not np.isfinite(scores).all():
-        raise ValueError("Non-finite object patch similarities.")
-
-    def color(values):
-        return cv2.applyColorMap((np.clip(values, 0, 1) * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
-
-    # Patch rendering shows the full model grid. The ROI heatmap excludes padding.
-    views["patches"] = cv2.resize(color(scores), prepared.size, interpolation=cv2.INTER_NEAREST)
-    pixels = cv2.resize(scores, prepared.size, interpolation=cv2.INTER_LINEAR)[
-        :content_h, :content_w
-    ]
-    mapped = cv2.resize(pixels, roi.size, interpolation=cv2.INTER_LINEAR)
-    views["similarity"] = color(mapped)
-    views["heatmap"] = cv2.addWeighted(views["crop"], 0.55, views["similarity"], 0.45, 0)
-    metadata.update(similarity_min=float(mapped.min()), similarity_max=float(mapped.max()))
-    return views, metadata
-
-
-def build_object_diagnostic(
-    context, gallery, max_side, stride, reference_case="", reference_bank=None
-):
-    index, score = gallery.best_reference(context["descriptor"], reference_case)
-    count = (
-        sum(label == reference_case for label in gallery.labels)
-        if reference_case
-        else int(index is not None)
-    )
-    bank = None if index is None else gallery.patch_banks[index]
-    if reference_case and index is not None:
-        bank = (
-            reference_bank
-            if reference_bank is not None
-            else torch.cat(
-                [
-                    patches
-                    for label, patches in zip(gallery.labels, gallery.patch_banks)
-                    if label == reference_case
-                ]
-            )
-        )
-    views, metadata = object_debug_views(
-        context["roi"],
-        context["prepared"],
-        context["patches"],
-        bank,
-        max_side,
-        stride,
-        context["roi_size"],
-    )
-    reference = None
-    if index is not None:
-        reference = dict(case=gallery.labels[index], name=Path(gallery.paths[index]).name)
-        views["reference"] = cv2.cvtColor(
-            np.asarray(gallery.reference_inputs[index]), cv2.COLOR_RGB2BGR
-        )
-    metadata.update(
-        comparison_case=reference_case or (reference["case"] if reference else None),
-        comparison_score=score,
-        comparison_reference=reference,
-        comparison_reference_count=count,
-    )
-    return dict(metadata=metadata, views=views, context=context)
-
-
-def encode_object_diagnostics(detections, diagnostics):
-    images, items = {}, []
-    for index, (item, diagnostic) in enumerate(zip(detections, diagnostics)):
-        for view, pixels in diagnostic["views"].items():
-            ok, data = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not ok:
-                raise RuntimeError(f"Object {index} {view} JPEG encoding failed.")
-            images[index, view] = data.tobytes()
-        items.append(
-            dict(item, index=index, **diagnostic["metadata"], views=list(diagnostic["views"]))
-        )
-    return items, images
-
-
-class ObjectVisualizationSnapshot:
-    """Render reference comparisons from one immutable inference/gallery revision."""
-
-    def __init__(self, detections, diagnostics, gallery, max_side, stride):
-        self.detections = detections
-        self.contexts = [item["context"] for item in diagnostics]
-        # Gallery refresh replaces its lists/tensors; the snapshot keeps the old complete set.
-        self.gallery = copy.copy(gallery)
-        self.reference_cases = sorted(set(gallery.labels))
-        self.max_side, self.stride = max_side, stride
-        self.lock = threading.Lock()
-        self.cache = OrderedDict()
-
-    def render(self, reference_case=""):
-        if reference_case and reference_case not in self.reference_cases:
-            raise ValueError("Reference label has no images in this result.")
-        with self.lock:
-            if reference_case not in self.cache:
-                bank = (
-                    torch.cat(
-                        [
-                            patches
-                            for label, patches in zip(self.gallery.labels, self.gallery.patch_banks)
-                            if label == reference_case
-                        ]
-                    )
-                    if reference_case
-                    else None
-                )
-                diagnostics = [
-                    build_object_diagnostic(
-                        context, self.gallery, self.max_side, self.stride, reference_case, bank
-                    )
-                    for context in self.contexts
-                ]
-                self.cache[reference_case] = encode_object_diagnostics(self.detections, diagnostics)
-                # Keep automatic views and at most two selected-label comparisons per frame.
-                if len(self.cache) > 3:
-                    self.cache.pop(next(key for key in self.cache if key))
-            self.cache.move_to_end(reference_case)
-            return self.cache[reference_case]
 
 
 def recognize_objects(
@@ -372,7 +246,10 @@ def recognize_objects(
     for proposal in proposals:
         roi = image.crop(proposal["bbox"])
         prepared, patches, descriptor = encode_object(encoder, roi, max_side, stride)
-        classification = gallery.classify(descriptor, threshold, margin)
+        lab_histogram = compute_lab_histogram(roi)
+        classification = gallery.classify(
+            descriptor, threshold, margin, lab_histogram=lab_histogram
+        )
         result = dict(proposal, **classification)
         if diagnostics is not None:
             # The crop already owns its pixels; retain it for on-demand diagnostics.
@@ -382,6 +259,7 @@ def recognize_objects(
                 prepared=prepared,
                 patches=patches,
                 descriptor=descriptor,
+                lab_histogram=lab_histogram,
             )
             diagnostics.append(
                 {"context": context}
@@ -397,6 +275,7 @@ class TrackedObjectRecognizer:
     """Reuse classifications in stable KCF list order within one tracker set.
 
     A new tracker-set object (or a new synchronous SAM3 frame) is a new token.
+    Count changes discard cached classifications and encode the current crops.
     No spatial matching or public numeric IDs are used across tracker sets.
     """
 
@@ -429,14 +308,22 @@ class TrackedObjectRecognizer:
             self.classifications = []
             return [], [], changed
 
+        # A surviving subset can change size without replacing the tracker object.
+        # Never zip it with old labels; discard the complete cache and encode all
+        # current crops, including after recovery from an empty set.
+        if (token == self.token and self.classifications is not None
+                and len(proposals) != len(self.classifications)):
+            self.reset()
         fresh = token != self.token or self.classifications is None
+        changed = fresh or key != self.classification_key
         if fresh:
             diagnostics = []
             detections = recognize_objects(
                 Image.fromarray(pixels), proposals, encoder, gallery, max_side, stride,
                 threshold, margin, diagnostics=diagnostics, defer_diagnostics=True,
             )
-            fields = ("label", "score", "candidate", "margin", "reason", "reference")
+            fields = ("label", "score", "dino_score", "lab_score",
+                      "candidate", "margin", "reason", "reference")
             classifications = [{k: item[k] for k in fields if k in item}
                                for item in detections]
             # Commit only a complete successful recognition of the new set.
@@ -446,20 +333,19 @@ class TrackedObjectRecognizer:
             self.classifications = classifications
             self.classification_key = key
             self.encoded = True
-        else:
-            if len(proposals) != len(self.classifications):
-                raise ValueError("KCF object count changed without a new tracker set.")
-            if key != self.classification_key:
-                # Gallery edits can reclassify existing descriptors without a new forward.
-                self.classifications = [
-                    gallery.classify(item["context"]["descriptor"], threshold, margin)
-                    for item in self.diagnostics
-                ]
-                self.classification_key = key
-                return ([dict(p, **c) for p, c in zip(proposals, self.classifications)],
-                        self.diagnostics, True)
-        return ([dict(p, **c) for p, c in zip(proposals, self.classifications)],
-                self.diagnostics, fresh)
+        elif changed:
+            # Reclassify cached descriptors without another encoder forward.
+            self.classifications = [
+                gallery.classify(
+                    item["context"]["descriptor"], threshold, margin,
+                    lab_histogram=item["context"]["lab_histogram"],
+                )
+                for item in self.diagnostics
+            ]
+            self.classification_key = key
+        detections = [dict(p, **c) for p, c in zip(proposals, self.classifications)]
+        return detections, self.diagnostics, changed
+
 
 def recognition_message(items, header=None):
     from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose

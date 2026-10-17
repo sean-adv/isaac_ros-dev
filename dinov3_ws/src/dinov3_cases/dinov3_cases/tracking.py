@@ -18,8 +18,9 @@ class BBoxSmoother:
     """Average raw boxes per matched object without feeding smoothing into KCF.
 
     Match geometrically across SAM3 refreshes, including detection reordering.
-    Missing objects lose their history immediately. A repeated frame reuses its
-    result so gallery refreshes cannot add samples or bias the average.
+    Missing objects lose their history immediately. A repeated frame with the
+    same raw boxes reuses its result; a same-frame correction replaces samples
+    so gallery refreshes and detector handoffs cannot bias the average.
     """
 
     def __init__(self, window=3):
@@ -31,6 +32,7 @@ class BBoxSmoother:
         self.frame_key = None
         self.histories = {}
         self.boxes = []
+        self.raw_boxes = None
         self.initialized = False
 
     def update(self, items, frame_key, context):
@@ -39,7 +41,11 @@ class BBoxSmoother:
             self.histories.clear()
             self.initialized = False
             self.context = context
-        if not self.initialized or frame_key != self.frame_key:
+        raw_boxes = tuple(tuple(item["bbox"]) for item in items)
+        same_frame = self.initialized and frame_key == self.frame_key
+        if not same_frame or raw_boxes != self.raw_boxes:
+            # A background SAM3 handoff may change count/order on the same frame.
+            # Cache by raw boxes too, so zip below can never truncate new objects.
             # Keep matching on raw coordinates; recognition/ID fields stay outside.
             matched = self.matcher.update(
                 [dict(bbox=list(item["bbox"])) for item in items], frame_key=frame_key
@@ -48,12 +54,16 @@ class BBoxSmoother:
             for item in matched:
                 track_id = item["track_id"]
                 history = self.histories.get(track_id, deque(maxlen=self.window))
+                if same_frame and track_id in self.histories:
+                    # Replace this frame's old sample instead of counting it twice.
+                    history.pop()
                 history.append(tuple(item["bbox"]))
                 histories[track_id] = history
                 mean = [sum(box[i] for box in history) / len(history) for i in range(4)]
                 boxes.append([math.floor(mean[0]), math.floor(mean[1]),
                               math.ceil(mean[2]), math.ceil(mean[3])])
             self.histories, self.boxes = histories, boxes
+            self.raw_boxes = raw_boxes
             self.frame_key = frame_key
             self.initialized = True
         return [dict(item, bbox=list(box), area=(box[2] - box[0]) * (box[3] - box[1]))

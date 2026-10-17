@@ -1,32 +1,22 @@
 """HTTP routes for the shared recognition node; inference stays in node.py."""
 
-import re
 import time
 from io import BytesIO
 from flask import Flask, jsonify, request, Response, render_template
-from PIL import Image, ImageOps
+from PIL import Image
 from werkzeug.exceptions import ServiceUnavailable
 from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
 from .patches import reference_grid_image
 from .grounded import prepare_object, validate_settings
 from .kcf import kcf_factory
-from .image_manager import register_image_manager, image_path, EXTENSIONS
-
-
-def case_path(root, name):
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", name):
-        raise ValueError("Case name must contain 1–80 letters, numbers, underscores or hyphens.")
-    path = root / name
-    if path.resolve().parent != root.resolve() or path.is_symlink():
-        raise ValueError("Invalid case directory.")
-    return path
+from .image_manager import register_image_manager
+from .gallery_files import (
+    group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
+)
 
 
 def decode_image(stream):
-    with Image.open(stream) as image:
-        if image.width * image.height > 25_000_000:
-            raise ValueError("Image exceeds 25 megapixels.")
-        return ImageOps.exif_transpose(image).convert("RGB")
+    return load_image(stream, mode="RGB")
 
 
 def create_app(node):
@@ -41,13 +31,17 @@ def create_app(node):
                 node.stream_changed.notify_all()
         return response
 
+    def invalidate_results():
+        """Caller holds node.lock; discard output from the previous input revision."""
+        node.generation += 1
+        node.jpeg = None
+        node.clear_object_debug()
+        node.detections = []
+        node.overlay_at = None
+
     def images_changed(group):
         with node.lock:
-            node.generation += 1
-            node.jpeg = None
-            node.clear_object_debug()
-            node.detections = []
-            node.overlay_at = None
+            invalidate_results()
             node.status = "Building reference features…"
 
     def capture_camera(prompt):
@@ -88,11 +82,7 @@ def create_app(node):
 
     @app.get("/api/status")
     def status():
-        cases = sorted(
-            p.name
-            for p in node.root.iterdir()
-            if p.is_dir() and not p.is_symlink() and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", p.name)
-        )
+        cases = [path.name for path in gallery_groups(node.root)]
         with node.lock:
             age = (
                 None
@@ -143,9 +133,7 @@ def create_app(node):
         if stride is None:
             return jsonify(error="The model is loading. Patch grids will be available shortly."), 503
         items = []
-        for path in sorted(folder.iterdir()):
-            if path.suffix.lower() not in EXTENSIONS or not path.is_file() or path.is_symlink():
-                continue
+        for path in gallery_images(folder):
             item = dict(name=path.name, version=f"{path.stat().st_mtime_ns}-{path.stat().st_size}")
             try:
                 original = decode_image(path)
@@ -195,11 +183,7 @@ def create_app(node):
             if detector is not None:
                 detector.validate_prompt(settings["prompt"])
             node.grounding_settings = settings
-            node.generation += 1
-            node.jpeg = None
-            node.clear_object_debug()
-            node.detections = []
-            node.overlay_at = None
+            invalidate_results()
         return jsonify(ok=True, grounding=settings)
 
     @app.post("/api/cases")
@@ -210,10 +194,7 @@ def create_app(node):
         if not files:
             raise ValueError("Choose at least one picture.")
         # Validate all pictures before modifying the case.
-        try:
-            images = [decode_image(f.stream) for f in files]
-        except (OSError, Image.DecompressionBombError) as e:
-            raise ValueError(f"Unsupported picture: {e}") from e
+        images = [decode_image(f.stream) for f in files]
         folder.mkdir(exist_ok=True)
         for i, image in enumerate(images):
             dest = folder / f"{time.time_ns()}_{i}.png"
@@ -222,10 +203,7 @@ def create_app(node):
             temp.replace(dest)
         with node.lock:
             node.selected = name
-            node.generation += 1
-            node.jpeg = None
-            node.clear_object_debug()
-            node.detections = []
+            invalidate_results()
             node.status = "Building reference features…"
         return jsonify(ok=True, count=len(images))
 
@@ -248,18 +226,12 @@ def create_app(node):
         if mode == "upload":
             if "image" not in request.files:
                 raise ValueError("Choose a target picture.")
-            try:
-                image = decode_image(request.files["image"].stream)
-            except (OSError, Image.DecompressionBombError) as e:
-                raise ValueError(f"Unsupported picture: {e}") from e
+            image = decode_image(request.files["image"].stream)
         with node.lock:
             node.source = mode
             node.frame = image
             node.frame_seq += 1
-            node.generation += 1
-            node.jpeg = None
-            node.clear_object_debug()
-            node.detections = []
+            invalidate_results()
         return jsonify(ok=True)
 
     def stream(attribute):

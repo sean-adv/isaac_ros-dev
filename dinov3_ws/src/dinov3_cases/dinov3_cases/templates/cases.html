@@ -111,7 +111,7 @@
 <p id="object-help">
 </p>
 <p>
-<small>Diagnostic images show the latest recognition snapshot and stay unchanged while KCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
+<small>Diagnostic images show the latest recognition snapshot and stay unchanged while KCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Each card shows DINO and Lab similarity plus the weighted product score (0.8 DINO + 0.2 Lab). The comparison scores use the best reference within the selected label. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
 </p>
 <p id="object-status" role="status">Waiting for object detections…</p>
 <div id="object-gallery" class="reference-gallery">

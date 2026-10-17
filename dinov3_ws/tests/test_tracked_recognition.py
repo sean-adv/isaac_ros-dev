@@ -116,11 +116,44 @@ def test_partial_failed_new_set_never_commits_or_reuses_old_classification(setup
     assert changed and cache.encoded and result[0]['label'] == 'blue'
 
 
-def test_count_change_cannot_silently_assign_another_objects_label(setup):
+def test_count_changes_reencode_current_crops_without_reusing_old_labels(setup):
+    cache, encoder, _, _ = setup
+    token = object()
+    run(setup, [proposal(), proposal(45)], token)
+    # First object disappears. The surviving blue object must not inherit red.
+    result, diagnostics, changed = run(setup, [proposal(45)], token)
+    assert changed and cache.encoded and encoder.calls == 3
+    assert result[0]['label'] == 'blue'
+    assert result[0]['dino_score'] == pytest.approx(1)
+    assert result[0]['lab_score'] == pytest.approx(1)
+    assert diagnostics[0]['context']['roi'].getpixel((0, 0)) == (0, 0, 255)
+    result, _, changed = run(setup, [proposal(45), proposal()], token)
+    assert changed and cache.encoded and encoder.calls == 5
+    assert [item['label'] for item in result] == ['blue', 'red']
+    assert not run(setup, [proposal(45), proposal()], token)[2]
+    assert encoder.calls == 5
+
+
+def test_empty_set_can_recover_with_the_same_tracker_token(setup):
     token = object()
     run(setup, [proposal()], token)
-    with pytest.raises(ValueError, match='count changed'):
-        run(setup, [proposal(), proposal(45)], token)
+    run(setup, [], token)
+    result, _, changed = run(setup, [proposal(45)], token)
+    assert changed and setup[0].encoded and result[0]['label'] == 'blue'
+
+
+def test_failed_count_change_discards_invalid_cache_before_retry(setup):
+    cache, encoder, _, _ = setup
+    token = object()
+    run(setup, [proposal(), proposal(45)], token)
+    original = encoder.encode
+    encoder.encode = Mock(side_effect=RuntimeError('GPU failure'))
+    with pytest.raises(RuntimeError, match='GPU failure'):
+        run(setup, [proposal(45)], token)
+    assert cache.classifications is None and cache.diagnostic_detections == []
+    encoder.encode = original
+    result, _, changed = run(setup, [proposal(45)], token)
+    assert changed and result[0]['label'] == 'blue'
 
 
 def test_async_handoff_triggers_dino_but_background_submission_does_not(setup):
@@ -169,7 +202,8 @@ def test_async_handoff_triggers_dino_but_background_submission_does_not(setup):
         pipeline.close()
 
 
-def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_frame(setup, tmp_path):
+@pytest.mark.parametrize('scenario', ['handoff', 'same_frame', 'partial_loss', 'total_loss'])
+def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_frame(setup, tmp_path, scenario):
     import threading
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -183,16 +217,33 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     gallery.refresh = Mock(return_value=False)
     scheduler = Mock(active=object(), last_metrics={})
     scheduler.waiting_for_initial_detection.return_value = False
-    scheduler.has_result.return_value = False
     scheduler.scheduler_metrics.return_value = {}
+    # seq, bbox x positions, new tracker set, expected diagnostic revision,
+    # recognition source, recognition frame. Same-frame handoff used to truncate.
+    rows = {
+        'handoff': [(0, [0], False, 1, 'dino', 0),
+                    (1, [0], False, 1, 'cached', 0),
+                    (2, [45], True, 2, 'dino', 2)],
+        'same_frame': [(0, [0], False, 1, 'dino', 0),
+                       (0, [45, 0], True, 2, 'dino', 0),
+                       (1, [45, 0], False, 2, 'cached', 0)],
+        'partial_loss': [(0, [0, 45], False, 1, 'dino', 0),
+                         (1, [45], False, 2, 'dino', 1),
+                         (2, [45], False, 2, 'cached', 1)],
+        'total_loss': [(0, [0, 45], False, 1, 'dino', 0),
+                       (1, [], False, 2, 'none', None),
+                       (2, [45], True, 3, 'dino', 2)],
+    }[scenario]
+    scheduler.has_result.return_value = True
     calls = []
 
     def proposal_update(*args, **kwargs):
         index = len(calls)
         calls.append(index)
-        if index == 2:
+        _, positions, new_set, _, _, _ = rows[index]
+        if new_set:
             scheduler.active = object()
-        return [proposal(45 if index == 2 else 0)], ('kcf' if index == 1 else 'sam3')
+        return [proposal(x) for x in positions], ('sam3' if new_set or index == 0 else 'kcf')
 
     scheduler.update.side_effect = proposal_update
     parameters = dict(engine_path='unused', grounding_engine_path='unused',
@@ -201,6 +252,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
                       grounding_nms_iou=1., grounding_max_detections=20,
                       grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                       grounding_min_bbox_area=0, tracking_enabled=False, pose_enabled=False)
+    logger = Mock()
     node = SimpleNamespace(
         lock=threading.Lock(), generation=0, frame=Image.fromarray(pixels), frame_seq=0,
         source='upload', camera_received_at=None, root=tmp_path, stop=threading.Event(),
@@ -211,16 +263,27 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
         performance={}, pending_render=None, pending_publication=None,
         object_debug_revision=0, object_debug_snapshot=None,
         render_changed=threading.Event(), publish_changed=threading.Event(),
-        param=parameters.__getitem__, get_logger=lambda: Mock(),
+        param=parameters.__getitem__, get_logger=lambda: logger,
+        jpeg=b'previous image', clear_object_debug=Mock(),
     )
     observations = []
 
     def ticks():
-        for seq in range(3):
+        from dinov3_cases.visualization import render_display_overlay
+        import cv2
+        for seq, positions, _, _, _, _ in rows:
             node.frame_seq = seq
             yield
+            assert node.jpeg == b'previous image'
+            assert node.pending_publication[0] is node.detections
+            # Every result, including no surviving boxes, still queues an image.
+            frame, items, *_ = node.pending_render
+            overlay = render_display_overlay(frame.pixels, items, mode='2d')
+            ok, jpeg = cv2.imencode('.jpg', overlay)
+            assert ok and jpeg.size > 0
+            assert overlay.shape == (540, 960, 3)
             observations.append((node.object_debug_revision, node.object_debug_snapshot,
-                                 node.detections[0]['label'], node.performance.copy()))
+                                 [item['label'] for item in node.detections], node.performance.copy()))
 
     node.worker_ticks = ticks
     try:
@@ -230,15 +293,19 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
                 patch('dinov3_cases.node.ObjectGallery', return_value=gallery), \
                 patch('dinov3_cases.node.AsyncKCFProposals', return_value=scheduler):
             CaseNode.run_grounded_worker(node)
-        assert encoder.calls == 2
-        assert [row[0] for row in observations] == [1, 1, 2]
-        assert observations[0][1] is observations[1][1]
-        assert observations[2][1] is not observations[1][1]
-        assert [row[2] for row in observations] == ['red', 'red', 'blue']
-        assert [row[3]['recognition_source'] for row in observations] == ['dino', 'cached', 'dino']
-        assert [row[3]['recognition_frame_id'] for row in observations] == [0, 0, 2]
-        assert [row[3]['frame_id'] for row in observations] == [0, 1, 2]
+        assert encoder.calls == sum(len(row[1]) for row in rows if row[4] == 'dino')
+        assert [row[0] for row in observations] == [row[3] for row in rows]
+        for index in range(1, len(rows)):
+            assert (observations[index][1] is observations[index-1][1]) == (rows[index][3] == rows[index-1][3])
+        assert [row[2] for row in observations] == [
+            ['blue' if x == 45 else 'red' for x in row[1]] for row in rows
+        ]
+        assert [row[3]['recognition_source'] for row in observations] == [row[4] for row in rows]
+        assert [row[3]['recognition_frame_id'] for row in observations] == [row[5] for row in rows]
+        assert [row[3]['frame_id'] for row in observations] == [row[0] for row in rows]
         assert not any('track_id' in detection for detection in node.detections)
+        logger.error.assert_not_called()
+        node.clear_object_debug.assert_not_called()
     finally:
         if node.pending_render is not None:
             node.pending_render[0].release()

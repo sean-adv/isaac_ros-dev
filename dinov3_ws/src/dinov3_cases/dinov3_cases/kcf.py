@@ -26,7 +26,8 @@ class KCFProposals:
     """Count unique processed frames, never camera callbacks or gallery refreshes.
 
     Detection replaces all trackers, including when SAM3 returns no objects.
-    Any lost/invalid track triggers detection on that same frame. Detection
+    Lost/invalid tracks trigger synchronous detection by default. Async callers
+    can retain valid survivors and request a background refresh instead. Detection
     scores on tracked proposals remain the last SAM3 score, not KCF confidence.
     Trackers use fixed crops padded per side until the next detection.
     refresh_requested signals an approaching crop boundary to the async caller.
@@ -92,7 +93,7 @@ class KCFProposals:
                 or (rx1 < pixels.shape[1] and rx1-x1 <= mx)
                 or (ry1 < pixels.shape[0] and ry1-y1 <= my))
 
-    def update(self, pixels, frame_key, context, interval, detect):
+    def update(self, pixels, frame_key, context, interval, detect, *, retain_valid_tracks=False):
         validate_detection_interval(interval)
         if context != self.context or interval != self.interval:
             self.reset()
@@ -107,6 +108,8 @@ class KCFProposals:
                     if interval > 1 and self.roi_padding is None else None)
         proposals = []
         if not due:
+            surviving_trackers, surviving_rois = [], []
+            lost = False
             for tracker, previous, roi in zip(self.trackers, self.proposals, self.rois):
                 try:
                     bgr = full_bgr if full_bgr is not None else self._crop(pixels, roi)
@@ -125,12 +128,23 @@ class KCFProposals:
                 except cv2.error:
                     bbox = None
                 if bbox is None:
+                    if retain_valid_tracks:
+                        lost = True
+                        continue
                     due = True
                     break
+                surviving_trackers.append(tracker)
+                surviving_rois.append(roi)
                 self.refresh_requested |= self._near_edge(bbox, roi, pixels)
                 proposals.append(dict(previous, bbox=bbox,
                                       area=(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
                                       bbox_source="kcf"))
+            if retain_valid_tracks and lost:
+                self.trackers, self.rois = surviving_trackers, surviving_rois
+                self.refresh_requested = True
+                # Keep valid current-frame boxes while async SAM3 refreshes.
+                # Total loss clears the stale set through detect() below.
+                due = not proposals
         if due:
             # Retry detection if the detector raises before this frame commits.
             self.retry_detection = True

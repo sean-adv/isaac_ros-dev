@@ -38,6 +38,7 @@ from .depth_sync import matched_inputs
 from .depth_bbox import attach_bboxes3d, bboxes3d_message
 from .web import create_app
 from .visualization import render_bbox_overlay, render_display_overlay
+from .object_visualization import ObjectVisualizationSnapshot
 from .grounded import (
     DEFAULT_PROMPT,
     ObjectGallery,
@@ -45,7 +46,6 @@ from .grounded import (
     validate_bbox_limits,
     TrackedObjectRecognizer,
     recognition_message,
-    ObjectVisualizationSnapshot,
 )
 
 
@@ -490,9 +490,7 @@ class CaseNode(Node):
         for _ in self.worker_ticks():
             shared_frame = None
             with self.lock:
-                gen, frame, seq = self.generation, self.frame, self.frame_seq
-                settings = dict(self.grounding_settings)
-                received_at = self.camera_received_at if self.source == "camera" else None
+                gen = self.generation
             try:
                 # Include filesystem changes even with an uploaded, otherwise static target.
                 if (
@@ -526,7 +524,6 @@ class CaseNode(Node):
                     continue  # Camera callbacks keep only the newest input meanwhile.
                 if isinstance(frame, ImageMsg):
                     pixels = self.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")
-                    header = frame.header
                 else:
                     pixels = np.asarray(frame.convert("RGB"))
                 shared_frame = self.frame_pool.acquire(pixels, frame_id=seq, timestamp=received_at)
@@ -565,10 +562,16 @@ class CaseNode(Node):
                     settings["recognition_threshold"], settings["margin"],
                     token=recognition_token, gallery_revision=gallery_revision,
                 )
-                if recognizer.encoded:
-                    recognition_frame_id = seq
-                elif not proposals:
+                if not proposals:
                     recognition_frame_id = None
+                    recognition_source = "none"
+                elif recognizer.encoded:
+                    recognition_frame_id = seq
+                    recognition_source = "dino"
+                elif recognition_changed:
+                    recognition_source = "reclassified"
+                else:
+                    recognition_source = "cached"
                 recognized_at = time.monotonic()
                 with self.lock:
                     if gen != self.generation:
@@ -614,8 +617,7 @@ class CaseNode(Node):
                                        if proposal_source == "sam3" else {}),
                         grounding_schedule=proposal_tracker.scheduler_metrics(),
                         bbox_source=proposal_source,
-                        recognition_source=("none" if not proposals else "dino" if recognizer.encoded else
-                                            "reclassified" if recognition_changed else "cached"),
+                        recognition_source=recognition_source,
                         recognition_frame_id=recognition_frame_id,
                         detection_interval=settings["detection_interval"],
                         detect_ms=(detected_at - start) * 1000,

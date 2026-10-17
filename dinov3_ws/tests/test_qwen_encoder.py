@@ -38,7 +38,7 @@ def test_global_gallery_recognition_and_selected_reference_debug(tmp_path):
     gallery.refresh(tmp_path, encoder, 448, 32)
     diagnostics = []
     detections = recognize_objects(
-        Image.new('RGB', (100, 60)),
+        Image.new('RGB', (100, 60), 'red'),
         [dict(bbox=[0, 0, 100, 60], detection_score=.9, detection_label='box')],
         encoder, gallery, 448, 32, .85, .05, diagnostics, defer_diagnostics=True,
     )

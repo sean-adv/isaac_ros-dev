@@ -38,8 +38,8 @@ def main():
             times.append((time.monotonic() - started) * 1000)
         assert embedding.shape == (1, 4096) and embedding.isfinite().all()
         torch.testing.assert_close(embedding.norm(dim=-1), torch.ones(1, device=embedding.device))
-        match = gallery.classify(embedding[0], .85, .05)
-        index, score = gallery.best_reference(embedding[0])
+        match = gallery.classify(embedding[0], .85, .05, lab_histogram=gallery.lab_histograms[gallery.labels.index(label)])
+        index, score = gallery.best_reference(embedding[0], lab_histogram=gallery.lab_histograms[gallery.labels.index(label)])
         assert score > .999 and gallery.labels[index] == label
         rows.append(dict(case=label, image=str(path), encode_ms=times, classification=match))
     report = dict(model=QWEN_MODEL_ID, revision=QWEN_REVISION, device=torch.cuda.get_device_name(),

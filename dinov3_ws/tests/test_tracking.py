@@ -219,3 +219,24 @@ def test_ros_2d_and_3d_use_same_tracking_id():
         nearest_pixel=[0, 0], nearest_point=[-.05, -.05, 1.]))
     assert recognition_message([item], Header()).detections[0].id == "42"
     assert bboxes3d_message([item], Header()).detections[0].id == "42"
+
+
+def test_same_frame_handoff_preserves_added_removed_and_reordered_boxes():
+    smoother = BBoxSmoother()
+    smoother.update([box(0), box(300)], 1, 'camera')
+    # The previous version reused two cached boxes and silently lost the third.
+    result = smoother.update([box(300), box(0), box(600)], 1, 'camera')
+    assert [item['bbox'] for item in result] == [box(x)['bbox'] for x in (300, 0, 600)]
+    result = smoother.update([box(600)], 1, 'camera')
+    assert [item['bbox'] for item in result] == [box(600)['bbox']]
+    assert smoother.update([], 1, 'camera') == []
+    assert smoother.update([box(900)], 1, 'camera')[0]['bbox'] == box(900)['bbox']
+
+
+def test_same_frame_correction_replaces_sample_without_biasing_average():
+    smoother = BBoxSmoother()
+    smoother.update([box(0)], 1, 'camera')
+    smoother.update([box(6)], 2, 'camera')
+    assert smoother.update([box(12)], 2, 'camera')[0]['bbox'][0] == 6
+    assert smoother.update([box(12)], 2, 'camera')[0]['bbox'][0] == 6
+    assert smoother.update([box(24)], 3, 'camera')[0]['bbox'][0] == 12

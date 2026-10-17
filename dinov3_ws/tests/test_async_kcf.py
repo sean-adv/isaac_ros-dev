@@ -557,3 +557,71 @@ def test_roi_edge_requests_background_detection_before_interval_without_dropping
     finally:
         release.set()
         pipeline.close()
+
+
+@pytest.mark.parametrize('lose_all', [False, True])
+def test_tracking_loss_keeps_valid_boxes_and_requests_sam3_before_interval(lose_all):
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+    entered, release = threading.Event(), threading.Event()
+    original = proposals() + [dict(proposals()[0], bbox=[50, 12, 70, 32])]
+
+    def initial(image):
+        return original, {}
+
+    def slow(image):
+        entered.set()
+        assert release.wait(3)
+        return original, {}
+
+    try:
+        assert update(pipeline, 0, initial, interval=30) is None
+        finish(pipeline)
+        assert len(update(pipeline, 0, initial, interval=30)[0]) == 2
+        active = pipeline.active
+        active.trackers[0].update = Mock(return_value=(False, (0, 0, 0, 0)))
+        if lose_all:
+            active.trackers[1].update = Mock(return_value=(False, (0, 0, 0, 0)))
+        items, _ = update(pipeline, 1, slow, interval=30)
+        assert entered.wait(2)  # Refresh on frame 1, not after 30 frames.
+        assert pipeline.active is active
+        if lose_all:
+            assert items == []
+        else:
+            assert [item['bbox'] for item in items] == [[51, 12, 71, 32]]
+            # Still valid on the next frame while detection remains blocked.
+            items, source = update(pipeline, 2, slow, interval=30)
+            assert source == 'kcf'
+            assert [item['bbox'] for item in items] == [[52, 12, 72, 32]]
+        release.set()
+        finish(pipeline)
+        recovered, source = update(pipeline, 2, initial, interval=30)
+        assert source == 'sam3' and len(recovered) == 2
+    finally:
+        release.set()
+        pipeline.close()
+
+
+def test_synchronous_detection_never_copies_replay_frames():
+    class NoReplayCopy(np.ndarray):
+        def copy(self, *args, **kwargs):
+            raise AssertionError("Synchronous detection must not copy replay frames")
+
+    pipeline = AsyncKCFProposals(MovingTracker)
+    detector = Mock(side_effect=detect)
+    try:
+        for n in (0, 0, 1):
+            image = pixels(n).view(NoReplayCopy)
+            items, source = pipeline.update(image, n, "camera", 1, detector)
+            assert source == "sam3"
+            assert items[0]["bbox"] == proposals(n)[0]["bbox"]
+        assert detector.call_count == 2  # Same-frame reads still reuse detection.
+        assert not pipeline.history and pipeline.history_bytes == 0
+        # Changing to asynchronous mode must still seed/replay from owned pixels.
+        assert update(pipeline, 2) is None
+        finish(pipeline)
+        assert update(pipeline, 3)[0][0]["bbox"] == proposals(3)[0]["bbox"]
+        assert pipeline.history
+        assert update(pipeline, 4, interval=1)[0][0]["bbox"] == proposals(4)[0]["bbox"]
+        assert not pipeline.history and pipeline.history_bytes == 0
+    finally:
+        pipeline.close()

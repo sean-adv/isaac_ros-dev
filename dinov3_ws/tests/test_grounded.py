@@ -9,6 +9,7 @@ from PIL import Image
 
 from dinov3_cases.grounded import (
     ObjectGallery,
+    compute_lab_histogram,
     clean_proposals,
     prepare_object,
     recognize_objects,
@@ -88,22 +89,24 @@ def test_gallery_multi_class_unknown_and_filesystem_updates(tmp_path):
     gallery = ObjectGallery()
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
     assert not gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    red = gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05)
+    red_hist = compute_lab_histogram(Image.new("RGB", (32, 32), "red"))
+    shared_hist = (red_hist + compute_lab_histogram(Image.new("RGB", (32, 32), "blue"))) / 2
+    red = gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)
     assert red["label"] == "red" and red["margin"] == 1.0
-    assert gallery.classify(torch.tensor([0.0, 1.0, 0.0]), 0.75, 0.05)["reason"] == "low_similarity"
+    assert gallery.classify(torch.tensor([0.0, 1.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["reason"] == "low_similarity"
     shared = torch.nn.functional.normalize(torch.tensor([1.0, 0.0, 1.0]), dim=0)
-    assert gallery.classify(shared, 0.6, 0.05)["reason"] == "ambiguous"
+    assert gallery.classify(shared, 0.6, 0.05, lab_histogram=shared_hist)["reason"] == "ambiguous"
     # Additional views of the same class must not occupy both top-two slots.
     Image.new("RGB", (32, 48), "red").save(tmp_path / "red/two.png")
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05)["label"] == "red"
+    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["label"] == "red"
     (tmp_path / "blue/one.png").unlink()
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05)["margin"] is None
+    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["margin"] is None
     for path in (tmp_path / "red").iterdir():
         path.unlink()
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    assert gallery.classify(shared, 0.75, 0.05)["reason"] == "empty_gallery"
+    assert gallery.classify(shared, 0.75, 0.05, lab_histogram=shared_hist)["reason"] == "empty_gallery"
 
 
 def test_roi_coordinates_identity_and_ros_header(tmp_path):
@@ -282,6 +285,14 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
     assert automatic[1]["similarity_min"] == pytest.approx(1.0)
     assert selected[1]["comparison_score"] == pytest.approx(0.0)
     assert selected[1]["score"] == pytest.approx(1.0)
+    assert selected[1]["dino_score"] == pytest.approx(1.0)
+    assert selected[1]["lab_score"] == pytest.approx(1.0)
+    assert selected[1]["comparison_dino_score"] == pytest.approx(0.0)
+    assert selected[1]["comparison_lab_score"] == pytest.approx(0.0)
+    for item in automatic + selected:
+        assert item["comparison_score"] == pytest.approx(
+            .8 * item["comparison_dino_score"] + .2 * item["comparison_lab_score"]
+        )
     assert len(images) == 12
     with pytest.raises(ValueError):
         snapshot.render("missing")
@@ -290,7 +301,8 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
         path.unlink()
     gallery.refresh(tmp_path, encoder, 32, 16)
     assert snapshot.render("mix")[0][0]["comparison_reference_count"] == 2
-    assert gallery.best_reference(torch.tensor([1.0, 0.0, 0.0]), "mix") == (None, None)
+    assert gallery.best_reference(torch.tensor([1.0, 0.0, 0.0]), "mix",
+                                  lab_histogram=compute_lab_histogram(mixed)) == (None, None)
 
 
 def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
@@ -307,6 +319,7 @@ def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(grounded, "build_object_diagnostic", render)
+    monkeypatch.setattr("dinov3_cases.object_visualization.build_object_diagnostic", render)
     gallery = ObjectGallery()
     results = recognize_objects(
         image,

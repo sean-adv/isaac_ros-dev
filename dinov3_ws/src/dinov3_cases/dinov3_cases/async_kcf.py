@@ -190,7 +190,8 @@ class AsyncKCFProposals:
                 self.active, self.last_metrics = self.ready
                 self.ready = None
             changed = frame_key != self.last_key
-            if changed:
+            # Only asynchronous detection consumes replay history.
+            if changed and interval > 1:
                 self.last_key = frame_key
                 self.serial += 1
                 # Independent storage: shared-memory slots can be reused meanwhile.
@@ -215,7 +216,9 @@ class AsyncKCFProposals:
         lost = False
         if self.active.initialized:
             # Candidate keys are history serials, matching active updates exactly.
-            proposals, source = self.active.update(pixels, serial, version, 2**63, lambda: [])
+            proposals, source = self.active.update(
+                pixels, serial, version, 2**63, lambda: [], retain_valid_tracks=True,
+            )
             lost = source == "sam3" and changed
             if applied:
                 source = "sam3"

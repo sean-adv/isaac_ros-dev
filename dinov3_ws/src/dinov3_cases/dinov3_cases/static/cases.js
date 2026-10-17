@@ -213,6 +213,7 @@ async function refreshObjects() {
     clearObjectUrls();
     const gallery = el('object-gallery');
     gallery.replaceChildren();
+    const similarity = value => Number.isFinite(value) ? value.toFixed(3) : '—';
     data.objects.forEach((item, index) => {
       const card = document.createElement('figure');
       card.className = 'reference-card';
@@ -223,10 +224,10 @@ async function refreshObjects() {
       detail.textContent = 'bbox [' + item.bbox.join(', ') + '] · ROI ' + item.roi_size.join(' × ') + ' → input ' + item.input_size.join(' × ') + ' · ' + item.patch_grid.join(' × ') + ' patches';
       card.append(detail);
       const score = document.createElement('p');
-      score.textContent = 'det ' + item.detection_score.toFixed(3) + ' · product sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason;
+      score.textContent = 'det ' + item.detection_score.toFixed(3) + ' · DINO ' + similarity(item.dino_score) + ' · Lab ' + similarity(item.lab_score) + ' · product sim (0.8 DINO + 0.2 Lab) ' + similarity(item.score) + ' · ' + item.reason;
       card.append(score);
       const comparison = document.createElement('p');
-      comparison.textContent = item.comparison_reference ? 'Comparing ' + item.comparison_case + ' · label sim ' + item.comparison_score.toFixed(3) + ' · ' + item.comparison_reference_count + ' reference images · best ' + item.comparison_reference.name : 'No reference images available';
+      comparison.textContent = item.comparison_reference ? 'Comparing ' + item.comparison_case + ' · DINO ' + similarity(item.comparison_dino_score) + ' · Lab ' + similarity(item.comparison_lab_score) + ' · label sim ' + similarity(item.comparison_score) + ' · ' + item.comparison_reference_count + ' reference images · best ' + item.comparison_reference.name : 'No reference images available';
       card.append(comparison);
       if (images[index]) {
         const image = document.createElement('img');

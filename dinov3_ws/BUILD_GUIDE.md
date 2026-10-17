@@ -158,3 +158,17 @@ cd /workspaces/isaac_ros-dev
 DINO 配合 `grounding_detection_interval`：新的 SAM3 結果完成 KCF replay 並交接後，才對該組當前框執行一次 DINO；背景偵測執行中與一般 KCF 影格沿用分類、相似度及 margin。分類依附追蹤器組實例與固定的物件順序，不新增數字 ID，也不將分類跨組配對。KCF 遺失／空偵測會清除分類，新組一律重新辨識（包括 unknown）。來源、解析度或設定變更會重建追蹤；`grounding_detection_interval: 1` 則每張同步 SAM3 影格都執行 DINO。
 
 框座標、3D 深度與 ROS 結果仍依當前處理影格更新。Diagnostic images 保留最近一次辨識的原始裁切與特徵，KCF 影格不重建診斷快照。圖庫更新時用已保存的 descriptor 重新分類與更新診斷快照，不重新前向推論目標影像（新參考圖仍須建立特徵）。`performance.recognition_source` 為 `dino`／`cached`／`reclassified`／`none`，`recognition_frame_id` 指出目標影像最近一次 DINO 前向推論的影格。需重新啟動辨識服務生效。
+
+## DINO + Lab 相似度
+
+最終辨識分數為 `score = 0.8 * S_DINO + 0.2 * S_Lab`。DINO 保留原本的 descriptor cosine similarity；Lab 使用 bbox 原始裁切與每張參考圖的聯合 L/a/b 直方圖（8×16×16 bins，L1 正規化），以 Bhattacharyya coefficient 計算 0～1 相似度。直方圖不含模型輸入 padding，參考圖完全透明的像素不計入；全透明參考圖會拒絕載入。
+
+先對每張參考圖融合兩種分數，再取各類別最高分；最佳類別、參考圖、threshold、margin、網頁與 ROS 的 score 都使用融合結果。結果另保留 `dino_score`、`lab_score` 便於檢查。診斷畫面的 comparison score 使用融合結果，patch heatmap 維持 DINO patch similarity。
+
+Lab 跟隨 DINO 更新：SAM3 新結果交接時重新計算，KCF 影格沿用；圖庫或辨識門檻改變時，使用快取的 descriptor 與 Lab histogram 重新比對。重新啟動辨識服務後生效。
+
+## 追蹤遺失與分類快取恢復
+
+非同步 KCF 遺失部分物件時，保留其餘當幀有效框，立即嘗試提交背景 SAM3（不等待 detection interval，仍限制單一任務）。框數改變會清除整組舊分類與診斷快取，對目前有效框重新執行 DINO／Lab；不再因數量不一致拋出錯誤並清空畫面。全部追蹤遺失時清除失效框與分類，持續輸出無框影像並等待新 SAM3 結果。
+
+同一影格收到 SAM3 交接結果時，bbox 平滑快取會檢查原始框的數量、順序與座標，避免截掉新增物件；同幀修正取代原樣本，不重複累積平滑權重。真正的模型／影像處理例外仍沿用既有錯誤處理；上述恢復針對追蹤狀態與分類快取變化。

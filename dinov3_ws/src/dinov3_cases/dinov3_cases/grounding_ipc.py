@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from multiprocessing import shared_memory, resource_tracker
-from .frame_pool import SharedFrame, SharedFramePool
+from .frame_pool import MAX_IMAGE_BYTES, SharedFrame, SharedFramePool
 import socket
 import struct
 import subprocess
@@ -14,7 +14,6 @@ import time
 import numpy as np
 
 MAX_MESSAGE = 1 << 20
-MAX_IMAGE_BYTES = 128 << 20
 
 
 def _receive(sock):
