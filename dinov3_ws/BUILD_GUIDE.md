@@ -17,11 +17,15 @@
 
 預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.5、NMS 停用、每幀最多 20 個框；ROI tracking 預設停用。
 
-SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。設定檔預設 10：每隔 10 個不同處理影格嘗試提交一次背景 SAM3，最多一個進行中的任務，不排隊。等待回覆時，主流程持續用 KCF 更新當幀 bbox 並執行 DINOv3 辨識。首次初始化／切換來源或設定時，只提交一張背景偵測影像，等待期間相機回呼繼續保留最新輸入，但不累積 KCF 歷史，也不重複複製影像或等待深度。首次偵測完成後，KCF 先在偵測原圖初始化，再實際追蹤當前最新影格；沒有將舊框直接初始化於新影格。若位移太大導致首次追蹤失敗，清除失效框並從最新影像重新偵測；設為 1 則停用 KCF，維持每幀同步 SAM3。計數以實際送入推論的不同影格為準，相機跳過的影格不計入；相同靜態圖片重跑辨識也不增加計數。
+SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。每隔 N 個不同處理影格嘗試提交一次背景 SAM3，最多一個進行中的任務，不排隊；設為 1 則停用 KCF，維持每幀同步 SAM3。等待 SAM3 時，主流程持續用原本 KCF 更新 bbox，分類沿用快取。首次初始化／切換來源或設定時持續接收最新 RGB，不發布暫時的空結果；相同輸入未改變時不重複複製。計數以實際處理的不同影格為準，相機跳過的影格不計入。
 
-穩態背景任務在 SAM3 原始輸入影格上建立一組新 KCF，再依序沿緩衝的處理影格追到最新位置，最後交給主流程；不直接將舊 bbox 套到新影格。緩衝最多 32 幀、約 64 MiB（至少保留一張影格；執行中批次另持有參照）。缺少必要影格、追趕途中追蹤失敗、或來源／解析度／設定已變更時丟棄舊結果，下一輪重新提交。共享輸入影格保留租約至 SAM3 回覆，避免讀取已被覆寫的資料。
+SAM3 完成後，背景工作用最新已送入追蹤流程的 RGB 影格與 SAM3 偵測框初始化新的 KCF，略過 SAM3 執行期間的影格。這將舊框當成新影格上的位置估計，適合物體位置變化小的情況；移動較大可能追錯區域。若初始化或補追期間又有新影格，每次只取當下最新影格更新 KCF，略過中間影格，追上後才交接；主流程此時重新執行 DINOv3／Lab，並建立新的物件診斷快照。排程器始終只保留一張獨立複製的最新影格；執行中的偵測、初始化或更新各持有所需影像參照，不建立連續歷史佇列。共享偵測輸入保留租約至 SAM3 回覆。
 
-穩態 replay 每次工作最多 `kcf_replay_max_frames: 8` 幀，時間預算 `kcf_replay_budget_ms: 150.0` ms，不含 SAM3 與 KCF 初始化。時間在每次 KCF 更新前檢查，單次不可中斷的更新可能超過預算，但不再啟動下一幀。超限時丟棄候選追蹤器，保留前景追蹤器與當前有效框，依正常偵測間隔再提交；不因超限立即強制重試。缺歷史、追蹤失敗或 context 變更仍走原有丟棄／補偵測路徑。每個 replay 更新前都檢查取消與 context，避免已切換來源的工作繼續消耗整批 replay。`performance.grounding_schedule` 提供最近工作的 `replay_frames`、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。參數修改後重新啟動。
+補追呼叫次數與時間上限由 `kcf_replay_max_frames` 與 `kcf_replay_budget_ms` 控制（被跳過的影格不計入呼叫次數），不含 SAM3 與 KCF 初始化耗時。時間在每次更新前檢查，單次不可中斷的更新可能超過預算，但不再啟動下一幀。超限時丟棄候選 tracker，保留前景 tracker 與當前有效框，依正常偵測間隔再提交。追蹤失敗或 context 變更仍會丟棄候選；變更來源後不套用舊結果。`performance.grounding_schedule` 提供 `seed_frame_key`（初始化影格）、`seed_skipped_frames`（初始化前略過的已處理影格數）、`catchup_skipped_frames`（補追時略過的中間影格數）、`init_ms`、`replay_frames`、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。回放預算與策略修改後需重新啟動服務。
+
+網頁狀態列的 **result FPS** 是完整辨識主迴圈最近 3 秒的結果頻率，包含影像準備、深度等待、候選框更新、交接時的辨識與每幀 3D 計算；不是 KCF 單獨 FPS 或 MJPEG 顯示 FPS。相機區塊另外顯示 **input FPS**。`/api/status` 的 `performance` 提供 `image_prepare_ms`（包含共享複製）、`shared_copy_ms`（前者的子項）、`depth_wait_ms`、`proposal_update_ms`（包含非同步排程、最新影格複製與前景 KCF）、`recognize_ms`、`bbox3d_ms`、`render_ms`。首次交接的深度等待發生在辨識後，會同時包含在 `bbox3d_ms` 中。平常的 `detect_ms` 為影像準備＋深度等待＋候選框更新的合計，不能當成純 KCF 耗時。
+
+bbox ROS 發布由獨立 worker 發送 Detection2D／Detection3D／AprilTag 資料，不包含 RGB。瀏覽器疊圖仍由另一個 worker 對每個結果產生完整 960×540 JPEG，相機預覽也另外編碼；有 ROS debug 訂閱者才產生全解析度疊圖影像。JPEG 或 DDS 不會直接阻塞 bbox worker，但繪圖、編碼與背景 KCF 會共用 CPU／記憶體資源。共享影格池若被 SAM3、正在繪圖與待繪圖工作占滿，主迴圈會先捨棄尚未開始的舊繪圖工作，回收該影格租約再取新輸入，避免舊疊圖阻擋推論。辨識交接的 DINOv3 與深度／3D 計算目前仍在主迴圈。
 
 任一主流程 KCF 追蹤失敗或框無效時會清除失效框並提前要求背景偵測；當下已有任務就等它完成，不同步阻塞補偵測。新 SAM3 結果取代整組追蹤器，空偵測會清除舊框。DINOv3、深度／3D 框與發布使用當幀框。`bbox_source=sam3` 表示套用了新偵測（可能已經過追趕），其餘為 `kcf`；追蹤期間的 `detection_score` 保留最近一次 SAM3 分數。`grounding_ipc.worker_detect_ms` 為背景偵測耗時，主流程的 `detect_ms` 則是取得當幀提案的耗時。既有 `tracking_enabled` 仍控制 ID 配對與 bbox 顯示門檻，與背景排程獨立。
 

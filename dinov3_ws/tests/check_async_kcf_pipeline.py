@@ -76,7 +76,9 @@ def main():
             assert initial_entered.is_set()
             assert status['performance'].get('completed_at') is not None, status
             assert bootstrap_frames > 5
-            assert status['performance']['grounding_schedule']['replay_frames'] == 0
+            schedule = status['performance']['grounding_schedule']
+            assert schedule['seed_skipped_frames'] > 0, schedule
+            assert schedule['discard_reason'] is None, schedule
             assert status['performance']['grounding_schedule']['initializing'] is False
             assert client.get('/api/detections').json['detections']
             bootstrap = dict(input_frames=bootstrap_frames, input_target_fps=30,
@@ -104,10 +106,19 @@ def main():
                 assert status['performance']['bbox_source'] == 'kcf'
                 assert client.get('/api/detections').json['detections']
                 rows.append(status['performance'])
+            previous_revision = node.object_debug_revision
             release.set()
             status = wait_for(lambda s: s['performance'].get('bbox_source') == 'sam3')
             assert status['performance']['frame_id'] == seq
             assert status['performance']['grounding_ipc']['source_frame_id'] < seq
+            schedule = status['performance']['grounding_schedule']
+            assert schedule['seed_frame_key'][-1] == seq, schedule
+            assert schedule['seed_skipped_frames'] > 0, schedule
+            assert schedule['replay_frames'] == 0, schedule
+            assert status['performance']['recognition_source'] == 'dino', status
+            visualizations = client.get('/api/object_visualizations').json
+            assert visualizations['ready'] and visualizations['objects'], visualizations
+            assert visualizations['revision'] > previous_revision, visualizations
             report = dict(passed=True, bootstrap=bootstrap, kcf_results_during_stalled_sam3=True,
                           rows=rows, handoff=status['performance'])
             output = ARTIFACTS / 'sam3/async_kcf_validation.json'

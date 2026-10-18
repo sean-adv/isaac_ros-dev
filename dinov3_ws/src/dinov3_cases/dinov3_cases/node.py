@@ -198,6 +198,8 @@ class CaseNode(Node):
         self.camera_frame = None
         self.camera_seq = 0
         self.camera_received_at = None
+        self.camera_rate = ResultRate(window_seconds=3.0)
+        self.camera_fps = None
         self.preview_error = None
         self.overlay_at = None
         self.status = "Loading DINOv3 model…"
@@ -244,6 +246,7 @@ class CaseNode(Node):
             self.camera_frame = msg
             self.camera_seq += 1
             self.camera_received_at = time.monotonic()
+            self.camera_fps = self.camera_rate.update(self.camera_received_at, msg.header.frame_id)
             self.preview_changed.set()
             if self.source != "camera":
                 return
@@ -348,6 +351,18 @@ class CaseNode(Node):
             return (getattr(self, attribute) is None
                     or self.stream_viewers.get(attribute, 0) > 0
                     or time.monotonic() - self.stream_requested_at.get(attribute, -float("inf")) < 2)
+
+    def acquire_input_frame(self, pixels, *, frame_id, timestamp):
+        """Reclaim a queued old overlay before letting rendering exhaust input slots."""
+        frame = self.frame_pool.acquire(pixels, frame_id=frame_id, timestamp=timestamp)
+        if frame is not None:
+            return frame
+        with self.lock:
+            pending, self.pending_render = self.pending_render, None
+        if pending is None:
+            return None
+        pending[0].release()
+        return self.frame_pool.acquire(pixels, frame_id=frame_id, timestamp=timestamp)
 
     def run_rendering(self):
         """One active and one latest pending job; never block bbox publication."""
@@ -519,17 +534,18 @@ class CaseNode(Node):
                 header = frame.header if isinstance(frame, ImageMsg) else None
                 image_size = (frame.width, frame.height) if header is not None else frame.size
                 context = (gen, image_size, header.frame_id if header is not None else None)
-                if proposal_tracker.waiting_for_initial_detection(
-                        context, settings["detection_interval"]):
-                    continue  # Camera callbacks keep only the newest input meanwhile.
                 if isinstance(frame, ImageMsg):
                     pixels = self.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")
                 else:
                     pixels = np.asarray(frame.convert("RGB"))
-                shared_frame = self.frame_pool.acquire(pixels, frame_id=seq, timestamp=received_at)
+                shared_frame = self.acquire_input_frame(pixels, frame_id=seq, timestamp=received_at)
                 if shared_frame is None:
                     continue
-                depth_inputs = self.depth_inputs_for(frame)
+                image_ready_at = time.monotonic()
+                initializing = not proposal_tracker.active.initialized
+                depth_inputs = None if initializing else self.depth_inputs_for(frame)
+                depth_ready_at = time.monotonic()
+                depth_wait_ms = (depth_ready_at - image_ready_at) * 1000
                 # Capture settings by value: the job may outlive this loop iteration.
                 request = dict(
                     prompt=settings["prompt"], box_threshold=settings["box_threshold"],
@@ -549,7 +565,8 @@ class CaseNode(Node):
                     settings["detection_interval"], detect, frame=shared_frame,
                 )
                 if result is None:
-                    continue  # Wait for the initial detection without publishing empty results.
+                    processed = (gen, seq, gallery_revision)
+                    continue  # Keep admitting new RGB frames without publishing empty results.
                 proposals, proposal_source = result
                 detected_at = time.monotonic()
                 proposals = self.bbox_smoother.update(proposals, (gen, seq), context)
@@ -585,6 +602,10 @@ class CaseNode(Node):
                         for item in detections:
                             item["bbox_visible"] = True
                 if self.param("pose_enabled") and header is not None:
+                    if initializing:
+                        wait_started = time.monotonic()
+                        depth_inputs = self.depth_inputs_for(frame)
+                        depth_wait_ms += (time.monotonic() - wait_started) * 1000
                     self.estimate_bboxes3d(detections, depth_inputs)
                 else:
                     for item in detections:
@@ -620,6 +641,10 @@ class CaseNode(Node):
                         recognition_source=recognition_source,
                         recognition_frame_id=recognition_frame_id,
                         detection_interval=settings["detection_interval"],
+                        image_prepare_ms=(image_ready_at - start) * 1000,
+                        shared_copy_ms=shared_frame.copy_ms,
+                        depth_wait_ms=depth_wait_ms,
+                        proposal_update_ms=(detected_at - depth_ready_at) * 1000,
                         detect_ms=(detected_at - start) * 1000,
                         recognize_ms=(recognized_at - detected_at) * 1000,
                         bbox3d_ms=(bbox3d_at - recognized_at) * 1000,

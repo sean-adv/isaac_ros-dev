@@ -1,6 +1,5 @@
-"""Background SAM3 detection with KCF replay to the latest processed frame."""
+"""Background SAM3 detection, latest-frame KCF seeding, and bounded catch-up."""
 
-from collections import deque
 import threading
 import math
 import time
@@ -17,35 +16,30 @@ def validate_replay_limits(max_replay_frames, replay_budget_ms):
 
 
 class AsyncKCFProposals:
-    """One detection job, bounded owned RGB history, and atomic tracker handoff.
+    """Initialize new trackers on the latest admitted RGB frame after SAM3.
 
-    Only the main thread uses the active trackers. A background job owns a new
-    tracker set until it has replayed every buffered frame. It publishes that
-    set under the same lock used to append frames. During initial detection,
-    incoming frames are not admitted to tracking history; the first handoff
-    advances the seeded model against the current image. Steady-state replay
-    has a frame count and cooperative time budget. Old boxes are never
-    initialized directly against a newer image. Interval=1 retains synchronous
-    detection without KCF.
+    Detection boxes are reused as position estimates on that newer image; large
+    motion during detection may therefore seed the wrong region. Catch-up always
+    jumps to the newest admitted image and skips intermediate frames. The main
+    thread keeps using the active trackers until the candidate catches up and is handed off
+    atomically. Interval=1 retains synchronous detection without KCF.
     """
 
-    def __init__(self, factory=None, wake=None, max_frames=32, max_bytes=64 << 20,
-                 roi_padding=0.5, max_replay_frames=8, replay_budget_ms=150.0):
+    def __init__(self, factory=None, wake=None, roi_padding=0.5,
+                 max_replay_frames=8, replay_budget_ms=150.0):
         validate_replay_limits(max_replay_frames, replay_budget_ms)
         self.max_replay_frames = max_replay_frames
         self.replay_budget_ms = replay_budget_ms
         self.factory = factory
         self.roi_padding = roi_padding
         self.wake = wake or (lambda: None)
-        self.max_frames, self.max_bytes = max_frames, max_bytes
         self.lock = threading.Lock()
         self.closed = False
         self.busy = False
         self.thread = None
         self.context = None
         self.version = 0
-        self.history = deque()
-        self.history_bytes = 0
+        self.latest = None
         self.serial = 0
         self.last_key = None
         self.ready = self.error = None
@@ -60,12 +54,6 @@ class AsyncKCFProposals:
             return (self.ready is not None or self.error is not None
                     or (self.force_detection and not self.busy))
 
-    def waiting_for_initial_detection(self, context, interval):
-        with self.lock:
-            return (self.context == (context, interval) and self.busy
-                    and not self.active.initialized
-                    and self.ready is None and self.error is None)
-
     def scheduler_metrics(self):
         with self.lock:
             return dict(self.last_replay, busy=self.busy,
@@ -75,8 +63,7 @@ class AsyncKCFProposals:
         with self.lock:
             self.closed = True
             self.version += 1
-            self.history.clear()
-            self.history_bytes = 0
+            self.latest = None
             self.ready = None
             thread = self.thread
         if thread is not None:
@@ -86,6 +73,10 @@ class AsyncKCFProposals:
         published = False
         replay_frames = 0
         replay_started = None
+        init_ms = 0.0
+        seed_skipped_frames = 0
+        seed_frame_key = None
+        catchup_skipped_frames = 0
         discard_reason = "cancelled"
         try:
             try:
@@ -96,8 +87,15 @@ class AsyncKCFProposals:
             with self.lock:
                 if self.closed or version != self.version:
                     return
+                # Keep an owned snapshot; newer arrivals can replace self.latest.
+                seed_serial, pixels = self.latest
+                seed_skipped_frames = seed_serial - serial
+                seed_frame_key = self.last_key
+                serial = seed_serial
+            init_started = time.monotonic()
             candidate = KCFProposals(self.factory, roi_padding=self.roi_padding)
             candidate.update(pixels, serial, version, 2**63, lambda: proposals)
+            init_ms = (time.monotonic() - init_started) * 1000
             if candidate.retry_detection:
                 discard_reason = "init_failed"
                 return
@@ -107,36 +105,26 @@ class AsyncKCFProposals:
                 with self.lock:
                     if self.closed or version != self.version:
                         return
-                    # Every processed frame after the detector's input is needed.
-                    if self.history and self.history[0][0] > serial + 1:
-                        discard_reason = "history_gap"
-                        return
-                    pending = [(n, image) for n, image in self.history if n > serial]
-                    if not pending:
+                    next_serial, image = self.latest
+                    if next_serial == serial:
                         self.ready = (candidate, metrics)
                         published = True
                         return
-                for next_serial, image in pending:
-                    # Check before each KCF call: one non-preemptible update may
-                    # exceed the time budget, but no additional call is started.
-                    with self.lock:
-                        if self.closed or version != self.version:
-                            return
-                    if replay_frames >= self.max_replay_frames:
-                        discard_reason = "frame_budget"
-                        return
-                    if (time.monotonic() - replay_started)*1000 >= self.replay_budget_ms:
-                        discard_reason = "time_budget"
-                        return
-                    if next_serial != serial + 1:
-                        discard_reason = "history_gap"
-                        return
-                    serial = next_serial
-                    replay_frames += 1
-                    _, source = candidate.update(image, serial, version, 2**63, lambda: [])
-                    if source != "kcf":  # Lost during replay: request a fresh image.
-                        discard_reason = "tracking_lost"
-                        return
+                # Do one update on the latest image, then sample latest again.
+                # Count calls, not skipped images, against the catch-up budget.
+                if replay_frames >= self.max_replay_frames:
+                    discard_reason = "frame_budget"
+                    return
+                if (time.monotonic() - replay_started)*1000 >= self.replay_budget_ms:
+                    discard_reason = "time_budget"
+                    return
+                catchup_skipped_frames += next_serial - serial - 1
+                serial = next_serial
+                replay_frames += 1
+                _, source = candidate.update(image, serial, version, 2**63, lambda: [])
+                if source != "kcf":
+                    discard_reason = "tracking_lost"
+                    return
         except Exception as error:
             with self.lock:
                 if version == self.version and not self.closed:
@@ -147,6 +135,10 @@ class AsyncKCFProposals:
                 self.busy = False
                 if version == self.version and not self.closed:
                     self.last_replay = dict(
+                        seed_frame_key=seed_frame_key,
+                        seed_skipped_frames=seed_skipped_frames,
+                        catchup_skipped_frames=catchup_skipped_frames,
+                        init_ms=init_ms,
                         replay_frames=replay_frames,
                         replay_ms=(0.0 if replay_started is None else
                                    (time.monotonic()-replay_started)*1000),
@@ -169,8 +161,7 @@ class AsyncKCFProposals:
                 self.context = identity
                 self.version += 1
                 self.active = KCFProposals(self.factory, roi_padding=self.roi_padding)
-                self.history.clear()
-                self.history_bytes = 0
+                self.latest = None
                 self.last_key = None
                 self.ready = self.error = None
                 self.frames_since_submit = 0
@@ -180,29 +171,19 @@ class AsyncKCFProposals:
             if self.error is not None:
                 error, self.error = self.error, None
                 raise error
-            if interval > 1 and not self.active.initialized and self.busy:
-                # Camera callbacks still keep the newest frame in CaseNode.
-                # Unprocessed arrivals must not become an unbounded bootstrap
-                # replay backlog or consume history/submit interval counters.
-                return None
             applied = self.ready is not None
             if applied:
                 self.active, self.last_metrics = self.ready
                 self.ready = None
             changed = frame_key != self.last_key
-            # Only asynchronous detection consumes replay history.
+            # Only asynchronous detection needs an owned latest image.
             if changed and interval > 1:
                 self.last_key = frame_key
                 self.serial += 1
-                # Independent storage: shared-memory slots can be reused meanwhile.
-                owned = pixels.copy()
-                self.history.append((self.serial, owned))
-                self.history_bytes += owned.nbytes
-                while len(self.history) > 1 and (
-                    len(self.history) > self.max_frames or self.history_bytes > self.max_bytes
-                ):
-                    self.history_bytes -= self.history.popleft()[1].nbytes
-                self.frames_since_submit += 1
+                # One owned latest slot, independent of shared-memory leases.
+                self.latest = (self.serial, pixels.copy())
+                if self.active.initialized:
+                    self.frames_since_submit += 1
             serial = self.serial
             version = self.version
 
@@ -215,7 +196,7 @@ class AsyncKCFProposals:
         result = None
         lost = False
         if self.active.initialized:
-            # Candidate keys are history serials, matching active updates exactly.
+            # Foreground and candidate keys use the same admitted-frame serials.
             proposals, source = self.active.update(
                 pixels, serial, version, 2**63, lambda: [], retain_valid_tracks=True,
             )
@@ -231,7 +212,7 @@ class AsyncKCFProposals:
                 self.busy = True
                 self.force_detection = False
                 self.frames_since_submit = 0
-                snapshot = self.history[-1][1]
+                snapshot = self.latest[1]
                 lease = frame.retain() if frame is not None else None
                 self.thread = threading.Thread(
                     target=self._job, args=(version, serial, snapshot, lease, detect),

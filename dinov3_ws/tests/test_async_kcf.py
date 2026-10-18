@@ -1,6 +1,7 @@
-"""Background detection must not stall KCF or apply old-coordinate boxes."""
+"""Latest-frame candidate initialization, bounded catch-up and atomic handoff."""
 
 import threading
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -45,14 +46,37 @@ def update(pipeline, n, detector=detect, context="camera", interval=2):
     return pipeline.update(pixels(n), n, context, interval, detector)
 
 
-def seed(pipeline):
-    assert update(pipeline, 0) is None
+def seed(pipeline, interval=2):
+    assert update(pipeline, 0, interval=interval) is None
     finish(pipeline)
-    assert update(pipeline, 0)[1] == "sam3"
+    assert update(pipeline, 0, interval=interval)[1] == "sam3"
 
 
-def test_kcf_continues_during_sam3_and_new_trackers_replay_before_handoff():
-    pipeline = AsyncKCFProposals(MovingTracker)
+@pytest.fixture
+def candidate_init():
+    gate = SimpleNamespace(armed=False, entered=threading.Event(), release=threading.Event())
+
+    class GatedTracker(MovingTracker):
+        def init(self, image, box):
+            super().init(image, box)
+            if gate.armed and threading.current_thread().name == "sam3-kcf-replay":
+                gate.entered.set()
+                assert gate.release.wait(3), "Candidate initialization was never released"
+
+    gate.factory = GatedTracker
+    yield gate
+    gate.release.set()
+
+
+def test_kcf_continues_during_sam3_and_candidate_seeds_the_latest_frame():
+    initialized = []
+
+    class RecordTracker(MovingTracker):
+        def init(self, image, box):
+            initialized.append(int(image[0, 0, 0]))
+            super().init(image, box)
+
+    pipeline = AsyncKCFProposals(RecordTracker)
     entered, release = threading.Event(), threading.Event()
     calls = []
 
@@ -63,21 +87,27 @@ def test_kcf_continues_during_sam3_and_new_trackers_replay_before_handoff():
         return detect(image)
 
     try:
-        seed(pipeline)
-        assert update(pipeline, 1)[0][0]["bbox"][0] == 11
-        assert update(pipeline, 2, slow)[1] == "kcf"
+        seed(pipeline, interval=100)
+        update(pipeline, 1, interval=100)
+        pipeline.force_detection = True
+        assert update(pipeline, 2, slow, interval=100)[1] == "kcf"
         assert entered.wait(2)
-        # These complete while the detection is still blocked.
         for n in (3, 4):
-            items, source = update(pipeline, n, slow)
+            items, source = update(pipeline, n, slow, interval=100)
             assert source == "kcf" and items[0]["bbox"][0] == 10+n
-        assert calls == [2]  # No queued SAM3 jobs.
+        assert calls == [2]
         release.set()
         finish(pipeline)
-        items, source = update(pipeline, 5)
-        assert source == "sam3"
-        assert items[0]["bbox"][0] == 15  # Not frame 2's x=12.
+        assert initialized == [0, 4]  # Frame 2's boxes initialize on frame 4.
+        metrics = pipeline.scheduler_metrics()
+        assert metrics['seed_frame_key'] == 4
+        assert metrics['seed_skipped_frames'] == 2
+        assert metrics['replay_frames'] == 0
+        items, source = update(pipeline, 4, interval=100)
+        assert source == "sam3" and items[0]["bbox"][0] == 12
         assert pipeline.last_metrics == {"test": True}
+        # Only motion AFTER initialization is applied to the detected box.
+        assert update(pipeline, 5, interval=100)[0][0]["bbox"][0] == 13
     finally:
         release.set()
         pipeline.close()
@@ -124,8 +154,8 @@ def test_static_image_applies_result_once_without_repeated_detection():
         pipeline.close()
 
 
-def test_history_overflow_discards_result_instead_of_skipping_missing_frames():
-    pipeline = AsyncKCFProposals(MovingTracker, max_frames=2, max_bytes=pixels(0).nbytes*2)
+def test_slow_sam3_keeps_only_latest_frame_and_skips_detector_backlog():
+    pipeline = AsyncKCFProposals(MovingTracker)
     entered, release = threading.Event(), threading.Event()
 
     def slow(image):
@@ -140,16 +170,50 @@ def test_history_overflow_discards_result_instead_of_skipping_missing_frames():
         assert entered.wait(2)
         for n in range(3, 7):
             assert update(pipeline, n, slow)[1] == "kcf"
-        assert len(pipeline.history) == 2
-        assert pipeline.history_bytes <= pixels(0).nbytes*2
+        assert pipeline.latest[0] == pipeline.serial
+        np.testing.assert_array_equal(pipeline.latest[1], pixels(6))
         release.set()
         finish(pipeline)
-        assert pipeline.ready is None and pipeline.has_result()
-        assert update(pipeline, 7)[1] == "kcf"
-        finish(pipeline)
-        assert update(pipeline, 7)[0][0]["bbox"][0] == 17
+        assert pipeline.ready is not None
+        metrics = pipeline.scheduler_metrics()
+        assert metrics['seed_skipped_frames'] == 4
+        assert metrics['replay_frames'] == 0
+        assert metrics['discard_reason'] is None
+        assert update(pipeline, 6)[0][0]['bbox'][0] == 12
     finally:
         release.set()
+        pipeline.close()
+
+
+def test_initialization_jumps_to_latest_and_does_not_require_intermediate_frames(candidate_init):
+    updated = []
+
+    class RecordingTracker(candidate_init.factory):
+        def update(self, image):
+            if threading.current_thread().name == 'sam3-kcf-replay':
+                updated.append(int(image[0, 0, 0]))
+            return super().update(image)
+
+    pipeline = AsyncKCFProposals(RecordingTracker)
+    try:
+        seed(pipeline)
+        candidate_init.armed = True
+        update(pipeline, 1)
+        update(pipeline, 2)
+        assert candidate_init.entered.wait(2)
+        for n in (3, 4, 5):
+            assert update(pipeline, n)[1] == 'kcf'
+        np.testing.assert_array_equal(pipeline.latest[1], pixels(5))
+        candidate_init.release.set()
+        finish(pipeline)
+        assert pipeline.ready is not None
+        assert updated == [5]
+        schedule = pipeline.scheduler_metrics()
+        assert schedule['discard_reason'] is None
+        assert schedule['replay_frames'] == 1
+        assert schedule['catchup_skipped_frames'] == 2
+    finally:
+        candidate_init.release.set()
         pipeline.close()
 
 
@@ -205,11 +269,11 @@ def test_interval_one_keeps_synchronous_detection_without_kcf():
         pipeline.close()
 
 
-def test_slow_background_replay_does_not_hold_the_main_tracking_lock():
+def test_slow_background_replay_does_not_hold_the_main_tracking_lock(candidate_init):
     replay_entered, release_replay = threading.Event(), threading.Event()
     detect_entered, release_detect = threading.Event(), threading.Event()
 
-    class SlowReplayTracker(MovingTracker):
+    class SlowReplayTracker(candidate_init.factory):
         def update(self, image):
             if threading.current_thread().name == "sam3-kcf-replay":
                 replay_entered.set()
@@ -228,8 +292,11 @@ def test_slow_background_replay_does_not_hold_the_main_tracking_lock():
         update(pipeline, 1)
         update(pipeline, 2, slow)
         assert detect_entered.wait(2)
-        update(pipeline, 3, slow)
+        candidate_init.armed = True
         release_detect.set()
+        assert candidate_init.entered.wait(2)
+        update(pipeline, 3, slow)
+        candidate_init.release.set()
         assert replay_entered.wait(2)
         assert pipeline.lock.acquire(timeout=.5), "Replay must not hold the history lock"
         pipeline.lock.release()
@@ -240,14 +307,15 @@ def test_slow_background_replay_does_not_hold_the_main_tracking_lock():
         assert update(pipeline, 4)[1] == "sam3"
     finally:
         release_detect.set()
+        candidate_init.release.set()
         release_replay.set()
         pipeline.close()
 
 
-def test_failed_background_replay_is_discarded():
+def test_failed_background_replay_is_discarded(candidate_init):
     entered, release = threading.Event(), threading.Event()
 
-    class LostReplayTracker(MovingTracker):
+    class LostReplayTracker(candidate_init.factory):
         def update(self, image):
             if threading.current_thread().name == "sam3-kcf-replay":
                 return False, (0, 0, 0, 0)
@@ -265,12 +333,16 @@ def test_failed_background_replay_is_discarded():
         update(pipeline, 1)
         update(pipeline, 2, slow)
         assert entered.wait(2)
-        update(pipeline, 3, slow)
+        candidate_init.armed = True
         release.set()
+        assert candidate_init.entered.wait(2)
+        update(pipeline, 3, slow)
+        candidate_init.release.set()
         finish(pipeline)
         assert pipeline.ready is None and pipeline.force_detection
     finally:
         release.set()
+        candidate_init.release.set()
         pipeline.close()
 
 
@@ -300,17 +372,21 @@ def test_invalid_replay_time_budget(value):
         AsyncKCFProposals(replay_budget_ms=value)
 
 
-def test_initial_detection_does_not_accumulate_arrivals_or_replay_them():
+def test_initial_detection_seeds_latest_arrival_without_replaying_old_frames():
     entered, release = threading.Event(), threading.Event()
-    replay_updates = []
+    initialized, replay_updates = [], []
 
     class CountReplayTracker(MovingTracker):
+        def init(self, image, box):
+            initialized.append(int(image[0, 0, 0]))
+            super().init(image, box)
+
         def update(self, image):
             if threading.current_thread().name == 'sam3-kcf-replay':
                 replay_updates.append(int(image[0, 0, 0]))
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(CountReplayTracker, max_frames=2)
+    pipeline = AsyncKCFProposals(CountReplayTracker)
 
     def slow(image):
         entered.set()
@@ -320,75 +396,85 @@ def test_initial_detection_does_not_accumulate_arrivals_or_replay_them():
     try:
         assert update(pipeline, 0, slow, interval=100) is None
         assert entered.wait(2)
-        initial_serial = pipeline.serial
-        assert pipeline.waiting_for_initial_detection('camera', 100)
-        assert not pipeline.waiting_for_initial_detection('other-camera', 100)
         for n in range(1, 101):
             assert update(pipeline, n, slow, interval=100) is None
-        assert pipeline.serial == initial_serial
-        assert len(pipeline.history) == 1
+        assert pipeline.latest[0] == pipeline.serial
         assert pipeline.frames_since_submit == 0
-        assert pipeline.last_key == 0
+        assert pipeline.last_key == 100
         release.set()
         finish(pipeline)
-        assert not pipeline.waiting_for_initial_detection('camera', 100)
+        assert initialized == [100]
         assert replay_updates == []
-        # The seeded model actually tracks the current image, rather than
-        # returning frame 0's coordinates as if they came from frame 5.
-        items, source = update(pipeline, 5, interval=100)
-        assert source == 'sam3' and items[0]['bbox'][0] == 15
-        assert pipeline.serial == initial_serial + 1
+        items, source = update(pipeline, 100, interval=100)
+        assert source == 'sam3' and items[0]['bbox'][0] == 10
+        assert pipeline.scheduler_metrics()['seed_skipped_frames'] == 100
         assert pipeline.scheduler_metrics()['replay_frames'] == 0
+        assert pipeline.frames_since_submit == 0
     finally:
         release.set()
         pipeline.close()
 
 
-def test_replay_frame_budget_preserves_foreground_and_waits_for_normal_interval():
-    entered, release = threading.Event(), threading.Event()
-    pipeline = AsyncKCFProposals(MovingTracker, max_replay_frames=2)
-    detector = Mock()
+def test_catchup_call_budget_preserves_foreground_and_waits_for_normal_interval(candidate_init):
+    entered = [threading.Event(), threading.Event()]
+    release = [threading.Event(), threading.Event()]
+    calls = []
 
-    def slow(image):
-        entered.set()
-        assert release.wait(3)
-        return detect(image)
+    class GatedUpdates(candidate_init.factory):
+        def update(self, image):
+            if threading.current_thread().name == 'sam3-kcf-replay':
+                index = len(calls)
+                calls.append(int(image[0, 0, 0]))
+                entered[index].set()
+                assert release[index].wait(3)
+            return super().update(image)
 
-    detector.side_effect = slow
+    pipeline = AsyncKCFProposals(GatedUpdates, max_replay_frames=2, replay_budget_ms=2000)
+    detector = Mock(side_effect=detect)
     try:
-        update(pipeline, 0, interval=100)
-        finish(pipeline)
-        update(pipeline, 0, interval=100)
+        seed(pipeline, interval=100)
         active = pipeline.active
+        candidate_init.armed = True
         pipeline.force_detection = True
         update(pipeline, 1, detector, interval=100)
-        assert entered.wait(2)
-        for n in (2, 3, 4):
-            assert update(pipeline, n, detector, interval=100)[0][0]['bbox'][0] == 10+n
-        release.set()
+        assert candidate_init.entered.wait(2)
+        update(pipeline, 2, detector, interval=100)
+        candidate_init.release.set()
+        assert entered[0].wait(2)
+        update(pipeline, 3, detector, interval=100)
+        release[0].set()
+        assert entered[1].wait(2)
+        update(pipeline, 4, detector, interval=100)
+        release[1].set()
         finish(pipeline)
         assert pipeline.ready is None
         assert pipeline.active is active
         assert not pipeline.force_detection
+        assert calls == [2, 3]
         assert pipeline.scheduler_metrics()['discard_reason'] == 'frame_budget'
         assert pipeline.scheduler_metrics()['replay_frames'] == 2
         assert update(pipeline, 5, detector, interval=100)[0][0]['bbox'][0] == 15
         assert detector.call_count == 1
     finally:
-        release.set()
+        candidate_init.release.set()
+        for event in release:
+            event.set()
         pipeline.close()
 
 
-def test_replay_time_budget_stops_before_next_update(monkeypatch):
+def test_replay_time_budget_stops_before_next_update(monkeypatch, candidate_init):
     from types import SimpleNamespace
     from dinov3_cases import async_kcf
     clock = [0.0]
     monkeypatch.setattr(async_kcf, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     entered, release = threading.Event(), threading.Event()
+    update_entered, update_release = threading.Event(), threading.Event()
 
-    class TimedTracker(MovingTracker):
+    class TimedTracker(candidate_init.factory):
         def update(self, image):
             if threading.current_thread().name == 'sam3-kcf-replay':
+                update_entered.set()
+                assert update_release.wait(3)
                 clock[0] += .060
             return super().update(image)
 
@@ -404,9 +490,15 @@ def test_replay_time_budget_stops_before_next_update(monkeypatch):
         update(pipeline, 1)
         update(pipeline, 2, slow)
         assert entered.wait(2)
+        candidate_init.armed = True
+        release.set()
+        assert candidate_init.entered.wait(2)
         update(pipeline, 3, slow)
         update(pipeline, 4, slow)
-        release.set()
+        candidate_init.release.set()
+        assert update_entered.wait(2)
+        update(pipeline, 5, slow)
+        update_release.set()
         finish(pipeline)
         assert pipeline.ready is None
         metrics = pipeline.scheduler_metrics()
@@ -414,18 +506,20 @@ def test_replay_time_budget_stops_before_next_update(monkeypatch):
         assert metrics['replay_frames'] == 1
         assert metrics['replay_ms'] == pytest.approx(60)
         assert not pipeline.force_detection
-        assert pipeline.active.proposals[0]['bbox'][0] == 14
+        assert pipeline.active.proposals[0]['bbox'][0] == 15
     finally:
         release.set()
+        candidate_init.release.set()
+        update_release.set()
         pipeline.close()
 
 
-def test_new_arrivals_during_replay_cannot_extend_job_past_frame_budget():
+def test_new_arrivals_during_catchup_skip_stale_frames_on_every_update(candidate_init):
     entered, release = threading.Event(), threading.Event()
     replay_entered, replay_release = threading.Event(), threading.Event()
     replayed = []
 
-    class BlockFirstReplay(MovingTracker):
+    class BlockFirstReplay(candidate_init.factory):
         def update(self, image):
             if threading.current_thread().name == 'sam3-kcf-replay':
                 replayed.append(int(image[0, 0, 0]))
@@ -446,30 +540,37 @@ def test_new_arrivals_during_replay_cannot_extend_job_past_frame_budget():
         update(pipeline, 1)
         update(pipeline, 2, slow)
         assert entered.wait(2)
-        update(pipeline, 3, slow)
+        candidate_init.armed = True
         release.set()
+        assert candidate_init.entered.wait(2)
+        update(pipeline, 3, slow)
+        candidate_init.release.set()
         assert replay_entered.wait(2)
         for n in (4, 5, 6):
             items, source = update(pipeline, n, slow)
             assert source == 'kcf' and items[0]['bbox'][0] == 10+n
         replay_release.set()
         finish(pipeline)
-        assert replayed == [3, 4]
-        assert pipeline.ready is None
-        assert pipeline.scheduler_metrics()['discard_reason'] == 'frame_budget'
-        assert pipeline.active.proposals[0]['bbox'][0] == 16
+        assert replayed == [3, 6]
+        assert pipeline.ready is not None
+        metrics = pipeline.scheduler_metrics()
+        assert metrics['discard_reason'] is None
+        assert metrics['catchup_skipped_frames'] == 2
+        assert metrics['replay_frames'] == 2
+        assert pipeline.ready[0].frame_key == pipeline.serial
     finally:
         release.set()
+        candidate_init.release.set()
         replay_release.set()
         pipeline.close()
 
 
-def test_context_change_cancels_remaining_replay_batch():
+def test_context_change_cancels_remaining_replay_batch(candidate_init):
     detect_entered, detect_release = threading.Event(), threading.Event()
     replay_entered, replay_release = threading.Event(), threading.Event()
     replayed = []
 
-    class BlockFirstReplay(MovingTracker):
+    class BlockFirstReplay(candidate_init.factory):
         def update(self, image):
             if threading.current_thread().name == 'sam3-kcf-replay':
                 replayed.append(int(image[0, 0, 0]))
@@ -489,14 +590,17 @@ def test_context_change_cancels_remaining_replay_batch():
         update(pipeline, 1)
         update(pipeline, 2, slow)
         assert detect_entered.wait(2)
+        candidate_init.armed = True
+        detect_release.set()
+        assert candidate_init.entered.wait(2)
         update(pipeline, 3, slow)
         update(pipeline, 4, slow)
-        detect_release.set()
+        candidate_init.release.set()
         assert replay_entered.wait(2)
         assert update(pipeline, 5, context='new-source') is None
         replay_release.set()
         finish(pipeline)
-        assert replayed == [3]
+        assert replayed == [4]
         assert pipeline.ready is None
         assert not pipeline.active.initialized
         assert pipeline.last_metrics == {}
@@ -505,6 +609,7 @@ def test_context_change_cancels_remaining_replay_batch():
         assert update(pipeline, 6, context='new-source')[0][0]['bbox'][0] == 16
     finally:
         detect_release.set()
+        candidate_init.release.set()
         replay_release.set()
         pipeline.close()
 
@@ -615,13 +720,13 @@ def test_synchronous_detection_never_copies_replay_frames():
             assert source == "sam3"
             assert items[0]["bbox"] == proposals(n)[0]["bbox"]
         assert detector.call_count == 2  # Same-frame reads still reuse detection.
-        assert not pipeline.history and pipeline.history_bytes == 0
+        assert pipeline.latest is None
         # Changing to asynchronous mode must still seed/replay from owned pixels.
         assert update(pipeline, 2) is None
         finish(pipeline)
         assert update(pipeline, 3)[0][0]["bbox"] == proposals(3)[0]["bbox"]
-        assert pipeline.history
+        assert pipeline.latest is not None
         assert update(pipeline, 4, interval=1)[0][0]["bbox"] == proposals(4)[0]["bbox"]
-        assert not pipeline.history and pipeline.history_bytes == 0
+        assert pipeline.latest is None
     finally:
         pipeline.close()

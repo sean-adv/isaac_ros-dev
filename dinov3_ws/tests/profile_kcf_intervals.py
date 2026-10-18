@@ -25,6 +25,10 @@ def main():
     parser.add_argument('--seconds', type=float, default=20)
     parser.add_argument('--warmup-seconds', type=float, default=5)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--browser-streams', action='store_true',
+                        help='Render both browser streams to measure their CPU cost')
+    parser.add_argument('--no-pose', action='store_true',
+                        help='Disable depth synchronization and 3D boxes for comparison')
     args = parser.parse_args()
     if min(args.intervals) < 2 or args.seconds <= 0 or args.warmup_seconds < 0:
         parser.error('intervals must be >=2; seconds >0; warmup >=0')
@@ -58,8 +62,12 @@ def main():
             self._performance = value
 
     rclpy.init(args=['--ros-args', '--params-file',
-                    str(WORKSPACE / 'dinov3_ws/config/dinov3_cases.yaml'), '-p', 'port:=0'])
+                    str(WORKSPACE / 'dinov3_ws/config/dinov3_cases.yaml'), '-p', 'port:=0',
+                    '-p', 'pose_enabled:=' + str(not args.no_pose).lower()])
     node = ProfileNode()
+    if args.browser_streams:
+        with node.lock:
+            node.stream_viewers.update(jpeg=1, preview_jpeg=1)
     reports = []
 
     def spin_until(deadline):
@@ -112,6 +120,9 @@ def main():
                            sam3_unique_handoffs=len(source_ids),
                            sam3_handoff_hz=len(source_ids)/(end-start),
                            sam3_worker_ms=stats([r['grounding_ipc'].get('worker_detect_ms') for r in sam_rows]))
+            for key in ('image_prepare_ms', 'shared_copy_ms', 'depth_wait_ms',
+                        'proposal_update_ms', 'recognize_ms', 'bbox3d_ms', 'render_ms'):
+                summary[key] = stats([r.get(key) for r in rows])
             reports.append(dict(summary=summary, rows=rows, kcf_calls=timings))
             args.output.write_text(json.dumps(dict(options=vars(args) | {'output':str(args.output)},
                                                    status=node.status, reports=reports), indent=2)+'\n')

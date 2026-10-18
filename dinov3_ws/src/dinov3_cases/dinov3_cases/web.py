@@ -115,6 +115,7 @@ def create_app(node):
                 backend_description=node.backend_description,
                 camera_topic=node.param("image_topic"),
                 camera_age=age,
+                camera_fps=getattr(node, "camera_fps", None),
                 camera_connected=age is not None and age < 3,
                 preview_error=node.preview_error,
                 overlay_age=(

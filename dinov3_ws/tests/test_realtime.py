@@ -228,3 +228,51 @@ def test_browser_renders_small_canvas_and_ros_full_size_only_with_subscribers(ro
         node.bridge.cv2_to_imgmsg.assert_not_called()
     frame.release.assert_called_once()
     node.get_logger().error.assert_not_called()
+
+
+def test_camera_input_fps_counts_arrivals_independently_of_result_fps():
+    from dinov3_cases.timing import ResultRate
+
+    node = SimpleNamespace(
+        lock=threading.Lock(), camera_seq=0, camera_rate=ResultRate(),
+        preview_changed=threading.Event(), image_changed=threading.Event(),
+        source='camera', frame_seq=0, performance={'result_fps': 20.0},
+    )
+    frame = SimpleNamespace(header=SimpleNamespace(frame_id='rgb'))
+    with patch('dinov3_cases.node.time.monotonic', side_effect=[10., 10.+1/30, 10.+2/30]):
+        for _ in range(3):
+            CaseNode.on_image(node, frame)
+    assert node.camera_fps == pytest.approx(30.)
+    assert node.performance['result_fps'] == 20.
+    assert node.camera_seq == node.frame_seq == 3
+    assert node.frame is frame
+
+
+def test_pending_overlay_cannot_exhaust_input_slots_during_sam3_and_rendering():
+    import numpy as np
+    from dinov3_cases.frame_pool import SharedFramePool
+
+    pool = SharedFramePool()
+    detector = pool.acquire(np.full((8, 8, 3), 1, np.uint8))
+    rendering = pool.acquire(np.full((8, 8, 3), 2, np.uint8))
+    queued = pool.acquire(np.full((8, 8, 3), 3, np.uint8))
+    node = SimpleNamespace(frame_pool=pool, lock=threading.Lock(), pending_render=(queued,))
+    fresh = None
+    try:
+        fresh = CaseNode.acquire_input_frame(
+            node, np.full((8, 8, 3), 4, np.uint8), frame_id=4, timestamp=None,
+        )
+        assert fresh is not None, 'Queued rendering must yield a slot to current inference'
+        assert node.pending_render is None
+        assert queued.released
+        np.testing.assert_array_equal(fresh.pixels, 4)
+        np.testing.assert_array_equal(detector.pixels, 1)
+        np.testing.assert_array_equal(rendering.pixels, 2)
+        assert not detector.released and not rendering.released
+    finally:
+        if fresh is not None:
+            fresh.release()
+        detector.release()
+        rendering.release()
+        queued.release()
+        pool.close()

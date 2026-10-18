@@ -215,8 +215,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     encoder.device, encoder.description = 'cpu', 'counting encoder'
     encoder.model = object()
     gallery.refresh = Mock(return_value=False)
-    scheduler = Mock(active=object(), last_metrics={})
-    scheduler.waiting_for_initial_detection.return_value = False
+    scheduler = Mock(active=Mock(initialized=True), last_metrics={})
     scheduler.scheduler_metrics.return_value = {}
     # seq, bbox x positions, new tracker set, expected diagnostic revision,
     # recognition source, recognition frame. Same-frame handoff used to truncate.
@@ -242,7 +241,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
         calls.append(index)
         _, positions, new_set, _, _, _ = rows[index]
         if new_set:
-            scheduler.active = object()
+            scheduler.active = Mock(initialized=True)
         return [proposal(x) for x in positions], ('sam3' if new_set or index == 0 else 'kcf')
 
     scheduler.update.side_effect = proposal_update
@@ -285,6 +284,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
             observations.append((node.object_debug_revision, node.object_debug_snapshot,
                                  [item['label'] for item in node.detections], node.performance.copy()))
 
+    node.acquire_input_frame = lambda *a, **kw: CaseNode.acquire_input_frame(node, *a, **kw)
     node.worker_ticks = ticks
     try:
         with patch('dinov3_cases.node.Encoder', return_value=encoder), \
