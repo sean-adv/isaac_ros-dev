@@ -41,7 +41,9 @@ def test_sync_rejects_stale_unregistered_and_wrong_size_depth():
 def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     values = dict(pose_min_depth=.1, pose_max_depth=5., pose_enabled=True,
                   pose_sync_tolerance=.05, bbox3d_depth_band=.08, bbox3d_min_points=80, bbox3d_quantile=.02)
-    node = SimpleNamespace(param=values.__getitem__, bridge=Mock(), stop=threading.Event(),
+    from dinov3_cases.depth_bbox import ProjectionRayCache
+    node = SimpleNamespace(depth_ray_cache=ProjectionRayCache(),
+                           param=values.__getitem__, bridge=Mock(), stop=threading.Event(),
                            depth_changed=threading.Condition(), depth_frames=deque(),
                            depth_infos=deque([calibration()]))
     frame = Image(header=header(), width=160, height=120)

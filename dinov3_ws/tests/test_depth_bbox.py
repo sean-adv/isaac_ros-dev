@@ -209,3 +209,68 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
 def test_invalid_segmentation_options(option, value, error):
     with pytest.raises(ValueError, match=error):
         estimate_bbox3d(scene(), calibration(), BOX, **{option: value})
+
+
+@pytest.mark.parametrize("model, coefficients", [
+    ("plumb_bob", [.1, -.03, .001, .002, 0.]),
+    ("rational_polynomial", [.1, -.03, .001, .002, 0., .001, 0., 0.]),
+    ("equidistant", [.01, .001, 0., 0.]),
+])
+@pytest.mark.parametrize("dtype, scale", [(np.uint16, .001), (np.float32, 1.)])
+def test_roi_conversion_and_cached_rays_preserve_all_output_fields(model, coefficients, dtype, scale):
+    from dinov3_cases.depth_bbox import ProjectionRayCache
+    info = calibration()
+    info.distortion_model, info.d = model, coefficients
+    raw = (scene() / scale).astype(dtype)
+    raw[60, 80] = 0
+    original = raw.copy()
+    baseline = estimate_bbox3d(raw.astype(np.float64) * scale, info, BOX)
+    cache = ProjectionRayCache()
+    for box in (BOX, [-10, -5, 170, 125], [30.4, 35.8, 130.2, 85.1]):
+        expected = estimate_bbox3d(raw.astype(np.float64) * scale, info, box)
+        actual = estimate_bbox3d(raw, info, box, depth_scale=scale, ray_cache=cache)
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            if isinstance(expected[key], str):
+                assert actual[key] == expected[key]
+            else:
+                np.testing.assert_allclose(actual[key], expected[key], rtol=0, atol=1e-12)
+    assert baseline["point_count"] == 3599
+    np.testing.assert_array_equal(raw, original)
+
+
+def test_ray_cache_reuses_map_and_rebuilds_for_mutated_calibration():
+    from dinov3_cases.depth_bbox import ProjectionRayCache
+    cache = ProjectionRayCache()
+    info = calibration()
+    def run():
+        cached = estimate_bbox3d(scene(), info, BOX, ray_cache=cache)
+        assert cached == estimate_bbox3d(scene(), info, BOX)
+        return cache._rays
+    previous = run()
+    assert run() is previous
+    for change in (lambda: info.k.__setitem__(0, 210.),
+                   lambda: info.d.__setitem__(0, .05),
+                   lambda: setattr(info, "distortion_model", "rational_polynomial")):
+        change()
+        current = run()
+        assert current is not previous
+        previous = current
+    resized = calibration()
+    resized.width, resized.height = 80, 60
+    data = estimate_bbox3d(np.ones((60, 80)), resized, [10, 10, 60, 50], ray_cache=cache)
+    assert cache._rays.shape == (60, 80, 2)
+    assert cache._rays is not previous
+    assert data == estimate_bbox3d(np.ones((60, 80)), resized, [10, 10, 60, 50])
+    resized.distortion_model = "unsupported"
+    with pytest.raises(ValueError, match="unsupported_distortion_model"):
+        estimate_bbox3d(np.ones((60, 80)), resized, [10, 10, 60, 50], ray_cache=cache)
+
+
+def test_roi_conversion_preserves_holes_and_depth_band_boundaries():
+    from dinov3_cases.depth_bbox import ProjectionRayCache
+    raw = scene().astype(np.float32)
+    raw[45, 40:44] = [np.nan, np.inf, 0., .92]
+    expected = estimate_bbox3d(raw.astype(np.float64), calibration(), BOX)
+    actual = estimate_bbox3d(raw, calibration(), BOX, ray_cache=ProjectionRayCache())
+    assert actual == expected

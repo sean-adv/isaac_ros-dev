@@ -4,14 +4,55 @@ import cv2
 import numpy as np
 
 
+def _undistort_pixels(pixels, k, distortion, model):
+    image_points = pixels.reshape(-1, 1, 2)
+    if model in ("plumb_bob", "rational_polynomial", ""):
+        return cv2.undistortPoints(
+            image_points, k, distortion if distortion.size else None)[:, 0, :]
+    if model == "equidistant" and distortion.size == 4:
+        return cv2.fisheye.undistortPoints(image_points, k, distortion)[:, 0, :]
+    raise ValueError("unsupported_distortion_model")
+
+
+class ProjectionRayCache:
+    """One calibration's float64 rays, owned by the 3D processing worker.
+
+    Rebuild on size, intrinsics, distortion coefficients or model changes.
+    Rows are built in chunks to bound temporary allocation at full resolution.
+    """
+
+    def __init__(self):
+        self._key = None
+        self._rays = None
+
+    def get(self, width, height, k, distortion, model):
+        key = (width, height, tuple(k.ravel()), tuple(distortion), model)
+        if key != self._key:
+            # Release the previous calibration before allocating the next one.
+            self._key, self._rays = None, None
+            rays = np.empty((height, width, 2), dtype=np.float64)
+            for top in range(0, height, 64):
+                bottom = min(top + 64, height)
+                v, u = np.indices((bottom - top, width))
+                pixels = np.column_stack((u.ravel(), v.ravel() + top)).astype(np.float64)
+                rays[top:bottom] = _undistort_pixels(
+                    pixels, k, distortion, model).reshape(bottom - top, width, 2)
+            rays.flags.writeable = False
+            self._rays, self._key = rays, key
+        return self._rays
+
+
 def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
-                    depth_band=0.08, min_points=80, quantile=0.02):
+                    depth_band=0.08, min_points=80, quantile=0.02,
+                    depth_scale=1.0, ray_cache=None):
     """Segment around the central median Z and bound its visible point cloud.
 
     Quantiles determine box sizes and XY centers; Z uses the component mean.
     The box is not a strict enclosure
     or an estimate of the unseen backside. Four corner-near samples and the
     nearest component point are diagnostics only, not inputs to the bounds.
+    depth_scale converts input units to meters inside the clipped ROI only.
+    An optional worker-owned ray_cache reuses calibrated pixel directions.
     """
     if not np.isfinite(depth_band) or depth_band <= 0:
         raise ValueError("invalid_bbox_depth_band")
@@ -38,7 +79,10 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
         raise ValueError("empty_bbox")
     left, top = int(x0), int(y0)
     right, bottom = int(np.ceil(x1)), int(np.ceil(y1))
-    roi = depth[top:bottom, left:right]
+    # Convert only this bbox; preserve the original float64 arithmetic/order.
+    roi = depth[top:bottom, left:right].astype(np.float64, copy=False)
+    if depth_scale != 1.0:
+        roi = roi * depth_scale
     valid = np.isfinite(roi) & (roi >= min_depth) & (roi <= max_depth)
     if not valid.any():
         raise ValueError("no_valid_bbox_depth")
@@ -70,14 +114,12 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     distortion = np.asarray(info.d, dtype=np.float64)
     if not np.isfinite(distortion).all():
         raise ValueError("invalid_distortion")
-    image_points = pixels.reshape(-1, 1, 2)
-    if info.distortion_model in ("plumb_bob", "rational_polynomial", ""):
-        rays = cv2.undistortPoints(image_points, k, distortion if distortion.size else None)
-    elif info.distortion_model == "equidistant" and distortion.size == 4:
-        rays = cv2.fisheye.undistortPoints(image_points, k, distortion)
+    if ray_cache is None:
+        rays = _undistort_pixels(pixels, k, distortion, info.distortion_model)
     else:
-        raise ValueError("unsupported_distortion_model")
-    points = np.column_stack((rays[:, 0, :] * depths[:, None], depths))
+        ray_map = ray_cache.get(w, h, k, distortion, info.distortion_model)
+        rays = ray_map[v + top, u + left]
+    points = np.column_stack((rays * depths[:, None], depths))
     if not np.isfinite(points).all():
         raise ValueError("invalid_unprojected_points")
     lower, upper = np.quantile(points, [quantile, 1-quantile], axis=0)

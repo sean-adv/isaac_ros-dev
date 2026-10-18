@@ -64,17 +64,14 @@
 </form>
 </section>
 <section>
-<h2>Live camera</h2>
+<h2>Live Camera and Recognition Results</h2>
 <p id="camera-status">Waiting for camera…</p>
-<img id="preview" src="/camera.mjpg" alt="Live Orbbec camera">
-</section>
-<section>
-<h2>Recognition Results</h2>
 <p id="status">Connecting…</p>
 <p id="error" role="alert">
 </p>
 <p id="bbox-help" role="status">{% if bbox_mode == '3d' %}Showing projected 3D bounding box wireframes. Boxes require valid synchronized depth; objects without valid 3D data have no box.{% else %}Showing original 2D bounding boxes.{% endif %}</p>
-<img id="overlay" src="/overlay.mjpg" alt="Object bounding boxes and recognition results">
+<p><small>Shows bounding boxes when available; otherwise shows the live camera.</small></p>
+<img id="overlay" src="/view.mjpg" alt="Live camera with available bounding boxes">
 <p>
 <small>det is the last SAM3 W8A8 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects.</small>
 </p>

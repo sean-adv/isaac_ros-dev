@@ -137,7 +137,7 @@ async function refresh() {
   el('status').textContent = d.status + ' | source: ' + d.source + (d.overlay_age === null ? '' : ' | result age: ' + d.overlay_age.toFixed(1) + 's');
   el('camera-status').textContent = d.preview_error || (d.camera_connected ? 'Live · ' + d.camera_topic : 'No recent camera frames · ' + d.camera_topic + ' · start the Orbbec driver');
   if (d.camera_connected && Number.isFinite(d.camera_fps)) el('camera-status').textContent += ' · ' + d.camera_fps.toFixed(1) + ' input FPS';
-  el('preview').style.opacity = d.camera_connected ? '1' : '0.3';
+  el('overlay').style.opacity = d.source === 'upload' || d.camera_connected ? '1' : '0.3';
   const s = el('cases');
   if (JSON.stringify(d.cases) !== s.dataset.list) {
     const value = s.value || d.selected;
@@ -146,7 +146,6 @@ async function refresh() {
     s.dataset.list = JSON.stringify(d.cases);
   }
   refreshReferences(s.value || d.selected, d.reference_revision, d.reference_stride);
-  el('overlay').style.display = d.overlay_ready ? '' : 'none';
   if (d.performance && d.performance.result_fps) el('status').textContent += ' | ' + d.performance.result_fps.toFixed(1) + ' result FPS (3s avg) | callback→result ' + (d.performance.callback_to_result_ms === null ? '—' : d.performance.callback_to_result_ms.toFixed(0) + ' ms');
 }
 

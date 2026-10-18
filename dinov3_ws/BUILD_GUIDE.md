@@ -25,7 +25,7 @@ SAM3 完成後，背景工作用該次偵測的原始 RGB 影格與 bbox 初始�
 
 網頁狀態列的 **result FPS** 是完整辨識主迴圈最近 3 秒的結果頻率，包含影像準備、深度等待、候選框更新、交接時的辨識與每幀 3D 計算；不是 KCF 單獨 FPS 或 MJPEG 顯示 FPS。相機區塊另外顯示 **input FPS**。`/api/status` 的 `performance` 提供 `image_prepare_ms`（包含共享複製）、`shared_copy_ms`（前者的子項）、`depth_wait_ms`、`proposal_update_ms`（包含非同步排程、最新影格複製與前景 KCF）、`recognize_ms`、`bbox3d_ms`、`render_ms`。首次交接的深度等待發生在辨識後，會同時包含在 `bbox3d_ms` 中。平常的 `detect_ms` 為影像準備＋深度等待＋候選框更新的合計，不能當成純 KCF 耗時。
 
-bbox ROS 發布由獨立 worker 發送 Detection2D／Detection3D／AprilTag 資料，不包含 RGB。瀏覽器疊圖仍由另一個 worker 對每個結果產生完整 960×540 JPEG，相機預覽也另外編碼；有 ROS debug 訂閱者才產生全解析度疊圖影像。JPEG 或 DDS 不會直接阻塞 bbox worker，但繪圖、編碼與背景 KCF 會共用 CPU／記憶體資源。共享影格池若被 SAM3、正在繪圖與待繪圖工作占滿，主迴圈會先捨棄尚未開始的舊繪圖工作，回收該影格租約再取新輸入，避免舊疊圖阻擋推論。辨識交接的 DINOv3 與深度／3D 計算目前仍在主迴圈。
+bbox ROS 發布由獨立 worker 發送 Detection2D／Detection3D／AprilTag 資料，不包含 RGB。主頁只開一條 `/view.mjpg`，有可顯示 bbox 且疊圖未超過 3 秒時顯示 960×540 辨識疊圖；沒有框、3D 模式缺少有效深度或結果過期時，顯示原始相機預覽。兩種 JPEG 由各自 worker 按需求編碼，主頁正常顯示 bbox 時會停用原始預覽編碼。上傳圖片維持顯示上傳結果，不受 3 秒時限影響；影像管理頁或其他直接訂閱 `/camera.mjpg`／`/overlay.mjpg` 的客戶端仍可要求各自串流。有 ROS debug 訂閱者才產生全解析度疊圖影像。JPEG 或 DDS 不會直接阻塞 bbox worker，但繪圖、編碼與背景 KCF 會共用 CPU／記憶體資源。共享影格池若被 SAM3、正在繪圖與待繪圖工作占滿，主迴圈會先捨棄尚未開始的舊繪圖工作，回收該影格租約再取新輸入，避免舊疊圖阻擋推論。辨識交接的 DINOv3 與深度／3D 計算目前仍在主迴圈。
 
 任一主流程 KCF 追蹤失敗或框無效時會清除失效框並提前要求背景偵測；當下已有任務就等它完成，不同步阻塞補偵測。新 SAM3 結果取代整組追蹤器，空偵測會清除舊框。DINOv3、深度／3D 框與發布使用當幀框。`bbox_source=sam3` 表示套用了新偵測（可能已經過追趕），其餘為 `kcf`；追蹤期間的 `detection_score` 保留最近一次 SAM3 分數。`grounding_ipc.worker_detect_ms` 為背景偵測耗時，主流程的 `detect_ms` 則是取得當幀提案的耗時。既有 `tracking_enabled` 仍控制 ID 配對與 bbox 顯示門檻，與背景排程獨立。
 
@@ -34,6 +34,16 @@ bbox ROS 發布由獨立 worker 發送 Detection2D／Detection3D／AprilTag 資�
 KCF 前景與背景 replay 都使用固定 ROI；`kcf_roi_padding: 0.5` 表示偵測框四邊各擴張 50%，ROI 超出原圖的部分會裁切到圖像邊界。只將當前影格的 ROI 轉為 BGR，不縮小物件解析度。ROI 保持固定到下次 SAM3 交接，KCF 的局部框會映射回原圖座標。追蹤框距 ROI 人工邊界小於等於當前框寬／高的 10%（至少 1 pixel）時，保留有效框並提前要求背景偵測；跨出人工邊界時視為追蹤失敗。真實圖像邊界正常裁切，不因此反覆補偵測。參數修改後需重啟辨識服務。
 
 相機 RGB、深度與深度 CameraInfo 訂閱在 `node.py` 固定使用 `ReliabilityPolicy.RELIABLE`，搭配 `KEEP_LAST`、depth=1，不提供 YAML 切換參數。此環境的 Orbbec 發布端為 RELIABLE；以獨立訂閱者交替測試，BEST_EFFORT 約 13 FPS、RELIABLE 約 29.7 FPS。這改善 ROS 接收缺幀，不保證辨識模型也能完成 30 FPS。更新程式後需重啟辨識服務，相機不用重啟。
+
+### 相機接收 FPS 與執行使用者
+
+相機、辨識服務與 ROS 量測工具應使用同一個 Linux 使用者；本專案的開發容器預設為 `admin`。在兩個 admin 終端分別執行 `./dinov3_ws/run_camera.sh` 與 `./dinov3_ws/run.sh`，避免其中一端經由 `sudo` 變成 root。可先執行 `id -un` 確認；從 host 進入既有容器時使用 `docker compose exec --user admin isaac-ros bash`。
+
+2026-10-18 以同一個相機程序、1920×1080 RGB、30 FPS、RELIABLE／KEEP_LAST depth=1，依序使用 admin、root、admin 接收，每輪暖機 4 秒再量測 12 秒，影像接收率為 **29.89、22.24、29.74 FPS**。root 接收端也無法探索到相機節點名稱；三輪均沒有新增 UDP `RcvbufErrors`。這定位到跨使用者通訊問題，與 [Fast DDS SHM 的使用者權限限制](https://fast-dds.docs.eprosima.com/en/2.x/fastdds/transport/shared_memory/shared_memory.html) 一致。先前以 root 執行的低 FPS 量測不能代表全部以 admin 執行的效能。
+
+優先統一程序使用者並重新啟動相關節點，再量測；不需為此降低相機解析度、放寬 `/dev/shm` 權限或先修改系統 UDP 緩衝。若同使用者仍掉幀，另查發布端時間戳、ROS 訂閱 QoS 與系統負載。CameraInfo 約 30 FPS 本身不等於完整影像已成功傳送 30 FPS。
+
+對照資料與可重現量測腳本位於 `artifacts/camera_delivery_user_comparison_20261018/`。此實驗只驗證相機接收，不保證完整辨識結果也達到 30 FPS。
 
 主程序的 `opencv_num_threads` 預設設定為 `1`，限制 OpenCV 內部執行緒池以控制 CPU 負載；前景、背景 replay、發布及繪圖仍並行。設定為 `0` 保留 OpenCV 函式庫預設值。此設定只作用於主程序，不更改 SAM3 子程序或 PyTorch／BLAS 執行緒數，修改後重新啟動。
 
@@ -75,6 +85,22 @@ SAM3 使用套件內的 `sam3_runtime`，輸入為 RGB 1008×1008、bilinear res
 上述 Python 模組均位於 `src/dinov3_cases/dinov3_cases/`。
 
 共享池的 slot 在推論與繪圖使用完畢前保持唯讀；socket 僅傳控制與結果。bbox 發布與 JPEG 繪圖各有獨立執行緒。`processing_ms`／`callback_to_result_ms` 截止於辨識與 3D 框完成，`render_ms`／`result_to_overlay_ms` 另計。
+
+## 3D 深度計算的 ROI 與射線快取
+
+3D worker 保留原始 `16UC1`／`32FC1` 深度，裁切 bbox 後才轉 `float64` 公尺，避免每幀轉換整張深度圖。像素投影方向由 worker 專用的 `ProjectionRayCache` 保存；解析度、K、畸變係數或畸變模型改變時重建，只保留一份校正。分割、全部前景點、分位數、平均 Z 與診斷欄位算法保持一致。
+
+1920×1080 的 float64 雙通道射線表占 33,177,600 bytes（約 33 MB），2026-10-18 實測首次計算含建表約 190–198 ms；之後每幀查表。這筆首次／校正變更成本需與穩態耗時分開看。
+
+以 12 張真實對齊深度、固定測試 ROI、OpenCV 單執行緒、三輪交替順序量測，各方案每情境 72 次，平均耗時如下（ms）：
+
+| 測試框 | 修改前 | 只做 ROI 轉換 | ROI 加射線快取 |
+| --- | ---: | ---: | ---: |
+| 1 個 300×300 | 17.32 | 14.09 | 9.02 |
+| 1 個 600×400 | 21.42 | 19.04 | 13.50 |
+| 3 個 300×300 | 36.41 | 33.78 | 23.35 |
+
+逐欄比較的輸出差異為 0。此測試回放相同實際深度與固定 ROI，相機驅動持續運作，未執行 SAM3／DINO 或 JPEG；耗時包含深度轉換與 3D 框計算，不代表整體辨識 FPS，也不能直接套用前次不同場景的 15.4 ms。原版、深度輸入與報告保存在 `artifacts/depth_bbox_optimization_20261018/`，重跑方式見測試 README。
 
 ## 可選模型建置
 

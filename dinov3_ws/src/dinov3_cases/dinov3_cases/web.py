@@ -9,6 +9,7 @@ from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
 from .patches import reference_grid_image
 from .grounded import prepare_object, validate_settings
 from .kcf import kcf_factory
+from .display_stream import display_uses_overlay
 from .image_manager import register_image_manager
 from .gallery_files import (
     group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
@@ -38,6 +39,7 @@ def create_app(node):
         node.clear_object_debug()
         node.detections = []
         node.overlay_at = None
+        node.overlay_has_boxes = False
 
     def images_changed(group):
         with node.lock:
@@ -239,24 +241,32 @@ def create_app(node):
         if hasattr(node, "stream_requested_at"):
             with node.lock:
                 node.stream_requested_at[attribute] = time.monotonic()
+
+        def current_frame():
+            selected = attribute
+            if attribute == "display":
+                selected = ("jpeg" if node.source == "upload" or display_uses_overlay(node)
+                            else "preview_jpeg")
+            return selected, getattr(node, selected)
+
         def frames():
             tracked = hasattr(node, "stream_viewers")
             if tracked:
                 with node.lock:
                     node.stream_viewers[attribute] = node.stream_viewers.get(attribute, 0) + 1
             try:
-                previous = None
+                previous_kind, previous = None, None
                 while not node.stop.is_set():
+                    def changed():
+                        kind, data = current_frame()
+                        return node.stop.is_set() or kind != previous_kind or data is not previous
                     with node.stream_changed:
-                        node.stream_changed.wait_for(
-                            lambda: node.stop.is_set() or getattr(node, attribute) is not previous,
-                            timeout=0.5,
-                        )
-                        data = getattr(node, attribute)
-                    if data is None or data is previous:
-                        previous = data
+                        node.stream_changed.wait_for(changed, timeout=0.5)
+                        kind, data = current_frame()
+                    if data is None or (kind == previous_kind and data is previous):
+                        previous_kind, previous = kind, data
                         continue
-                    previous = data
+                    previous_kind, previous = kind, data
                     # No per-client frame queue: slow clients pick the newest result next.
                     yield (
                         b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
@@ -275,6 +285,10 @@ def create_app(node):
             mimetype="multipart/x-mixed-replace; boundary=frame",
             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
         )
+
+    @app.get("/view.mjpg")
+    def display_stream():
+        return stream("display")
 
     @app.get("/camera.mjpg")
     def camera_stream():

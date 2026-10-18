@@ -35,7 +35,8 @@ from vision_msgs.msg import Detection2DArray, Detection3DArray
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
 from .apriltag import apriltag_message
 from .depth_sync import matched_inputs
-from .depth_bbox import attach_bboxes3d, bboxes3d_message
+from .display_stream import has_display_boxes, display_overlay_requested, display_uses_overlay
+from .depth_bbox import ProjectionRayCache, attach_bboxes3d, bboxes3d_message
 from .web import create_app
 from .visualization import render_bbox_overlay, render_display_overlay
 from .object_visualization import ObjectVisualizationSnapshot
@@ -177,6 +178,7 @@ class CaseNode(Node):
         self.depth_changed = threading.Condition(self.lock)
         self.depth_frames = deque(maxlen=30)
         self.depth_infos = deque(maxlen=8)
+        self.depth_ray_cache = ProjectionRayCache()
         self.performance = {}
         self.frame_pool = SharedFramePool(slots=3)
         self.pending_render = None
@@ -202,6 +204,7 @@ class CaseNode(Node):
         self.camera_fps = None
         self.preview_error = None
         self.overlay_at = None
+        self.overlay_has_boxes = False
         self.status = "Loading DINOv3 model…"
         self.backend_description = None
         self.reference_stride = None
@@ -292,13 +295,14 @@ class CaseNode(Node):
         try:
             depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding="passthrough")
             if depth_msg.encoding == "16UC1":
-                depth = depth.astype(np.float64) * 0.001
+                depth_scale = 0.001
             elif depth_msg.encoding == "32FC1":
-                depth = depth.astype(np.float64)
+                depth_scale = 1.0
             else:
                 raise ValueError(f"unsupported_depth_encoding:{depth_msg.encoding}")
             attach_bboxes3d(
                 detections, depth, info,
+                depth_scale=depth_scale, ray_cache=self.depth_ray_cache,
                 min_depth=self.param("pose_min_depth"), max_depth=self.param("pose_max_depth"),
                 depth_band=self.param("bbox3d_depth_band"),
                 min_points=self.param("bbox3d_min_points"),
@@ -346,11 +350,18 @@ class CaseNode(Node):
                 self.get_logger().error(f"ROS result publication failed: {error}")
 
     def wants_stream(self, attribute):
-        # Produce one initial snapshot; otherwise render only for active/recent readers.
         with self.lock:
-            return (getattr(self, attribute) is None
-                    or self.stream_viewers.get(attribute, 0) > 0
-                    or time.monotonic() - self.stream_requested_at.get(attribute, -float("inf")) < 2)
+            direct_reader = (self.stream_viewers.get(attribute, 0) > 0
+                             or time.monotonic() - self.stream_requested_at.get(
+                                 attribute, -float("inf")) < 2)
+            if direct_reader:
+                return True
+            if self.stream_viewers.get("display", 0) > 0:
+                if attribute == "jpeg":
+                    return display_overlay_requested(self)
+                return self.source == "camera" and not display_uses_overlay(self)
+            # Keep the existing initial snapshot for standalone image consumers.
+            return getattr(self, attribute) is None
 
     def acquire_input_frame(self, pixels, *, frame_id, timestamp):
         """Reclaim a queued old overlay before letting rendering exhaust input slots."""
@@ -395,6 +406,8 @@ class CaseNode(Node):
                         continue
                     if want_jpeg:
                         self.jpeg = jpeg
+                        self.overlay_has_boxes = has_display_boxes(
+                            detections, self.bbox_visualization_mode)
                     self.overlay_at = time.monotonic()
                     if self.performance.get("completed_at") == completed_at:
                         self.performance["render_ms"] = (self.overlay_at - start) * 1000
