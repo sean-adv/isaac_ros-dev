@@ -258,7 +258,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
                       kcf_roi_padding=.5, kcf_replay_max_frames=8, kcf_replay_budget_ms=150.,
                       grounding_nms_iou=1., grounding_max_detections=20,
                       grounding_min_bbox_width=0, grounding_min_bbox_height=0,
-                      grounding_min_bbox_area=0, tracking_enabled=False, pose_enabled=False)
+                      grounding_min_bbox_area=0, pose_enabled=False)
     logger = Mock()
     node = SimpleNamespace(
         lock=threading.Lock(), generation=0, frame=Image.fromarray(pixels), frame_seq=0,

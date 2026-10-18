@@ -21,7 +21,7 @@ from .patches import feature_stride
 from .encoder import Encoder
 from .grounding_ipc import SharedMemoryGroundingDetector
 from .frame_pool import SharedFramePool
-from .tracking import BBoxSmoother, ROITracker
+from .tracking import BBoxSmoother
 from .kcf import KCFProposals, kcf_factory
 from .async_kcf import AsyncKCFProposals, validate_replay_limits
 from .runtime import (
@@ -83,12 +83,6 @@ class CaseNode(Node):
             grounding_min_bbox_area=0,
             recognition_threshold=0.75,
             recognition_margin=0.05,
-            tracking_enabled=False,
-            tracking_max_missed=5,
-            tracking_iou_threshold=0.2,
-            tracking_roi_padding=0.5,
-            tracking_bbox_min_hit_ratio=0.8,
-            tracking_bbox_min_detections=10,
             image_topic="/camera/color/image_raw",
             tag_topic="/tag_detections",
             pose_enabled=True,
@@ -123,13 +117,6 @@ class CaseNode(Node):
                                self.param("kcf_replay_budget_ms"))
         KCFProposals(roi_padding=self.param("kcf_roi_padding"))
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
-        self.tracker = ROITracker(
-            self.param("tracking_max_missed"),
-            self.param("tracking_iou_threshold"),
-            self.param("tracking_roi_padding"),
-            bbox_min_hit_ratio=self.param("tracking_bbox_min_hit_ratio"),
-            bbox_min_detections=self.param("tracking_bbox_min_detections"),
-        )
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
             box_threshold=self.param("grounding_box_threshold"),
@@ -503,7 +490,6 @@ class CaseNode(Node):
         gallery = ObjectGallery()
         processed = None
         next_upload_refresh = 0.0
-        tracking_context = None
         proposal_tracker = AsyncKCFProposals(
             wake=self.image_changed.set,
             roi_padding=self.param("kcf_roi_padding"),
@@ -617,14 +603,8 @@ class CaseNode(Node):
                 with self.lock:
                     if gen != self.generation:
                         continue
-                    if self.param("tracking_enabled"):
-                        if context != tracking_context:
-                            self.tracker.reset()
-                            tracking_context = context
-                        self.tracker.update(detections, frame_key=(gen, seq))
-                    else:
-                        for item in detections:
-                            item["bbox_visible"] = True
+                    for item in detections:
+                        item["bbox_visible"] = True
                 if self.param("pose_enabled") and header is not None:
                     self.estimate_bboxes3d(detections, depth_inputs)
                 else:

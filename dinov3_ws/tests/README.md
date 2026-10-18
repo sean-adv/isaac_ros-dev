@@ -28,7 +28,7 @@ dinov3_trt11_venv/bin/python -m pytest -q dinov3_ws/tests
 | `test_apriltag.py` | Isaac ROS 訊息序列化、座標及空結果發布 |
 | `test_bbox_visualization.py` | 2D/3D 框投影、config 指定單一模式與首頁顯示 |
 | `test_image_manager.py`、`test_camera_capture.py` | 圖庫、去背、相機擷取與 bbox 預覽 |
-| `test_tracking.py` | bbox 移動平均、跨偵測配對與重設；可選 ROI tracking 的 ID、門檻與生命週期 |
+| `test_tracking.py` | bbox 移動平均、跨偵測配對、同幀修正與歷史重設 |
 | `test_async_kcf.py` | 背景 SAM3 與 DINO 共用排程且不卡住 KCF、偵測影格初始化／補追及框分類原子交接、過期結果與呼叫／時間預算、租約及錯誤處理 |
 | `test_kcf.py` | SAM3 間隔、KCF 框更新、失敗補偵測、重設與實際 OpenCV 追蹤 |
 

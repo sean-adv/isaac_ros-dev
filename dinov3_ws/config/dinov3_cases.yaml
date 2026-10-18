@@ -15,7 +15,7 @@ dinov3_cases:
     # Catch-up call/time limits; skip intermediate frames. Excludes SAM3/init time.
     # Time limit is checked between KCF updates. Restart to apply.
     kcf_replay_max_frames: 8
-    kcf_replay_budget_ms: 250.0
+    kcf_replay_budget_ms: 500.0
     # OpenCV internal pool in the main process; independent workers remain concurrent.
     # 0 preserves the library default. Restart to apply.
     opencv_num_threads: 1
@@ -29,15 +29,6 @@ dinov3_cases:
     grounding_min_bbox_area: 0
     recognition_threshold: 0.85
     recognition_margin: 0.05
-    # Frame-local bbox detections; enable explicitly if ROI tracking is wanted.
-    tracking_enabled: false
-    # When enabled: keep IDs across 6 missed inference frames; expand each ROI by 50% per side.
-    tracking_max_missed: 6
-    tracking_roi_padding: 0.6
-    # Show bbox only when BOTH strict thresholds are exceeded (>).
-    # Count unique inference frames since this track's first detection, including misses.
-    tracking_bbox_min_hit_ratio: 0.8
-    tracking_bbox_min_detections: 6
     # ViT-B/16 uses fixed 224×224 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
     # Preview and the configured overlay JPEG have fixed 960x540 output.
@@ -50,10 +41,10 @@ dinov3_cases:
     depth_topic: /camera/depth/image_raw
     depth_camera_info_topic: /camera/depth/camera_info
     pose_sync_tolerance: 0.2
-    pose_min_depth: 0.1
-    pose_max_depth: 5.0
+    pose_min_depth: 0.2
+    pose_max_depth: 2.0
     # Foreground depth tolerance around the central patch median (meters).
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 80
     # Trim each XYZ axis at 2% / 98%; 0 uses the full component bounds.
-    bbox3d_quantile: 0.02
+    bbox3d_quantile: 0.05

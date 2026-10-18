@@ -15,7 +15,7 @@
 ./dinov3_ws/run.sh --ros-args -p grounding_box_threshold:=0.5
 ```
 
-預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.5、NMS 停用、每幀最多 20 個框；ROI tracking 預設停用。
+預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.5、NMS 停用、每幀最多 20 個框。
 
 SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。每隔 N 個不同處理影格嘗試提交一次背景 SAM3＋DINO，最多一個進行中的任務，不排隊；設為 1 則停用 KCF，維持每幀同步 SAM3。等待 SAM3／DINO 時，主流程持續用原本 KCF 更新 bbox，分類沿用快取。首次初始化／切換來源或設定時持續接收最新 RGB，不發布暫時的空結果；相同輸入未改變時不重複複製。計數以實際處理的不同影格為準，相機跳過的影格不計入。
 
@@ -27,9 +27,9 @@ SAM3 完成後，同一背景工作先在該次偵測的原始 RGB 影格與 bbo
 
 bbox ROS 發布由獨立 worker 發送 Detection2D／Detection3D／AprilTag 資料，不包含 RGB。主頁只開一條 `/view.mjpg`，有可顯示 bbox 且疊圖未超過 3 秒時顯示 960×540 辨識疊圖；沒有框、3D 模式缺少有效深度或結果過期時，顯示原始相機預覽。兩種 JPEG 由各自 worker 按需求編碼，主頁正常顯示 bbox 時會停用原始預覽編碼。上傳圖片維持顯示上傳結果，不受 3 秒時限影響；影像管理頁或其他直接訂閱 `/camera.mjpg`／`/overlay.mjpg` 的客戶端仍可要求各自串流。有 ROS debug 訂閱者才產生全解析度疊圖影像。JPEG 或 DDS 不會直接阻塞 bbox worker，但繪圖、編碼與背景 KCF 會共用 CPU／記憶體資源。共享影格池若被 SAM3、正在繪圖與待繪圖工作占滿，主迴圈會先捨棄尚未開始的舊繪圖工作，回收該影格租約再取新輸入，避免舊疊圖阻擋推論。DINOv3／Lab 與圖庫特徵更新已移到 SAM3 的背景工作；深度同步與 3D 計算仍在主迴圈。
 
-任一主流程 KCF 追蹤失敗或框無效時會清除失效框並提前要求背景偵測；當下已有任務就等它完成，不同步阻塞補偵測。新 SAM3 結果取代整組追蹤器，空偵測會清除舊框。DINOv3、深度／3D 框與發布使用當幀框。`bbox_source=sam3` 表示套用了新偵測（可能已經過追趕），其餘為 `kcf`；追蹤期間的 `detection_score` 保留最近一次 SAM3 分數。`grounding_ipc.worker_detect_ms` 為背景偵測耗時，主流程的 `detect_ms` 則是取得當幀提案的耗時。既有 `tracking_enabled` 仍控制 ID 配對與 bbox 顯示門檻，與背景排程獨立。
+任一主流程 KCF 追蹤失敗或框無效時會清除失效框並提前要求背景偵測；當下已有任務就等它完成，不同步阻塞補偵測。新 SAM3 結果取代整組追蹤器，空偵測會清除舊框。DINOv3、深度／3D 框與發布使用當幀框。`bbox_source=sam3` 表示套用了新偵測（可能已經過追趕），其餘為 `kcf`；追蹤期間的 `detection_score` 保留最近一次 SAM3 分數。`grounding_ipc.worker_detect_ms` 為背景偵測耗時，主流程的 `detect_ms` 則是取得當幀提案的耗時。bbox 直接顯示當幀結果，不再提供額外的 ROITracker ID 配對或命中門檻。
 
-`config/dinov3_cases.yaml` 的 `bbox_smoothing_frames` 控制 bbox 移動平均，預設為 3（設為 1 停用），修改後重新啟動。此設定不顯示在網頁。每個物件取最近 N 個不同處理影格的原始 SAM3／KCF 框平均；不足 N 幀時使用已有樣本。SAM3 更新時依位置配對歷史，物件消失或來源／解析度／設定變更時清除歷史。同一幀重跑不增加樣本。平滑框供辨識裁切、顯示、3D 框與發布使用，KCF 本身仍以原始框運作，與 `tracking_enabled` 無關。
+`config/dinov3_cases.yaml` 的 `bbox_smoothing_frames` 控制 bbox 移動平均，預設為 3（設為 1 停用），修改後重新啟動。此設定不顯示在網頁。每個物件取最近 N 個不同處理影格的原始 SAM3／KCF 框平均；不足 N 幀時使用已有樣本。SAM3 更新時依位置配對歷史，物件消失或來源／解析度／設定變更時清除歷史。同一幀重跑不增加樣本。平滑框供辨識裁切、顯示、3D 框與發布使用，KCF 本身仍以原始框運作。
 
 KCF 前景與背景 replay 都使用固定 ROI；`kcf_roi_padding: 0.5` 表示偵測框四邊各擴張 50%，ROI 超出原圖的部分會裁切到圖像邊界。只將當前影格的 ROI 轉為 BGR，不縮小物件解析度。ROI 保持固定到下次 SAM3 交接，KCF 的局部框會映射回原圖座標。追蹤框距 ROI 人工邊界小於等於當前框寬／高的 10%（至少 1 pixel）時，保留有效框並提前要求背景偵測；跨出人工邊界時視為追蹤失敗。真實圖像邊界正常裁切，不因此反覆補偵測。參數修改後需重啟辨識服務。
 
