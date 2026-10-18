@@ -90,7 +90,9 @@ def build_object_diagnostic(
     reference = None
     dino_score = lab_score = None
     if index is not None:
-        _, dino, lab = gallery.similarities(context["descriptor"], context["lab_histogram"])
+        _, dino, lab = gallery.similarities(
+            context["descriptor"], context["lab_histogram"], reference_case
+        )
         dino_score, lab_score = float(dino[index]), float(lab[index])
         reference = dict(case=gallery.labels[index], name=Path(gallery.paths[index]).name)
         views["reference"] = cv2.cvtColor(

@@ -5,9 +5,9 @@ dinov3_cases:
     grounding_box_threshold: 0.1
     grounding_nms_iou: 1.0  # SAM3 default: no NMS
     grounding_max_detections: 20
-    # Submit background SAM3 every N processed frames; KCF continues while it runs.
+    # Submit one background SAM3 + DINO job every N processed frames; KCF continues.
     # One job at a time; seed and each catch-up update use latest admitted RGB.
-    # DINO runs on handoff; KCF frames reuse that set's classifications.
+    # DINO classifies SAM3 seed-frame crops before replay; boxes/labels hand off together.
     # 1 disables KCF and uses synchronous SAM3. Lost tracking requests detection early.
     grounding_detection_interval: 30
     # Fixed KCF crop: expand each side by this fraction; clipped to image bounds.
@@ -15,7 +15,7 @@ dinov3_cases:
     # Catch-up call/time limits; skip intermediate frames. Excludes SAM3/init time.
     # Time limit is checked between KCF updates. Restart to apply.
     kcf_replay_max_frames: 8
-    kcf_replay_budget_ms: 150.0
+    kcf_replay_budget_ms: 250.0
     # OpenCV internal pool in the main process; independent workers remain concurrent.
     # 0 preserves the library default. Restart to apply.
     opencv_num_threads: 1

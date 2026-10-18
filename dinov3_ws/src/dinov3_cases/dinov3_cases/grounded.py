@@ -181,17 +181,34 @@ class ObjectGallery:
         self.reference_inputs = reference_inputs
         return True
 
-    def similarities(self, descriptor, lab_histogram):
-        """Fuse each reference's DINO cosine with its Lab Bhattacharyya coefficient."""
+    def similarities(self, descriptor, lab_histogram, case=""):
+        """Fuse references from the top three DINO classes, or an explicit debug class.
+
+        Classes rank by their best DINO reference; ties use the class name.
+        Excluded references have score -inf and no Lab score (NaN).
+        """
         dino = (self.features @ descriptor).clamp(-1, 1).cpu().numpy()
-        lab = np.sqrt(self.lab_histograms * lab_histogram).sum(axis=1).clip(0, 1)
-        return 0.8 * dino + 0.2 * lab, dino, lab
+        if case:
+            candidates = {case}
+        else:
+            by_class = {}
+            for label, score in zip(self.labels, dino):
+                by_class[label] = max(by_class.get(label, -1.0), float(score))
+            candidates = set(sorted(by_class, key=lambda label: (-by_class[label], label))[:3])
+        indices = [i for i, label in enumerate(self.labels) if label in candidates]
+        lab = np.full(dino.shape, np.nan, dtype=dino.dtype)
+        scores = np.full(dino.shape, -np.inf, dtype=dino.dtype)
+        lab[indices] = np.sqrt(
+            self.lab_histograms[indices] * lab_histogram
+        ).sum(axis=1).clip(0, 1)
+        scores[indices] = 0.8 * dino[indices] + 0.2 * lab[indices]
+        return scores, dino, lab
 
     def best_reference(self, descriptor, case="", *, lab_histogram):
         indices = [i for i, label in enumerate(self.labels) if not case or label == case]
         if not indices:
             return None, None
-        scores, _, _ = self.similarities(descriptor, lab_histogram)
+        scores, _, _ = self.similarities(descriptor, lab_histogram, case)
         best = max(indices, key=lambda i: scores[i])
         return best, float(scores[best])
 
@@ -204,7 +221,8 @@ class ObjectGallery:
         similarities = scores.tolist()
         by_class = {}
         for label, score in zip(self.labels, similarities):
-            by_class[label] = max(by_class.get(label, -1.0), score)
+            if np.isfinite(score):
+                by_class[label] = max(by_class.get(label, -1.0), score)
         ranked = sorted(by_class.items(), key=lambda item: (-item[1], item[0]))
         label, score = ranked[0]
         best_reference = max(

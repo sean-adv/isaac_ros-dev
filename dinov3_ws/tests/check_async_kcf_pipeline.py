@@ -117,6 +117,8 @@ def main():
             assert schedule['seed_skipped_frames'] == 0, schedule
             assert schedule['replay_frames'] > 0, schedule
             assert status['performance']['recognition_source'] == 'dino', status
+            assert (status['performance']['recognition_frame_id']
+                    == status['performance']['grounding_ipc']['source_frame_id']), status
             visualizations = client.get('/api/object_visualizations').json
             assert visualizations['ready'] and visualizations['objects'], visualizations
             assert visualizations['revision'] > previous_revision, visualizations

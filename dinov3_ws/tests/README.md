@@ -29,7 +29,7 @@ dinov3_trt11_venv/bin/python -m pytest -q dinov3_ws/tests
 | `test_bbox_visualization.py` | 2D/3D 框投影、config 指定單一模式與首頁顯示 |
 | `test_image_manager.py`、`test_camera_capture.py` | 圖庫、去背、相機擷取與 bbox 預覽 |
 | `test_tracking.py` | bbox 移動平均、跨偵測配對與重設；可選 ROI tracking 的 ID、門檻與生命週期 |
-| `test_async_kcf.py` | 背景偵測不卡住 KCF、最新影格初始化／補追交接、過期結果與呼叫／時間預算、租約及錯誤處理 |
+| `test_async_kcf.py` | 背景 SAM3 與 DINO 共用排程且不卡住 KCF、偵測影格初始化／補追及框分類原子交接、過期結果與呼叫／時間預算、租約及錯誤處理 |
 | `test_kcf.py` | SAM3 間隔、KCF 框更新、失敗補偵測、重設與實際 OpenCV 追蹤 |
 
 `ipc_fake_worker.py` 是 IPC 測試必要的子程序 fixture，不能當作一般診斷腳本刪除。
@@ -48,7 +48,7 @@ node --test dinov3_ws/tests/test_images_ui.cjs
 
 - `check_gpu_environment.py`：檢查 CUDA driver、PyTorch allocation 與 TensorRT Builder。
 - `check_sam3_trt_pipeline.py`：比較 SAM3 TRT10 direct／IPC 結果，並驗證 DINOv3 crop 特徵。
-- `check_async_kcf_pipeline.py`：真實 SAM3／DINOv3 流程，先以 30 FPS 持續輸入並延遲首次 SAM3，確認以最新 RGB 初始化並略過偵測期間影格；再刻意阻塞穩態背景 SAM3，確認前景 KCF 持續完成、最新影格交接後 DINOv3 與診斷圖片更新。
+- `check_async_kcf_pipeline.py`：真實 SAM3／DINOv3 流程，先以 30 FPS 持續輸入並延遲首次 SAM3，確認以最新 RGB 初始化並略過偵測期間影格；再刻意阻塞穩態背景 SAM3，確認前景 KCF 持續完成、SAM3 偵測影格上完成 DINOv3 後，框、分類與診斷圖片一起交接。
 - `check_grounded_trt_pipeline.py`：實際雙環境 HTTP／ROS 流程，以及刻意阻塞 JPEG 時的 bbox 發布。
 
 從工作區根目錄執行：

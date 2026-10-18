@@ -215,7 +215,8 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     encoder.device, encoder.description = 'cpu', 'counting encoder'
     encoder.model = object()
     gallery.refresh = Mock(return_value=False)
-    scheduler = Mock(active=Mock(initialized=True), last_metrics={})
+    scheduler = Mock(active=Mock(initialized=True), last_metrics={},
+                     last_recognition=None, lock=threading.Lock())
     scheduler.scheduler_metrics.return_value = {}
     # seq, bbox x positions, new tracker set, expected diagnostic revision,
     # recognition source, recognition frame. Same-frame handoff used to truncate.
@@ -227,14 +228,15 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
                        (0, [45, 0], True, 2, 'dino', 0),
                        (1, [45, 0], False, 2, 'cached', 0)],
         'partial_loss': [(0, [0, 45], False, 1, 'dino', 0),
-                         (1, [45], False, 2, 'dino', 1),
-                         (2, [45], False, 2, 'cached', 1)],
+                         (1, [45], False, 1, 'cached', 0),
+                         (2, [45], False, 1, 'cached', 0)],
         'total_loss': [(0, [0, 45], False, 1, 'dino', 0),
                        (1, [], False, 2, 'none', None),
                        (2, [45], True, 3, 'dino', 2)],
     }[scenario]
     scheduler.has_result.return_value = True
     calls = []
+    classified = {}
 
     def proposal_update(*args, **kwargs):
         index = len(calls)
@@ -242,7 +244,13 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
         _, positions, new_set, _, _, _ = rows[index]
         if new_set:
             scheduler.active = Mock(initialized=True)
-        return [proposal(x) for x in positions], ('sam3' if new_set or index == 0 else 'kcf')
+        if new_set or index == 0:
+            items, scheduler.last_recognition = kwargs['recognize'](
+                args[0], [proposal(x) for x in positions], args[1])
+            classified.clear()
+            classified.update(zip(positions, items))
+        return [dict(classified[x], bbox=proposal(x)['bbox']) for x in positions], (
+            'sam3' if new_set or index == 0 else 'kcf')
 
     scheduler.update.side_effect = proposal_update
     parameters = dict(engine_path='unused', grounding_engine_path='unused',

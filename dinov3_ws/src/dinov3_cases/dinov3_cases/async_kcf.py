@@ -1,6 +1,5 @@
-"""Background SAM3 detection, detection-frame KCF seeding, and bounded catch-up."""
+"""Background detection, detection-frame KCF seeding, and latest-frame catch-up."""
 
-from collections import deque
 import threading
 import math
 import time
@@ -17,11 +16,11 @@ def validate_replay_limits(max_replay_frames, replay_budget_ms):
 
 
 class AsyncKCFProposals:
-    """Seed candidates on the detection image and replay bounded frame history.
+    """Seed candidates on the detection image and repeatedly track the latest frame.
 
     The main thread keeps active trackers until a candidate catches up and is
-    handed off atomically. Missing history invalidates the candidate rather than
-    jumping across an unbounded motion gap. Interval=1 disables async KCF.
+    handed off atomically. Each update skips intermediate arrivals; frame and
+    time budgets bound catch-up work. Interval=1 disables async KCF.
     """
 
     def __init__(self, factory=None, wake=None, roi_padding=0.5,
@@ -39,7 +38,6 @@ class AsyncKCFProposals:
         self.context = None
         self.version = 0
         self.latest = None
-        self.history = deque(maxlen=max_replay_frames)
         self.serial = 0
         self.last_key = None
         self.ready = self.error = None
@@ -47,6 +45,7 @@ class AsyncKCFProposals:
         self.frames_since_submit = 0
         self.force_detection = True
         self.last_metrics = {}
+        self.last_recognition = None
         self.last_replay = {}
 
     def has_result(self):
@@ -64,13 +63,12 @@ class AsyncKCFProposals:
             self.closed = True
             self.version += 1
             self.latest = None
-            self.history.clear()
             self.ready = None
             thread = self.thread
         if thread is not None:
             thread.join(timeout=3)
 
-    def _job(self, version, serial, pixels, frame, detect, seed_frame_key):
+    def _job(self, version, serial, pixels, frame, detect, seed_frame_key, recognize=None):
         published = False
         replay_frames = 0
         replay_started = None
@@ -84,6 +82,12 @@ class AsyncKCFProposals:
             finally:
                 if frame is not None:
                     frame.release()
+            with self.lock:
+                if self.closed or version != self.version:
+                    return
+            recognition = None
+            if recognize is not None:
+                proposals, recognition = recognize(pixels, proposals, seed_frame_key)
             with self.lock:
                 if self.closed or version != self.version:
                     return
@@ -101,15 +105,13 @@ class AsyncKCFProposals:
                     if self.closed or version != self.version:
                         return
                     if self.latest[0] == serial:
-                        self.ready = (candidate, metrics)
+                        self.ready = (candidate, metrics, recognition)
                         published = True
                         return
-                    next_serial, image = next(
-                        item for item in self.history if item[0] > serial)
-                    if next_serial != serial + 1:
-                        discard_reason = "history_gap"
-                        return
-                # Replay in admission order without holding the foreground lock.
+                    next_serial, image = self.latest
+                # Take the newest admitted frame on every iteration. The local
+                # reference keeps its owned pixels alive while newer ones arrive.
+                # Never hold the foreground lock during KCF work.
                 if replay_frames >= self.max_replay_frames:
                     discard_reason = "frame_budget"
                     return
@@ -142,14 +144,24 @@ class AsyncKCFProposals:
                                    (time.monotonic()-replay_started)*1000),
                         discard_reason=None if published else discard_reason,
                     )
-                    if not published and discard_reason not in ("frame_budget", "time_budget"):
+                    if not published and (not self.active.initialized
+                                          or discard_reason not in ("frame_budget", "time_budget")):
                         self.force_detection = True
                     # On overload preserve the active tracker and normal submit
                     # interval, avoiding an immediate detector/replay retry loop.
             self.wake()
 
-    def update(self, pixels, frame_key, context, interval, detect, *, frame=None):
-        """Return None until first detection; detect(input) returns (boxes, metrics)."""
+    def update(self, pixels, frame_key, context, interval, detect, *, frame=None, recognize=None,
+               wait_for_initial_result=False):
+        """Run detection and optional recognition in one scheduled job.
+
+        recognize(seed_pixels, boxes, frame_key) returns (classified_boxes, payload).
+        Labels travel with each KCF proposal; payload commits only at handoff.
+        Interval=1 runs both models in the caller with KCF disabled.
+        wait_for_initial_result waits on the first job before admitting more frames,
+        so cold-start inference can hand off before admitting more frames.
+        Camera capture/preview may continue independently of this caller.
+        """
         validate_detection_interval(interval)
         with self.lock:
             if self.closed:
@@ -160,28 +172,27 @@ class AsyncKCFProposals:
                 self.version += 1
                 self.active = KCFProposals(self.factory, roi_padding=self.roi_padding)
                 self.latest = None
-                self.history.clear()
                 self.last_key = None
                 self.ready = self.error = None
                 self.frames_since_submit = 0
                 self.force_detection = True
                 self.last_metrics = {}
+                self.last_recognition = None
                 self.last_replay = {}
             if self.error is not None:
                 error, self.error = self.error, None
                 raise error
             applied = self.ready is not None
             if applied:
-                self.active, self.last_metrics = self.ready
+                self.active, self.last_metrics, self.last_recognition = self.ready
                 self.ready = None
             changed = frame_key != self.last_key
             # Only asynchronous detection needs owned replay images.
             if changed and interval > 1:
                 self.last_key = frame_key
                 self.serial += 1
-                # Bounded owned history, independent of shared-memory leases.
+                # One owned latest image, independent of shared-memory leases.
                 self.latest = (self.serial, pixels.copy())
-                self.history.append(self.latest)
                 if self.active.initialized:
                     self.frames_since_submit += 1
             serial = self.serial
@@ -190,6 +201,8 @@ class AsyncKCFProposals:
         if interval == 1:
             def synchronous():
                 proposals, self.last_metrics = detect(frame if frame is not None else pixels)
+                if recognize is not None:
+                    proposals, self.last_recognition = recognize(pixels, proposals, frame_key)
                 return proposals
             return self.active.update(pixels, frame_key, identity, 1, synchronous)
 
@@ -215,8 +228,15 @@ class AsyncKCFProposals:
                 snapshot = self.latest[1]
                 lease = frame.retain() if frame is not None else None
                 self.thread = threading.Thread(
-                    target=self._job, args=(version, serial, snapshot, lease, detect, frame_key),
+                    target=self._job, args=(version, serial, snapshot, lease, detect, frame_key, recognize),
                     name="sam3-kcf-replay", daemon=True,
                 )
                 self.thread.start()
+            initial_job = (self.thread if wait_for_initial_result
+                           and not self.active.initialized and self.busy else None)
+        if initial_job is not None:
+            # Never join under the scheduler lock: the job needs it to publish.
+            initial_job.join()
+            return self.update(pixels, frame_key, context, interval, detect,
+                               frame=frame, recognize=recognize)
         return result

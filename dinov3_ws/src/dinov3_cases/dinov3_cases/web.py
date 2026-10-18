@@ -102,6 +102,8 @@ def create_app(node):
                 grounding=node.grounding_settings,
                 grounding_model_id=GROUNDING_MODEL_ID,
                 grounding_backend="trt",
+                grounding_schedule=(node.proposal_tracker.scheduler_metrics()
+                                    if getattr(node, "proposal_tracker", None) is not None else None),
                 grounding_precision=getattr(getattr(node, "grounding_detector", None), "precision", None),
                 grounding_execution="subprocess",
                 grounding_worker=getattr(
@@ -187,6 +189,7 @@ def create_app(node):
                 detector.validate_prompt(settings["prompt"])
             node.grounding_settings = settings
             invalidate_results()
+            node.status = "Settings applied: Preparing first detection and recognition…"
         return jsonify(ok=True, grounding=settings)
 
     @app.post("/api/cases")

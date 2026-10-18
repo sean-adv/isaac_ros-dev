@@ -493,6 +493,7 @@ class CaseNode(Node):
                 return
             with self.lock:
                 detector.validate_prompt(self.grounding_settings["prompt"])
+                self.status = "Models ready: Preparing first detection and recognition…"
         except Exception as error:
             self.close_grounding_worker()
             with self.lock:
@@ -501,8 +502,7 @@ class CaseNode(Node):
             return
         gallery = ObjectGallery()
         processed = None
-        next_gallery_scan = 0.0
-        gallery_revision = 0
+        next_upload_refresh = 0.0
         tracking_context = None
         proposal_tracker = AsyncKCFProposals(
             wake=self.image_changed.set,
@@ -511,8 +511,8 @@ class CaseNode(Node):
             replay_budget_ms=self.param("kcf_replay_budget_ms"),
         )
         self.proposal_tracker = proposal_tracker
-        recognizer = TrackedObjectRecognizer()
-        recognition_frame_id = None
+        last_recognition = None
+        had_detections = False
         result_rate = ResultRate(window_seconds=3.0)
         max_side = INPUT_SIZE
         for _ in self.worker_ticks():
@@ -520,15 +520,11 @@ class CaseNode(Node):
             with self.lock:
                 gen = self.generation
             try:
-                # Include filesystem changes even with an uploaded, otherwise static target.
-                if (
-                    time.monotonic() >= next_gallery_scan
-                    or processed is None
-                    or processed[0] != gen
-                ):
-                    if gallery.refresh(self.root, encoder, max_side, stride):
-                        gallery_revision += 1
-                    next_gallery_scan = time.monotonic() + 1.0
+                # Static uploads have no new frames to trigger periodic model jobs.
+                if self.source == "upload" and time.monotonic() >= next_upload_refresh:
+                    with proposal_tracker.lock:
+                        proposal_tracker.force_detection = True
+                    next_upload_refresh = time.monotonic() + 1.0
                 with self.lock:
                     if gen != self.generation:
                         continue
@@ -538,9 +534,9 @@ class CaseNode(Node):
                 if frame is None:
                     with self.lock:
                         if gen == self.generation:
-                            self.status = f"Ready: {len(set(gallery.labels))} classes. Waiting for target image…"
+                            self.status = "Ready: Waiting for target image…"
                     continue
-                if (processed == (gen, seq, gallery_revision)
+                if (processed == (gen, seq)
                         and not proposal_tracker.has_result()):
                     continue
                 start = time.monotonic()
@@ -555,8 +551,8 @@ class CaseNode(Node):
                 if shared_frame is None:
                     continue
                 image_ready_at = time.monotonic()
-                initializing = not proposal_tracker.active.initialized
-                depth_inputs = None if initializing else self.depth_inputs_for(frame)
+                # Preserve synchronized depth before first-result inference waits.
+                depth_inputs = self.depth_inputs_for(frame)
                 depth_ready_at = time.monotonic()
                 depth_wait_ms = (depth_ready_at - image_ready_at) * 1000
                 # Capture settings by value: the job may outlive this loop iteration.
@@ -573,35 +569,50 @@ class CaseNode(Node):
                     proposals = detector.detect(frame, **request)
                     return proposals, dict(getattr(detector, "last_metrics", {}))
 
+                def recognize(seed_pixels, proposals, seed_key, settings=settings):
+                    # This callback runs in the same background job as SAM3.
+                    # All gallery GPU work and diagnostics stay off the KCF loop.
+                    started = time.monotonic()
+                    gallery.refresh(self.root, encoder, max_side, stride)
+                    recognizer = TrackedObjectRecognizer()
+                    detections, diagnostics, _ = recognizer.update(
+                        seed_pixels, proposals, encoder, gallery, max_side, stride,
+                        settings["recognition_threshold"], settings["margin"],
+                        token=seed_key, gallery_revision=0,
+                    )
+                    snapshot = ObjectVisualizationSnapshot(
+                        recognizer.diagnostic_detections, diagnostics, gallery, max_side, stride
+                    )
+                    return detections, dict(
+                        frame_id=seed_key[1] if proposals else None,
+                        snapshot=snapshot,
+                        class_count=len(set(gallery.labels)),
+                        reference_count=len(gallery.labels),
+                        recognize_ms=(time.monotonic() - started) * 1000,
+                    )
+
                 result = proposal_tracker.update(
                     shared_frame.pixels, (gen, seq), context,
-                    settings["detection_interval"], detect, frame=shared_frame,
+                    settings["detection_interval"], detect, frame=shared_frame, recognize=recognize,
+                    wait_for_initial_result=True,
                 )
                 if result is None:
-                    processed = (gen, seq, gallery_revision)
+                    processed = (gen, seq)
                     continue  # Keep admitting new RGB frames without publishing empty results.
                 proposals, proposal_source = result
                 detected_at = time.monotonic()
                 proposals = self.bbox_smoother.update(proposals, (gen, seq), context)
-                # KCF preserves proposal order for the active set. A handoff gives
-                # a different object token, even when box count/order look unchanged.
-                recognition_token = (proposal_tracker.active, context,
-                                     seq if settings["detection_interval"] == 1 else None)
-                detections, diagnostics, recognition_changed = recognizer.update(
-                    shared_frame.pixels, proposals, encoder, gallery, max_side, stride,
-                    settings["recognition_threshold"], settings["margin"],
-                    token=recognition_token, gallery_revision=gallery_revision,
-                )
-                if not proposals:
-                    recognition_frame_id = None
-                    recognition_source = "none"
-                elif recognizer.encoded:
-                    recognition_frame_id = seq
-                    recognition_source = "dino"
-                elif recognition_changed:
-                    recognition_source = "reclassified"
-                else:
-                    recognition_source = "cached"
+                # Classification fields follow individual proposals through KCF,
+                # including partial loss. Never zip survivors with an old label list.
+                detections = proposals
+                recognition = proposal_tracker.last_recognition
+                recognition_changed = (recognition is not last_recognition
+                                       or (had_detections and not detections))
+                had_detections = bool(detections)
+                last_recognition = recognition
+                recognition_frame_id = recognition["frame_id"] if detections else None
+                recognition_source = ("none" if not detections else
+                                      "dino" if recognition_changed else "cached")
                 recognized_at = time.monotonic()
                 with self.lock:
                     if gen != self.generation:
@@ -615,10 +626,6 @@ class CaseNode(Node):
                         for item in detections:
                             item["bbox_visible"] = True
                 if self.param("pose_enabled") and header is not None:
-                    if initializing:
-                        wait_started = time.monotonic()
-                        depth_inputs = self.depth_inputs_for(frame)
-                        depth_wait_ms += (time.monotonic() - wait_started) * 1000
                     self.estimate_bboxes3d(detections, depth_inputs)
                 else:
                     for item in detections:
@@ -626,9 +633,8 @@ class CaseNode(Node):
                 bbox3d_at = time.monotonic()
                 # Diagnostic crops/features stay on their recognition frame;
                 # never relabel an old crop as the current KCF image.
-                object_snapshot = (ObjectVisualizationSnapshot(
-                    recognizer.diagnostic_detections, diagnostics, gallery, max_side, stride
-                ) if recognition_changed else None)
+                object_snapshot = (recognition["snapshot"]
+                                   if recognition_changed and detections else None)
                 with self.lock:
                     if gen != self.generation:
                         continue
@@ -659,7 +665,7 @@ class CaseNode(Node):
                         depth_wait_ms=depth_wait_ms,
                         proposal_update_ms=(detected_at - depth_ready_at) * 1000,
                         detect_ms=(detected_at - start) * 1000,
-                        recognize_ms=(recognized_at - detected_at) * 1000,
+                        recognize_ms=(recognition["recognize_ms"] if recognition_changed else 0.0),
                         bbox3d_ms=(bbox3d_at - recognized_at) * 1000,
                         bbox3d_count=sum("bbox3d" in item for item in detections),
                         render_ms=None,
@@ -671,8 +677,8 @@ class CaseNode(Node):
                     )
                     self.status = (
                         f"{('SAM3 W8A8' if proposal_source == 'sam3' else 'KCF')} → "
-                        f"{encoder.description}{'' if recognizer.encoded else ' (cached)'} | {len(detections)} objects | "
-                        f"{len(set(gallery.labels))} classes / {len(gallery.labels)} references | "
+                        f"{encoder.description}{'' if recognition_changed else ' (cached)'} | {len(detections)} objects | "
+                        f"{recognition['class_count']} classes / {recognition['reference_count']} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )
                     self.pending_publication = (detections, header, gen)
@@ -682,7 +688,7 @@ class CaseNode(Node):
                                            seq, depth_inputs[1] if depth_inputs else None, completed_at)
                     self.render_changed.set()
                     self.publish_changed.set()
-                processed = (gen, seq, gallery_revision)
+                processed = (gen, seq)
             except Exception as error:
                 with self.lock:
                     if gen == self.generation:
