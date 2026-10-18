@@ -1,4 +1,4 @@
-"""Latest-frame candidate initialization, bounded catch-up and atomic handoff."""
+"""Detection-frame candidate initialization, bounded catch-up and atomic handoff."""
 
 import threading
 from types import SimpleNamespace
@@ -68,7 +68,7 @@ def candidate_init():
     gate.release.set()
 
 
-def test_kcf_continues_during_sam3_and_candidate_seeds_the_latest_frame():
+def test_kcf_continues_during_sam3_and_candidate_seeds_detection_frame():
     initialized = []
 
     class RecordTracker(MovingTracker):
@@ -98,16 +98,16 @@ def test_kcf_continues_during_sam3_and_candidate_seeds_the_latest_frame():
         assert calls == [2]
         release.set()
         finish(pipeline)
-        assert initialized == [0, 4]  # Frame 2's boxes initialize on frame 4.
+        assert initialized == [0, 2]  # Boxes and seed image both come from frame 2.
         metrics = pipeline.scheduler_metrics()
-        assert metrics['seed_frame_key'] == 4
-        assert metrics['seed_skipped_frames'] == 2
-        assert metrics['replay_frames'] == 0
+        assert metrics['seed_frame_key'] == 2
+        assert metrics['seed_skipped_frames'] == 0
+        assert metrics['replay_frames'] == 2
         items, source = update(pipeline, 4, interval=100)
-        assert source == "sam3" and items[0]["bbox"][0] == 12
+        assert source == "sam3" and items[0]["bbox"][0] == 14
         assert pipeline.last_metrics == {"test": True}
-        # Only motion AFTER initialization is applied to the detected box.
-        assert update(pipeline, 5, interval=100)[0][0]["bbox"][0] == 13
+        # Motion during detection is included before handoff.
+        assert update(pipeline, 5, interval=100)[0][0]["bbox"][0] == 15
     finally:
         release.set()
         pipeline.close()
@@ -154,7 +154,7 @@ def test_static_image_applies_result_once_without_repeated_detection():
         pipeline.close()
 
 
-def test_slow_sam3_keeps_only_latest_frame_and_skips_detector_backlog():
+def test_slow_sam3_replays_buffered_frames_without_detector_backlog():
     pipeline = AsyncKCFProposals(MovingTracker)
     entered, release = threading.Event(), threading.Event()
 
@@ -176,16 +176,16 @@ def test_slow_sam3_keeps_only_latest_frame_and_skips_detector_backlog():
         finish(pipeline)
         assert pipeline.ready is not None
         metrics = pipeline.scheduler_metrics()
-        assert metrics['seed_skipped_frames'] == 4
-        assert metrics['replay_frames'] == 0
+        assert metrics['seed_skipped_frames'] == 0
+        assert metrics['replay_frames'] == 4
         assert metrics['discard_reason'] is None
-        assert update(pipeline, 6)[0][0]['bbox'][0] == 12
+        assert update(pipeline, 6)[0][0]['bbox'][0] == 16
     finally:
         release.set()
         pipeline.close()
 
 
-def test_initialization_jumps_to_latest_and_does_not_require_intermediate_frames(candidate_init):
+def test_arrivals_during_initialization_are_replayed_in_order(candidate_init):
     updated = []
 
     class RecordingTracker(candidate_init.factory):
@@ -207,11 +207,11 @@ def test_initialization_jumps_to_latest_and_does_not_require_intermediate_frames
         candidate_init.release.set()
         finish(pipeline)
         assert pipeline.ready is not None
-        assert updated == [5]
+        assert updated == [3, 4, 5]
         schedule = pipeline.scheduler_metrics()
         assert schedule['discard_reason'] is None
-        assert schedule['replay_frames'] == 1
-        assert schedule['catchup_skipped_frames'] == 2
+        assert schedule['replay_frames'] == 3
+        assert schedule['catchup_skipped_frames'] == 0
     finally:
         candidate_init.release.set()
         pipeline.close()
@@ -372,7 +372,7 @@ def test_invalid_replay_time_budget(value):
         AsyncKCFProposals(replay_budget_ms=value)
 
 
-def test_initial_detection_seeds_latest_arrival_without_replaying_old_frames():
+def test_history_overflow_discards_candidate_and_retries_from_fresh_frame():
     entered, release = threading.Event(), threading.Event()
     initialized, replay_updates = [], []
 
@@ -403,12 +403,17 @@ def test_initial_detection_seeds_latest_arrival_without_replaying_old_frames():
         assert pipeline.last_key == 100
         release.set()
         finish(pipeline)
-        assert initialized == [100]
+        assert len(pipeline.history) == pipeline.max_replay_frames
+        assert initialized == [0]
         assert replay_updates == []
+        assert pipeline.ready is None
+        assert pipeline.scheduler_metrics()['discard_reason'] == 'history_gap'
+        assert pipeline.force_detection
+        assert update(pipeline, 100, lambda _: (proposals(), {}), interval=100) is None
+        finish(pipeline)
         items, source = update(pipeline, 100, interval=100)
-        assert source == 'sam3' and items[0]['bbox'][0] == 10
-        assert pipeline.scheduler_metrics()['seed_skipped_frames'] == 100
-        assert pipeline.scheduler_metrics()['replay_frames'] == 0
+        assert source == 'sam3'
+        assert pipeline.scheduler_metrics()['seed_frame_key'] == 100
         assert pipeline.frames_since_submit == 0
     finally:
         release.set()
@@ -514,7 +519,7 @@ def test_replay_time_budget_stops_before_next_update(monkeypatch, candidate_init
         pipeline.close()
 
 
-def test_new_arrivals_during_catchup_skip_stale_frames_on_every_update(candidate_init):
+def test_new_arrivals_during_catchup_overflow_history_and_discard_candidate(candidate_init):
     entered, release = threading.Event(), threading.Event()
     replay_entered, replay_release = threading.Event(), threading.Event()
     replayed = []
@@ -551,13 +556,12 @@ def test_new_arrivals_during_catchup_skip_stale_frames_on_every_update(candidate
             assert source == 'kcf' and items[0]['bbox'][0] == 10+n
         replay_release.set()
         finish(pipeline)
-        assert replayed == [3, 6]
-        assert pipeline.ready is not None
+        assert replayed == [3]
+        assert pipeline.ready is None
         metrics = pipeline.scheduler_metrics()
-        assert metrics['discard_reason'] is None
-        assert metrics['catchup_skipped_frames'] == 2
-        assert metrics['replay_frames'] == 2
-        assert pipeline.ready[0].frame_key == pipeline.serial
+        assert metrics['discard_reason'] == 'history_gap'
+        assert metrics['replay_frames'] == 1
+        assert pipeline.force_detection
     finally:
         release.set()
         candidate_init.release.set()
@@ -600,7 +604,7 @@ def test_context_change_cancels_remaining_replay_batch(candidate_init):
         assert update(pipeline, 5, context='new-source') is None
         replay_release.set()
         finish(pipeline)
-        assert replayed == [4]
+        assert replayed == [3]
         assert pipeline.ready is None
         assert not pipeline.active.initialized
         assert pipeline.last_metrics == {}
@@ -729,4 +733,40 @@ def test_synchronous_detection_never_copies_replay_frames():
         assert update(pipeline, 4, interval=1)[0][0]["bbox"] == proposals(4)[0]["bbox"]
         assert pipeline.latest is None
     finally:
+        pipeline.close()
+
+
+def test_seed_snapshot_survives_input_reuse_and_new_arrivals():
+    entered, release = threading.Event(), threading.Event()
+    initialized = []
+
+    class RecordTracker(MovingTracker):
+        def init(self, image, box):
+            initialized.append(int(image[0, 0, 0]))
+            super().init(image, box)
+
+    pipeline = AsyncKCFProposals(RecordTracker)
+    original = pixels(2)
+
+    def slow(image):
+        entered.set()
+        assert release.wait(3)
+        np.testing.assert_array_equal(image, pixels(2))
+        return detect(image)
+
+    try:
+        assert pipeline.update(original, 2, "camera", 100, slow) is None
+        assert entered.wait(2)
+        original[:] = 99  # Producer reuses its buffer while SAM3 is running.
+        for n in (3, 4, 5):
+            assert update(pipeline, n, slow, interval=100) is None
+        release.set()
+        finish(pipeline)
+        assert initialized == [2]
+        items, source = update(pipeline, 5, interval=100)
+        assert source == "sam3"
+        assert items[0]["bbox"] == proposals(5)[0]["bbox"]
+        assert pipeline.scheduler_metrics()["replay_frames"] == 3
+    finally:
+        release.set()
         pipeline.close()

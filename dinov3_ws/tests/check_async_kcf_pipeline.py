@@ -23,7 +23,8 @@ def main():
         image.save(folder / 'ref.png')
         rclpy.init(args=['--ros-args', '-p', f'cases_dir:={directory}', '-p', 'port:=0',
                         '-p', 'pose_enabled:=false', '-p', 'grounding_prompt:=person',
-                        '-p', 'grounding_detection_interval:=3', '-p', 'opencv_num_threads:=1'], domain_id=131)
+                        '-p', 'grounding_detection_interval:=3', '-p', 'opencv_num_threads:=1',
+                        '-p', 'kcf_replay_max_frames:=64', '-p', 'kcf_replay_budget_ms:=2000.0'], domain_id=131)
         node = CaseNode()
         client = node.app.test_client()
 
@@ -77,7 +78,7 @@ def main():
             assert status['performance'].get('completed_at') is not None, status
             assert bootstrap_frames > 5
             schedule = status['performance']['grounding_schedule']
-            assert schedule['seed_skipped_frames'] > 0, schedule
+            assert schedule['seed_skipped_frames'] == 0, schedule
             assert schedule['discard_reason'] is None, schedule
             assert status['performance']['grounding_schedule']['initializing'] is False
             assert client.get('/api/detections').json['detections']
@@ -112,9 +113,9 @@ def main():
             assert status['performance']['frame_id'] == seq
             assert status['performance']['grounding_ipc']['source_frame_id'] < seq
             schedule = status['performance']['grounding_schedule']
-            assert schedule['seed_frame_key'][-1] == seq, schedule
-            assert schedule['seed_skipped_frames'] > 0, schedule
-            assert schedule['replay_frames'] == 0, schedule
+            assert schedule['seed_frame_key'][-1] == status['performance']['grounding_ipc']['source_frame_id'], schedule
+            assert schedule['seed_skipped_frames'] == 0, schedule
+            assert schedule['replay_frames'] > 0, schedule
             assert status['performance']['recognition_source'] == 'dino', status
             visualizations = client.get('/api/object_visualizations').json
             assert visualizations['ready'] and visualizations['objects'], visualizations

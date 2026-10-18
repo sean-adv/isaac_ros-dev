@@ -19,9 +19,9 @@
 
 SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。每隔 N 個不同處理影格嘗試提交一次背景 SAM3，最多一個進行中的任務，不排隊；設為 1 則停用 KCF，維持每幀同步 SAM3。等待 SAM3 時，主流程持續用原本 KCF 更新 bbox，分類沿用快取。首次初始化／切換來源或設定時持續接收最新 RGB，不發布暫時的空結果；相同輸入未改變時不重複複製。計數以實際處理的不同影格為準，相機跳過的影格不計入。
 
-SAM3 完成後，背景工作用最新已送入追蹤流程的 RGB 影格與 SAM3 偵測框初始化新的 KCF，略過 SAM3 執行期間的影格。這將舊框當成新影格上的位置估計，適合物體位置變化小的情況；移動較大可能追錯區域。若初始化或補追期間又有新影格，每次只取當下最新影格更新 KCF，略過中間影格，追上後才交接；主流程此時重新執行 DINOv3／Lab，並建立新的物件診斷快照。排程器始終只保留一張獨立複製的最新影格；執行中的偵測、初始化或更新各持有所需影像參照，不建立連續歷史佇列。共享偵測輸入保留租約至 SAM3 回覆。
+SAM3 完成後，背景工作用該次偵測的原始 RGB 影格與 bbox 初始化候選 KCF，再依序更新到較新的已處理影格，追上最新影格才交接；主流程此時重新執行 DINOv3／Lab，並建立新的物件診斷快照。偵測影像的獨立副本會保留至初始化完成，共享偵測輸入租約則在 SAM3 回覆後釋放。排程器以有限環形緩衝保存最近的已處理影格，容量由 `kcf_replay_max_frames` 控制（預設 8）；不會無限累積影像。若緩衝溢出導致補追缺幀，丟棄候選並要求重新偵測（`history_gap`），保留現有前景 tracker。
 
-補追呼叫次數與時間上限由 `kcf_replay_max_frames` 與 `kcf_replay_budget_ms` 控制（被跳過的影格不計入呼叫次數），不含 SAM3 與 KCF 初始化耗時。時間在每次更新前檢查，單次不可中斷的更新可能超過預算，但不再啟動下一幀。超限時丟棄候選 tracker，保留前景 tracker 與當前有效框，依正常偵測間隔再提交。追蹤失敗或 context 變更仍會丟棄候選；變更來源後不套用舊結果。`performance.grounding_schedule` 提供 `seed_frame_key`（初始化影格）、`seed_skipped_frames`（初始化前略過的已處理影格數）、`catchup_skipped_frames`（補追時略過的中間影格數）、`init_ms`、`replay_frames`、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。回放預算與策略修改後需重新啟動服務。
+補追呼叫次數與時間上限由 `kcf_replay_max_frames` 與 `kcf_replay_budget_ms` 控制，不含 SAM3 與 KCF 初始化耗時。時間在每次更新前檢查，單次不可中斷的更新可能超過預算，但不再啟動下一幀。超限時丟棄候選 tracker，保留前景 tracker 與當前有效框，依正常偵測間隔再提交。追蹤失敗或 context 變更仍會丟棄候選；變更來源後清空緩衝，不套用舊結果。若偵測延遲持續超過緩衝容量，可能持續無法交接，需依處理幀率調整容量及補追預算。`performance.grounding_schedule` 提供 `seed_frame_key`（原始偵測影格）、`seed_skipped_frames` 與 `catchup_skipped_frames`（此策略皆為 0）、`init_ms`、`replay_frames`、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。回放預算與策略修改後需重新啟動服務。
 
 網頁狀態列的 **result FPS** 是完整辨識主迴圈最近 3 秒的結果頻率，包含影像準備、深度等待、候選框更新、交接時的辨識與每幀 3D 計算；不是 KCF 單獨 FPS 或 MJPEG 顯示 FPS。相機區塊另外顯示 **input FPS**。`/api/status` 的 `performance` 提供 `image_prepare_ms`（包含共享複製）、`shared_copy_ms`（前者的子項）、`depth_wait_ms`、`proposal_update_ms`（包含非同步排程、最新影格複製與前景 KCF）、`recognize_ms`、`bbox3d_ms`、`render_ms`。首次交接的深度等待發生在辨識後，會同時包含在 `bbox3d_ms` 中。平常的 `detect_ms` 為影像準備＋深度等待＋候選框更新的合計，不能當成純 KCF 耗時。
 
