@@ -181,70 +181,62 @@ class ObjectGallery:
         self.reference_inputs = reference_inputs
         return True
 
-    def similarities(self, descriptor, lab_histogram, case=""):
-        """Fuse references from the top three DINO classes, or an explicit debug class.
-
-        Classes rank by their best DINO reference; ties use the class name.
-        Excluded references have score -inf and no Lab score (NaN).
-        """
+    def similarities(self, descriptor, lab_histogram):
+        """Return separate DINO cosine and Lab histogram similarities."""
         dino = (self.features @ descriptor).clamp(-1, 1).cpu().numpy()
-        if case:
-            candidates = {case}
-        else:
-            by_class = {}
-            for label, score in zip(self.labels, dino):
-                by_class[label] = max(by_class.get(label, -1.0), float(score))
-            candidates = set(sorted(by_class, key=lambda label: (-by_class[label], label))[:3])
-        indices = [i for i, label in enumerate(self.labels) if label in candidates]
-        lab = np.full(dino.shape, np.nan, dtype=dino.dtype)
-        scores = np.full(dino.shape, -np.inf, dtype=dino.dtype)
-        lab[indices] = np.sqrt(
-            self.lab_histograms[indices] * lab_histogram
-        ).sum(axis=1).clip(0, 1)
-        scores[indices] = 0.8 * dino[indices] + 0.2 * lab[indices]
-        return scores, dino, lab
+        lab = np.sqrt(self.lab_histograms * lab_histogram).sum(axis=1).clip(0, 1)
+        return dino, lab
 
-    def best_reference(self, descriptor, case="", *, lab_histogram):
+    def _rank_references(self, dino, lab, indices):
+        # Lab decides; DINO, class name and reference order break exact ties.
+        return sorted(indices, key=lambda i: (-float(lab[i]), -float(dino[i]),
+                                              self.labels[i], i))
+
+    def best_reference(self, descriptor, case="", *, lab_histogram, threshold=-1):
         indices = [i for i, label in enumerate(self.labels) if not case or label == case]
         if not indices:
             return None, None
-        scores, _, _ = self.similarities(descriptor, lab_histogram, case)
-        best = max(indices, key=lambda i: scores[i])
-        return best, float(scores[best])
+        dino, lab = self.similarities(descriptor, lab_histogram)
+        if not case:
+            eligible = np.flatnonzero(dino >= threshold).tolist()
+            # An unknown object still shows its closest DINO reference for inspection.
+            indices = eligible or [max(indices, key=lambda i: float(dino[i]))]
+        best = self._rank_references(dino, lab, indices)[0]
+        return best, float(dino[best])
 
     def classify(self, descriptor, threshold, margin, *, lab_histogram):
+        """Gate references by DINO, then choose the class with the highest Lab score.
+
+        The legacy margin argument is accepted for settings/API compatibility;
+        it no longer rejects the Lab winner. score is the selected DINO score.
+        """
         if self.features is None:
             return dict(
                 label="unknown", score=None, candidate=None, margin=None, reason="empty_gallery"
             )
-        scores, dino, lab = self.similarities(descriptor, lab_histogram)
-        similarities = scores.tolist()
-        by_class = {}
-        for label, score in zip(self.labels, similarities):
-            if np.isfinite(score):
-                by_class[label] = max(by_class.get(label, -1.0), score)
-        ranked = sorted(by_class.items(), key=lambda item: (-item[1], item[0]))
-        label, score = ranked[0]
-        best_reference = max(
-            (i for i, name in enumerate(self.labels) if name == label),
-            key=lambda i: similarities[i],
-        )
-        gap = score - ranked[1][1] if len(ranked) > 1 else None
-        if score < threshold:
-            reason = "low_similarity"
-        elif gap is not None and gap < margin:
-            reason = "ambiguous"
-        else:
+        dino, lab = self.similarities(descriptor, lab_histogram)
+        eligible = np.flatnonzero(dino >= threshold).tolist()
+        ranked = self._rank_references(dino, lab, eligible)
+        if ranked:
+            best = ranked[0]
+            # Report the Lab gap between distinct eligible classes for diagnostics only.
+            runner = next((i for i in ranked if self.labels[i] != self.labels[best]), None)
+            gap = float(lab[best] - lab[runner]) if runner is not None else None
             reason = "matched"
+        else:
+            best = max(range(len(dino)), key=lambda i: float(dino[i]))
+            gap = None
+            reason = "low_similarity"
+        label = self.labels[best]
         return dict(
             label=label if reason == "matched" else "unknown",
-            score=score,
-            dino_score=float(dino[best_reference]),
-            lab_score=float(lab[best_reference]),
+            score=float(dino[best]),
+            dino_score=float(dino[best]),
+            lab_score=float(lab[best]),
             candidate=label,
             margin=gap,
             reason=reason,
-            reference=dict(case=label, name=Path(self.paths[best_reference]).name),
+            reference=dict(case=label, name=Path(self.paths[best]).name),
         )
 
 
@@ -272,6 +264,7 @@ def recognize_objects(
         if diagnostics is not None:
             # The crop already owns its pixels; retain it for on-demand diagnostics.
             context = dict(
+                recognition_threshold=threshold,
                 roi=roi,
                 roi_size=roi.size,
                 prepared=prepared,
@@ -360,6 +353,8 @@ class TrackedObjectRecognizer:
                 )
                 for item in self.diagnostics
             ]
+            for item in self.diagnostics:
+                item["context"] = dict(item["context"], recognition_threshold=threshold)
             self.classification_key = key
         detections = [dict(p, **c) for p, c in zip(proposals, self.classifications)]
         return detections, self.diagnostics, changed

@@ -191,9 +191,9 @@ DINO 與 SAM3 共用 `grounding_detection_interval`：每次背景工作先由 S
 
 ## DINO + Lab 相似度
 
-最終辨識分數為 `score = 0.8 * S_DINO + 0.2 * S_Lab`。DINO 保留原本的 descriptor cosine similarity；Lab 使用 bbox 原始裁切與每張參考圖的聯合 L/a/b 直方圖（8×16×16 bins，L1 正規化），以 Bhattacharyya coefficient 計算 0～1 相似度。直方圖不含模型輸入 padding，參考圖完全透明的像素不計入；全透明參考圖會拒絕載入。
+`recognition_threshold` 只篩選 DINO descriptor cosine similarity；每張達到門檻的參考圖都是候選，不限制 DINO 前三個分類。從候選中選 Lab 分數最高的參考圖，採用其分類；同分依序以 DINO 分數、分類名稱及參考圖順序決定。沒有參考圖達到 DINO 門檻時回傳 unknown。Lab 使用 bbox 原始裁切與每張參考圖的聯合 L/a/b 直方圖（8×16×16 bins，L1 正規化），以 Bhattacharyya coefficient 計算 0～1 相似度。直方圖不含模型輸入 padding，參考圖完全透明的像素不計入；全透明參考圖會拒絕載入。
 
-先對每張參考圖融合兩種分數，再取各類別最高分；最佳類別、參考圖、threshold、margin、網頁與 ROS 的 score 都使用融合結果。結果另保留 `dino_score`、`lab_score` 便於檢查。診斷畫面的 comparison score 使用融合結果，patch heatmap 維持 DINO patch similarity。
+不再計算加權分數。網頁與 ROS 的 `score` 等於所選參考圖的 `dino_score`，另保留 `lab_score`。`margin` 僅回報不同候選分類的 Lab 分數差；舊設定 `recognition_margin` 保留相容但不再拒絕最高 Lab 分類。自動診斷圖使用相同門檻與參考圖選擇；unknown 顯示 DINO 最高的參考圖供檢查。指定分類時則比較該分類所有參考圖並選 Lab 最高者，comparison score 為其 DINO 分數；patch heatmap 維持 DINO patch similarity。
 
 Lab 跟隨 DINO 在同一背景工作更新，KCF 影格沿用；圖庫或辨識門檻改變於下一次背景辨識套用。重新啟動辨識服務後生效。
 

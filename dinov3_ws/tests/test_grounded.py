@@ -92,10 +92,10 @@ def test_gallery_multi_class_unknown_and_filesystem_updates(tmp_path):
     red_hist = compute_lab_histogram(Image.new("RGB", (32, 32), "red"))
     shared_hist = (red_hist + compute_lab_histogram(Image.new("RGB", (32, 32), "blue"))) / 2
     red = gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)
-    assert red["label"] == "red" and red["margin"] == 1.0
+    assert red["label"] == "red" and red["margin"] is None
     assert gallery.classify(torch.tensor([0.0, 1.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["reason"] == "low_similarity"
     shared = torch.nn.functional.normalize(torch.tensor([1.0, 0.0, 1.0]), dim=0)
-    assert gallery.classify(shared, 0.6, 0.05, lab_histogram=shared_hist)["reason"] == "ambiguous"
+    assert gallery.classify(shared, 0.6, 0.05, lab_histogram=shared_hist)["reason"] == "matched"
     # Additional views of the same class must not occupy both top-two slots.
     Image.new("RGB", (32, 48), "red").save(tmp_path / "red/two.png")
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
@@ -291,7 +291,7 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
     assert selected[1]["comparison_lab_score"] == pytest.approx(0.0)
     for item in automatic + selected:
         assert item["comparison_score"] == pytest.approx(
-            .8 * item["comparison_dino_score"] + .2 * item["comparison_lab_score"]
+            item["comparison_dino_score"]
         )
     assert len(images) == 12
     with pytest.raises(ValueError):

@@ -58,7 +58,8 @@ def build_object_diagnostic(
     context, gallery, max_side, stride, reference_case="", reference_bank=None
 ):
     index, score = gallery.best_reference(
-        context["descriptor"], reference_case, lab_histogram=context["lab_histogram"]
+        context["descriptor"], reference_case, lab_histogram=context["lab_histogram"],
+        threshold=context.get("recognition_threshold", -1),
     )
     count = (
         sum(label == reference_case for label in gallery.labels)
@@ -90,8 +91,8 @@ def build_object_diagnostic(
     reference = None
     dino_score = lab_score = None
     if index is not None:
-        _, dino, lab = gallery.similarities(
-            context["descriptor"], context["lab_histogram"], reference_case
+        dino, lab = gallery.similarities(
+            context["descriptor"], context["lab_histogram"]
         )
         dino_score, lab_score = float(dino[index]), float(lab[index])
         reference = dict(case=gallery.labels[index], name=Path(gallery.paths[index]).name)

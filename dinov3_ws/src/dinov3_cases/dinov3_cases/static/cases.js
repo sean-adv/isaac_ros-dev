@@ -32,7 +32,7 @@ async function refreshDetections() {
   for (const item of data.detections) {
     if (!item.label) continue;
     const row = document.createElement('p');
-    row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · sim ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · closest match ' + item.candidate : '') + (item.margin === null ? '' : ' · margin ' + item.margin.toFixed(3));
+    row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · DINO ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · closest match ' + item.candidate : '') + (item.margin === null ? '' : ' · Lab gap ' + item.margin.toFixed(3));
     list.append(row);
   }
 }
@@ -224,10 +224,10 @@ async function refreshObjects() {
       detail.textContent = 'bbox [' + item.bbox.join(', ') + '] · ROI ' + item.roi_size.join(' × ') + ' → input ' + item.input_size.join(' × ') + ' · ' + item.patch_grid.join(' × ') + ' patches';
       card.append(detail);
       const score = document.createElement('p');
-      score.textContent = 'det ' + item.detection_score.toFixed(3) + ' · DINO ' + similarity(item.dino_score) + ' · Lab ' + similarity(item.lab_score) + ' · product sim (0.8 DINO + 0.2 Lab) ' + similarity(item.score) + ' · ' + item.reason;
+      score.textContent = 'det ' + item.detection_score.toFixed(3) + ' · DINO ' + similarity(item.dino_score) + ' · Lab ' + similarity(item.lab_score) + ' · ' + item.reason;
       card.append(score);
       const comparison = document.createElement('p');
-      comparison.textContent = item.comparison_reference ? 'Comparing ' + item.comparison_case + ' · DINO ' + similarity(item.comparison_dino_score) + ' · Lab ' + similarity(item.comparison_lab_score) + ' · label sim ' + similarity(item.comparison_score) + ' · ' + item.comparison_reference_count + ' reference images · best ' + item.comparison_reference.name : 'No reference images available';
+      comparison.textContent = item.comparison_reference ? 'Comparing ' + item.comparison_case + ' · DINO ' + similarity(item.comparison_dino_score) + ' · Lab ' + similarity(item.comparison_lab_score) + ' · ' + item.comparison_reference_count + ' reference images · best ' + item.comparison_reference.name : 'No reference images available';
       card.append(comparison);
       if (images[index]) {
         const image = document.createElement('img');

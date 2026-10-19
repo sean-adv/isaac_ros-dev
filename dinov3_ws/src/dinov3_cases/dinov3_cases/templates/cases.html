@@ -23,13 +23,12 @@
 <label>Detection threshold <input name="box_threshold" type="number" min="0" max="1" step="0.01" required>
 </label>
 <br>
-<label>Recognition similarity threshold <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
+<label>DINOv3 similarity threshold <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
 </label>
-<label>Minimum margin between the top two matches <input name="margin" type="number" min="0" max="2" step="0.01" required>
-</label>
+<input name="margin" type="hidden">
 <button>Apply Settings</button>
 </form>
-<small>SAM3 accepts 1–4 comma-separated class names (for example: medicine bottle, medicine box). Text features are computed when the prompt changes. Results below the similarity threshold or minimum margin are shown as unknown.</small>
+<small>SAM3 accepts 1–4 comma-separated class names (for example: medicine bottle, medicine box). Text features are computed when the prompt changes. References must pass the DINOv3 threshold. The class of the eligible reference with the highest Lab similarity wins; no eligible references means unknown.</small>
 </section>
 <section>
 <h2>1. Reference groups</h2>
@@ -108,7 +107,7 @@
 <p id="object-help">
 </p>
 <p>
-<small>Diagnostic images show the latest recognition snapshot and stay unchanged while KCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Recognition first selects the top three classes by their best DINO similarity, then ranks only those classes using the weighted product score (0.8 DINO + 0.2 Lab). Each card shows DINO and Lab similarity plus that score. The comparison scores use the best reference within the selected label. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
+<small>Diagnostic images show the latest recognition snapshot and stay unchanged while KCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Recognition filters references by the DINOv3 threshold, then selects the class with the highest Lab similarity. Each card shows the separate DINO and Lab similarities. Selected-label comparisons use that label’s highest Lab reference. Comparison score is its DINO similarity. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
 </p>
 <p id="object-status" role="status">Waiting for object detections…</p>
 <div id="object-gallery" class="reference-gallery">
