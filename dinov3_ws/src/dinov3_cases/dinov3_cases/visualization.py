@@ -4,27 +4,17 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
-from .depth_bbox import bbox_vertices
+from .depth_bbox import bbox_vertices, project_box_points
 
 
 def draw_bbox3d(image, data, info, color):
     points = bbox_vertices(data)
     if not np.isfinite(points).all() or np.any(points[:, 2] <= 1e-6):
         return False
-    k = np.asarray(info.k, dtype=np.float64).reshape(3, 3)
-    distortion = np.asarray(info.d, dtype=np.float64)
-    zero = np.zeros(3, dtype=np.float64)
     try:
-        if info.distortion_model == "equidistant" and distortion.size == 4:
-            pixels, _ = cv2.fisheye.projectPoints(points.reshape(-1, 1, 3), zero, zero, k, distortion)
-        elif info.distortion_model in ("plumb_bob", "rational_polynomial", ""):
-            pixels, _ = cv2.projectPoints(points, zero, zero, k,
-                                          distortion if distortion.size else None)
-        else:
-            return False
-    except cv2.error:
+        pixels = project_box_points(points, info)
+    except (cv2.error, ValueError):
         return False
-    pixels = pixels.reshape(-1, 2)
     if not np.isfinite(pixels).all() or np.max(np.abs(pixels)) > 1e7:
         return False
     pixels = np.rint(pixels).astype(int)
@@ -82,8 +72,10 @@ def render_display_overlay(rgb, detections, info=None, mode="3d"):
     pixels = (cv2.resize(rgb, (960, 540), interpolation=cv2.INTER_AREA)
               if (width, height) != (960, 540) else rgb)
     bgr = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
+    # Scale the inclusive drawn endpoints, then restore exclusive bbox maxima.
     scaled_detections = [
-        dict(item, bbox=[round(value * (sx if i % 2 == 0 else sy))
+        dict(item, bbox=[round((value - (1 if i >= 2 else 0)) *
+                              (sx if i % 2 == 0 else sy)) + (1 if i >= 2 else 0)
                          for i, value in enumerate(item["bbox"])])
         for item in detections
     ]

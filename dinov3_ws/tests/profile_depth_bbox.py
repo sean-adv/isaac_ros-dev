@@ -8,7 +8,7 @@ import time
 
 import cv2
 import numpy as np
-from dinov3_cases.depth_bbox import ProjectionRayCache, attach_bboxes3d
+from dinov3_cases.depth_bbox import ProjectionRayCache, estimate_bbox3d
 
 
 def main():
@@ -49,8 +49,16 @@ def main():
                     depth = depth * scale
                 baseline.attach_bboxes3d(items, depth, info)
             else:
-                attach_bboxes3d(items, raw, info, depth_scale=scale,
-                               ray_cache=cache if mode == 'roi_and_rays' else None)
+                # Compare raw measurement only; final 2D-constrained fitting is
+                # a separate stage and intentionally changes positions/sizes.
+                for item in items:
+                    try:
+                        item['bbox3d'] = estimate_bbox3d(
+                            raw, info, item['bbox'], depth_scale=scale,
+                            ray_cache=cache if mode == 'roi_and_rays' else None)
+                        item['bbox3d_status'] = 'ok'
+                    except (ValueError, cv2.error) as error:
+                        item['bbox3d_status'] = str(error)
             return items
         start = time.perf_counter()
         cold_result = run('roi_and_rays', frames[0])

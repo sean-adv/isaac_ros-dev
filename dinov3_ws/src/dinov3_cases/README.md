@@ -81,6 +81,24 @@ RANSAC 使用經深度 quantile 篩選的連通點雲、嘗試 128 次，預設�
 底層獨立呼叫 `estimate_bbox3d` 會先裁切 RANSAC 深度 quantile；若要套用覆蓋與連續性檢查，需傳入 `CloudFilter` 與各物件獨立的 `cloud_state`。
 參數在節點啟動時讀取，修改 YAML 後需重啟。此變更未更動現有的單平面擬合流程。
 
+### 3D 框貼齊 2D 邊界
+
+`attach_bboxes3d` 在點雲量測完成後固定原本旋轉，調整中心與局部長、寬、高，
+讓八頂點投影的外接矩形貼近同次量測的 2D bbox 四邊；三軸始終互相垂直。
+使用相同相機畸變模型及 2D 繪圖右／下界的 `x1-1`、`y1-1` 像素慣例。
+瀏覽器縮放亦保留這個像素端點，避免放大影像時右／下邊多出數個像素。
+深度與尺寸以原始中心深度正規化，加入弱量測先驗以限制尺度／深度歧義；
+中心深度可在原始值的 0.25–4 倍內調整，頂點必須留在相機前方。
+擬合最多 100 次函數評估，四邊最大誤差不超過原圖 0.25 像素標記 `fit_status: matched`；
+幾何限制下無法精確貼合則標記 `approximate`，求解失敗或結果不如原框時保留原始量測。
+
+HTTP 3D 資料保留 `measured_position`、`measured_size`、`fit_target_bbox`；
+接受擬合時另含 `fit_projected_bbox` 與 `fit_error_px`。
+最終 `position`、`size` 同時供繪圖與 ROS Detection3D 使用；尺寸是受 2D 偵測約束的長方體，
+不是物體實際厚度量測。點雲、平面與取樣診斷仍描述原始量測。
+獨立呼叫 `estimate_bbox3d` 仍回傳原始點雲框，無擬合。
+背景快取沿用量測當時的 2D 目標框；兩次深度更新間物件移動時，可能暫時與最新 KCF 框不同。
+
 ### 背景 3D 框排程
 
 `bbox3d_interval: 5` 與 `grounding_detection_interval` 各自計數、互不控制。

@@ -145,7 +145,7 @@ def test_browser_projection_scales_pixels_without_changing_metric_data(model):
     assert display.any() and not image.any()
     np.testing.assert_allclose(projections[1], projections[0] * [6., 4.5])
     scaled_item = render.call_args.args[1][0]
-    assert scaled_item["bbox"] == [240, 90, 726, 454]
+    assert scaled_item["bbox"] == [240, 90, 721, 451]
     assert scaled_item["bbox3d"] == original_detection["bbox3d"]
     assert detection == original_detection and info == original_info
 
@@ -159,7 +159,7 @@ def test_browser_2d_coordinates_and_resize_before_color_conversion():
             patch("dinov3_cases.visualization.cv2.rectangle", wraps=cv2.rectangle) as rectangle:
         display = render_display_overlay(rgb, [detection], mode="2d")
     assert convert.call_args.args[0].shape == (540, 960, 3)
-    assert rectangle.call_args.args[1:3] == ((20, 10), (59, 49))
+    assert rectangle.call_args.args[1:3] == ((20, 10), (60, 50))
     assert tuple(display[-1, -1]) == (30, 80, 200)
     assert tuple(rgb[-1, -1]) == (200, 80, 30)
 

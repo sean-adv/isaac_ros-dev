@@ -1,8 +1,9 @@
-"""Plane-oriented robust bounds of a central registered-depth component."""
+"""Plane-oriented depth bounds and final detector-constrained cuboids."""
 
 import cv2
 import numpy as np
 import open3d as o3d
+from scipy.optimize import least_squares
 
 
 def _undistort_pixels(pixels, k, distortion, model):
@@ -243,8 +244,9 @@ def attach_bboxes3d(items, depth, info, **options):
         item.pop("pose_status", None)
         item.pop("bbox3d", None)
         try:
-            item["bbox3d"] = estimate_bbox3d(
+            measured = estimate_bbox3d(
                 depth, info, item["bbox"], cloud_state=item.get("_cloud_filter_state"), **options)
+            item["bbox3d"] = fit_bbox3d_to_2d(measured, info, item["bbox"])
             item["bbox3d_status"] = "ok"
         except (ValueError, cv2.error) as error:
             item["bbox3d_status"] = str(error)
@@ -259,12 +261,95 @@ def bbox_vertices(data):
     return local @ np.asarray(data.get("rotation", np.eye(3))).T + data["position"]
 
 
+def project_box_points(points, info):
+    """Project camera-frame vertices with the overlay's calibration model."""
+    k = np.asarray(info.k, dtype=np.float64).reshape(3, 3)
+    distortion = np.asarray(info.d, dtype=np.float64)
+    zero = np.zeros(3, dtype=np.float64)
+    if info.distortion_model == "equidistant" and distortion.size == 4:
+        pixels, _ = cv2.fisheye.projectPoints(
+            points.reshape(-1, 1, 3), zero, zero, k, distortion)
+    elif info.distortion_model in ("plumb_bob", "rational_polynomial", ""):
+        pixels, _ = cv2.projectPoints(
+            points, zero, zero, k, distortion if distortion.size else None)
+    else:
+        raise ValueError("unsupported_distortion_model")
+    return pixels.reshape(-1, 2)
+
+
+def fit_bbox3d_to_2d(data, info, bbox):
+    """Fit four projected extrema, preserving rotation and orthogonal edges.
+
+    Fit in units of measured center Z, with a weak metric prior to resolve the
+    scale/depth ambiguity. This is a detector-constrained cuboid, not measured
+    physical dimensions. Diagnostics still describe the original point cloud.
+    Targets use the 2D overlay's inclusive right/bottom pixel convention.
+    Cached asynchronous results retain the target from their measurement frame.
+    """
+    target = np.array(bbox, dtype=np.float64)
+    target[[0, 2]] = np.clip(target[[0, 2]], 0, info.width)
+    target[[1, 3]] = np.clip(target[[1, 3]], 0, info.height)
+    target[2:] -= 1.
+    result = dict(data, measured_position=list(data["position"]),
+                  measured_size=list(data["size"]), fit_target_bbox=target.tolist())
+    anchor = np.asarray(data["position"], dtype=np.float64)
+    scale = float(anchor[2])
+    if scale <= 1e-6 or np.any(target[2:] <= target[:2]):
+        result["fit_status"] = "invalid_target_or_depth"
+        return result
+    rotation = np.asarray(data.get("rotation", np.eye(3)))
+    initial = np.r_[anchor / scale, np.maximum(np.asarray(data["size"]) / scale, 1e-6)]
+    span = np.tile(target[2:] - target[:2], 2)
+
+    def vertices(parameters):
+        return bbox_vertices(dict(position=parameters[:3], size=parameters[3:],
+                                  rotation=rotation))
+
+    def bounds(points):
+        pixels = project_box_points(points, info)
+        return np.r_[pixels.min(axis=0), pixels.max(axis=0)]
+
+    def residual(parameters):
+        points = vertices(parameters)
+        # Keep trial projections finite while penalizing crossing the near plane.
+        near_penalty = np.maximum(.01 - points[:, 2], 0.)
+        points[:, 2] = np.maximum(points[:, 2], .01)
+        return np.r_[(bounds(points) - target) / span,
+                     1e-4 * (parameters - initial), 100. * near_penalty]
+
+    lower = np.r_[initial[:2] - 2., .25, np.full(3, 1e-6)]
+    upper = np.r_[initial[:2] + 2., 4., np.maximum(initial[3:] * 2., 4.)]
+    try:
+        fitted = least_squares(residual, initial, bounds=(lower, upper),
+                               max_nfev=100, ftol=1e-9, xtol=1e-9, gtol=1e-9)
+        points = vertices(fitted.x)
+        projected = bounds(points)
+        original_points = bbox_vertices(data)
+        original_error = (np.linalg.norm((bounds(original_points) - target) / span)
+                          if np.all(original_points[:, 2] > 1e-6) else np.inf)
+        if (np.isfinite(points).all() and np.isfinite(projected).all()
+                and np.all(points[:, 2] > .01)
+                and np.linalg.norm((projected - target) / span) <= original_error + 1e-9):
+            result.update(position=(fitted.x[:3] * scale).tolist(),
+                          size=(fitted.x[3:] * scale).tolist(),
+                          fit_error_px=float(np.max(np.abs(projected - target))),
+                          fit_projected_bbox=projected.tolist(),
+                          fit_status=("matched" if np.max(np.abs(projected - target)) <= .25
+                                      else "approximate"))
+        else:
+            result["fit_status"] = "retained_measurement"
+    except (ValueError, cv2.error, np.linalg.LinAlgError):
+        result["fit_status"] = "retained_measurement"
+    return result
+
+
 def bboxes3d_message(items, header):
-    """Standard detections: visible-component position, dimensions and class.
+    """Standard detections sharing the final visualization's metric cuboid.
 
     Positions are meters in header.frame_id; dimensions are along local axes.
     The quaternion maps box-local axes to header.frame_id, matching visualization.
-    The pose bounds visible points and does not locate the unseen physical center.
+    Attached boxes are fitted to 2D detections; they do not measure the unseen
+    physical center or thickness. Unfitted callers may also supply raw bounds.
     Covariance remains at the message default; uncertainty is not estimated.
     """
     from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose

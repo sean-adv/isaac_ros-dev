@@ -58,7 +58,10 @@ def test_slow_dino_does_not_block_current_3d_geometry(worker):
         attach_bboxes3d(detections, depth, info)
         message = bboxes3d_message(detections, Header(frame_id=str(frame)))
         assert len(message.detections) == 1
-        assert message.detections[0].bbox.center.position.z == pytest.approx(1. + frame*.1)
+        data = detections[0]['bbox3d']
+        assert data['measured_position'][2] == pytest.approx(1. + frame*.1)
+        assert data['fit_status'] == 'matched'
+        assert message.detections[0].bbox.center.position.z == pytest.approx(data['position'][2])
         assert message.header.frame_id == str(frame)
     release.set()
     assert completed.wait(1)

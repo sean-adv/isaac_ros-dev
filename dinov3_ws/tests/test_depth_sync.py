@@ -56,7 +56,8 @@ def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
         np.uint16 if encoding == "16UC1" else np.float32)
     items = [dict(label="medicine", score=.9, bbox=[35, 40, 125, 80])]
     CaseNode.estimate_bboxes3d(node, items, inputs)
-    assert items[0]["bbox3d"]["position"][2] == pytest.approx(1.)
+    assert items[0]["bbox3d"]["measured_position"][2] == pytest.approx(1.)
+    assert items[0]["bbox3d"]["fit_status"] == "matched"
     CaseNode.estimate_bboxes3d(node, [dict(label="medicine")], None)
 
 

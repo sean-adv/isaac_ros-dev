@@ -176,10 +176,12 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
     detection = received.detections[0]
     assert detection.header == header
     assert detection.id == "1"
-    assert detection.bbox.center.position.z == pytest.approx(1.)
+    assert detection.bbox.center.position.z > 0.
     assert detection.bbox.center.orientation.w == 1.
-    assert detection.bbox.size.x == pytest.approx(.435)
-    assert detection.bbox.size.z == 0.
+    assert detection.bbox.size.x > .435
+    assert detection.bbox.size.z > 0.
+    assert items[0]["bbox3d"]["fit_status"] == "matched"
+    assert items[0]["bbox3d"]["measured_size"] == pytest.approx([.435, .195, 0.])
     assert len(detection.results) == 1
     result = detection.results[0]
     assert result.hypothesis.class_id == "medicine"
