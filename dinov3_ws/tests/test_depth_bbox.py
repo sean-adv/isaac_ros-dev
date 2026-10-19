@@ -31,7 +31,9 @@ def test_flat_surface_uses_component_quantiles_without_inventing_thickness():
     np.testing.assert_allclose(data["size"], [.435, .195, 0.])
     assert data["point_count"] == 3600
     assert data["seed_depth"] == 1.
-    assert data["method"] == "central_depth_component_mean_z"
+    assert data["method"] == "central_depth_component_plane_rectangle"
+    assert data["orientation_status"] == "ok"
+    np.testing.assert_allclose(data["rotation"], np.eye(3))
 
 
 def test_quantile_zero_gives_full_visible_bounds():
@@ -58,14 +60,13 @@ def test_in_band_outlier_is_diagnostic_but_does_not_inflate_thickness():
 
 
 
-def test_z_uses_all_component_depths_mean_instead_of_quantile_midpoint():
+def test_center_uses_local_quantile_midpoint_consistently_with_size():
     depth = scene()
     depth[40:44, 35:125] = .95
-    expected_z = float(np.mean(depth[40:80, 35:125]))
     for quantile in (.02, .2):
         data = estimate_bbox3d(depth, calibration(), BOX, quantile=quantile)
-        assert data["position"][2] == pytest.approx(expected_z)
-        assert not np.isclose(data["position"][2], np.mean(data["depth_range"]))
+        assert data["position"][2] == pytest.approx(np.mean(data["depth_range"]))
+        assert data["size"][2] == pytest.approx(np.ptp(data["depth_range"]))
         assert data["point_count"] == 3600
 
 
@@ -85,7 +86,7 @@ def test_round_object_bounds_include_extrema_outside_diagonal_rays():
     # recover most of the .30 m diameter despite trimming the extreme tips.
     assert .26 <= data["size"][0] <= .30
     assert .26 <= data["size"][1] <= .30
-    np.testing.assert_allclose(data["position"], [0., 0., 1.])
+    np.testing.assert_allclose(data["position"], [0., 0., 1.], atol=1e-12)
 
 
 def test_depth_holes_on_diagonals_do_not_reject_valid_component():
@@ -103,7 +104,9 @@ def test_sloped_surface_can_span_both_sides_of_seed_depth():
     depth = scene()
     depth[40:80, 35:125] = np.linspace(.93, 1.07, 90)[None, :]
     data = estimate_bbox3d(depth, calibration(), BOX)
-    assert data["size"][2] > .13  # No longer capped at 8 cm from nearest Z.
+    assert np.ptp(data["depth_range"]) > .13
+    assert data["size"][2] < .01  # Camera-Z slope is no longer box thickness.
+    assert abs(data["rotation"][0][2]) > .2
     assert data["seed_depth"] == pytest.approx(1., abs=.002)
 
 
@@ -173,7 +176,7 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
     detection = received.detections[0]
     assert detection.header == header
     assert detection.id == "1"
-    assert detection.bbox.center.position.z == pytest.approx((3599. + .95) / 3600)
+    assert detection.bbox.center.position.z == pytest.approx(1.)
     assert detection.bbox.center.orientation.w == 1.
     assert detection.bbox.size.x == pytest.approx(.435)
     assert detection.bbox.size.z == 0.
@@ -202,6 +205,7 @@ def test_standard_ros_serialization_preserves_pose_class_and_bounds():
 
 
 @pytest.mark.parametrize("option, value, error", [
+    *[("plane_threshold", v, "invalid_plane_threshold") for v in (0., -1., np.nan, np.inf)],
     *[("depth_band", v, "invalid_bbox_depth_band") for v in (0., -1., np.nan, np.inf)],
     *[("quantile", v, "invalid_bbox_quantile") for v in (-.01, .5, np.nan, np.inf)],
     *[("min_points", v, "invalid_bbox_min_points") for v in (0, 4, 5.5)],
@@ -274,3 +278,117 @@ def test_roi_conversion_preserves_holes_and_depth_band_boundaries():
     expected = estimate_bbox3d(raw.astype(np.float64), calibration(), BOX)
     actual = estimate_bbox3d(raw, calibration(), BOX, ray_cache=ProjectionRayCache())
     assert actual == expected
+
+
+def tilted_rectangle(roll, tilt):
+    """Ray/plane intersection of a known .4 x .16 m rectangle at Z=1 m."""
+    rz, _ = cv2.Rodrigues(np.array([0., 0., roll]))
+    ry, _ = cv2.Rodrigues(np.array([0., tilt, 0.]))
+    rotation = rz @ ry
+    v, u = np.indices((120, 160))
+    rays = np.stack(((u - 80) / 200., (v - 60) / 200., np.ones_like(u)), axis=-1)
+    center = np.array([0., 0., 1.])
+    normal = rotation[:, 2]
+    z = np.dot(center, normal) / (rays @ normal)
+    local = (rays * z[..., None] - center) @ rotation
+    mask = (np.abs(local[..., 0]) <= .2) & (np.abs(local[..., 1]) <= .08)
+    return np.where(mask, z, 2.), rotation, mask
+
+
+@pytest.mark.parametrize("roll, tilt", [(0., 0.), (.55, .25), (-.7, -.3), (1.4, .2)])
+def test_recovers_long_edge_normal_and_bounds_of_tilted_rectangle(roll, tilt):
+    from dinov3_cases.depth_bbox import bbox_vertices, _rotation_quaternion
+    depth, expected, mask = tilted_rectangle(roll, tilt)
+    # Missing samples and submillimeter noise, plus in-band depth outliers.
+    rng = np.random.default_rng(7)
+    depth[mask] += rng.normal(0., .0004, mask.sum())
+    depth[mask & (rng.random(depth.shape) < .01)] = 0.
+    depth[mask & (rng.random(depth.shape) < .01)] -= .035
+    data = estimate_bbox3d(depth, calibration(), [15, 15, 145, 105], quantile=.02)
+    rotation = np.array(data["rotation"])
+    assert data["orientation_status"] == "ok"
+    np.testing.assert_allclose(rotation.T @ rotation, np.eye(3), atol=1e-12)
+    assert np.linalg.det(rotation) == pytest.approx(1.)
+    assert np.dot(rotation[:, 0], expected[:, 0]) > .999
+    assert np.dot(rotation[:, 2], expected[:, 2]) > .999
+    # A 2% trim at each end retains about 96% of each edge.
+    np.testing.assert_allclose(data["size"][:2], np.array([.4, .16]) * .96, atol=.008)
+    assert data["size"][2] < .004
+    np.testing.assert_allclose(data["position"], [0., 0., 1.], atol=.003)
+    local_vertices = (bbox_vertices(data) - data["position"]) @ expected
+    np.testing.assert_allclose(np.ptp(local_vertices, axis=0)[:2],
+                               np.array([.4, .16]) * .96, atol=.01)
+    q = np.array(_rotation_quaternion(rotation))
+    assert np.linalg.norm(q) == pytest.approx(1.)
+    angle = 2 * np.arctan2(np.linalg.norm(q[:3]), q[3])
+    recovered, _ = cv2.Rodrigues(q[:3] / np.linalg.norm(q[:3]) * angle)
+    np.testing.assert_allclose(recovered, rotation, atol=1e-10)
+
+
+def test_nonplanar_component_falls_back_explicitly_without_losing_box():
+    depth = scene()
+    depth[40:80, 35:125] = np.random.default_rng(3).uniform(.9, 1.1, (40, 90))
+    data = estimate_bbox3d(depth, calibration(), BOX, depth_band=.2)
+    assert data["orientation_status"] == "camera_aligned_fallback:no_dominant_plane"
+    assert data["method"] == "central_depth_component_mean_z"
+    np.testing.assert_allclose(data["rotation"], np.eye(3))
+    assert data["position"][2] == pytest.approx(depth[40:80, 35:125].mean())
+
+
+def test_square_surface_marks_in_plane_ambiguity():
+    depth = np.full((120, 160), 2.)
+    depth[40:80, 60:100] = 1.
+    data = estimate_bbox3d(depth, calibration(), BOX)
+    assert data["orientation_status"] == "ambiguous_in_plane"
+
+
+def test_ros_quaternion_and_wireframe_share_nonidentity_rotation():
+    from dinov3_cases.depth_bbox import bbox_vertices
+    from rclpy.serialization import serialize_message, deserialize_message
+    from vision_msgs.msg import Detection3DArray
+    depth, expected, _ = tilted_rectangle(.6, .25)
+    items = [dict(label="medicine", score=.9, bbox=[15, 15, 145, 105])]
+    attach_bboxes3d(items, depth, calibration())
+    message = bboxes3d_message(items, Header(frame_id="camera"))
+    message = deserialize_message(serialize_message(message), Detection3DArray)
+    detection = message.detections[0]
+    q = detection.bbox.center.orientation
+    xyz = np.array([q.x, q.y, q.z])
+    rotation, _ = cv2.Rodrigues(xyz / np.linalg.norm(xyz) *
+                              (2 * np.arctan2(np.linalg.norm(xyz), q.w)))
+    data = items[0]["bbox3d"]
+    np.testing.assert_allclose(rotation, expected, atol=.015)
+    vertices = (bbox_vertices(data) - data["position"]) @ rotation
+    np.testing.assert_allclose(np.ptp(vertices, axis=0), data["size"], atol=1e-10)
+    assert detection.results[0].pose.pose == detection.bbox.center
+
+
+@pytest.mark.parametrize("axis", np.eye(3))
+def test_quaternion_handles_half_turn(axis):
+    from dinov3_cases.depth_bbox import _rotation_quaternion
+    rotation, _ = cv2.Rodrigues(axis * np.pi)
+    q = np.array(_rotation_quaternion(rotation))
+    assert abs(np.dot(q[:3], axis)) == pytest.approx(1.)
+    assert abs(q[3]) < 1e-12
+
+
+def test_open3d_failure_keeps_explicit_camera_aligned_fallback(monkeypatch):
+    from types import SimpleNamespace
+    from dinov3_cases import depth_bbox
+
+    def fail(**options):
+        raise RuntimeError('native segmentation failed')
+
+    monkeypatch.setattr(depth_bbox.o3d.geometry, 'PointCloud',
+                        lambda points: SimpleNamespace(segment_plane=fail))
+    data = estimate_bbox3d(scene(), calibration(), BOX)
+    assert data['orientation_status'] == 'camera_aligned_fallback:plane_segmentation_failed'
+    np.testing.assert_allclose(data['rotation'], np.eye(3))
+    np.testing.assert_allclose(data['size'], [.435, .195, 0.])
+
+
+def test_open3d_degenerate_plane_does_not_produce_invalid_orientation():
+    from dinov3_cases.depth_bbox import _surface_rotation
+    points = np.column_stack((np.linspace(-.2, .2, 100), np.zeros(100), np.ones(100)))
+    with pytest.raises(ValueError, match='degenerate_plane'):
+        _surface_rotation(points, .005, 80)

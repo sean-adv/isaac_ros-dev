@@ -24,6 +24,7 @@ from .frame_pool import SharedFramePool
 from .tracking import BBoxSmoother
 from .kcf import KCFProposals, kcf_factory
 from .async_kcf import AsyncKCFProposals, validate_replay_limits
+from .async_bbox3d import AsyncBBox3D, validate_bbox3d_schedule
 from .runtime import (
     WORKSPACE,
     DINO_ENGINE,
@@ -91,6 +92,8 @@ class CaseNode(Node):
             pose_sync_tolerance=0.05,
             pose_min_depth=0.1,
             pose_max_depth=5.0,
+            bbox3d_interval=5,
+            bbox3d_max_age=1.5,
             bbox3d_depth_band=0.08,
             bbox3d_min_points=80,
             bbox3d_quantile=0.02,
@@ -155,6 +158,7 @@ class CaseNode(Node):
             raise ValueError("bbox3d_min_points must be an integer >= 5.")
         if self.param("pose_min_depth") >= self.param("pose_max_depth"):
             raise ValueError("pose_min_depth must be less than pose_max_depth.")
+        validate_bbox3d_schedule(self.param("bbox3d_interval"), self.param("bbox3d_max_age"))
         self.root = Path(self.param("cases_dir")).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.bridge = CvBridge()
@@ -227,6 +231,11 @@ class CaseNode(Node):
         self.publisher_worker.start()
         self.renderer_worker = threading.Thread(target=self.run_rendering, daemon=True)
         self.renderer_worker.start()
+        self.bbox3d_worker = AsyncBBox3D(
+            self.estimate_bboxes3d, interval=self.param("bbox3d_interval"),
+            max_age=self.param("bbox3d_max_age"), wake=self.image_changed.set,
+            on_error=lambda error: self.get_logger().error(f"Background 3D boxes failed: {error}"),
+        )
         self.worker = threading.Thread(target=self.run_grounded_worker, daemon=True)
         self.worker.start()
         self.get_logger().info(f"Browser: http://{self.param('host')}:{self.param('port')}")
@@ -255,23 +264,14 @@ class CaseNode(Node):
             self.depth_changed.notify_all()
 
     def depth_inputs_for(self, frame):
-        """Capture depth before slow inference, so later frames cannot replace it."""
+        """Retain a matching depth snapshot without waiting in the RGB loop."""
         if not self.param("pose_enabled") or not isinstance(frame, ImageMsg):
             return None
-        deadline = time.monotonic() + self.param("pose_sync_tolerance")
         with self.depth_changed:
-            while not self.stop.is_set():
-                inputs = matched_inputs(
-                    frame.header, frame.width, frame.height, self.depth_frames,
-                    self.depth_infos, self.param("pose_sync_tolerance")
-                )
-                if inputs is not None:
-                    return inputs
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                self.depth_changed.wait(remaining)
-        return None
+            return matched_inputs(
+                frame.header, frame.width, frame.height, self.depth_frames,
+                self.depth_infos, self.param("pose_sync_tolerance")
+            )
 
     def estimate_bboxes3d(self, detections, inputs):
         if inputs is None:
@@ -322,6 +322,9 @@ class CaseNode(Node):
             if pending is None:
                 continue
             detections, header, gen = pending
+            boxes = getattr(self, "bbox3d_worker", None)
+            if boxes is not None:
+                detections, _ = boxes.latest(detections)
             if gen != generation:
                 continue
             try:
@@ -373,6 +376,10 @@ class CaseNode(Node):
                 continue
             frame, detections, header, gen, seq, info, completed_at = job
             try:
+                boxes = getattr(self, "bbox3d_worker", None)
+                if boxes is not None:
+                    detections, measured_info = boxes.latest(detections)
+                    info = measured_info or info
                 with self.lock:
                     if gen != self.generation:
                         continue
@@ -443,6 +450,9 @@ class CaseNode(Node):
         proposals = getattr(self, "proposal_tracker", None)
         if proposals is not None:
             proposals.close()
+        boxes = getattr(self, "bbox3d_worker", None)
+        if boxes is not None:
+            boxes.close()
 
     def destroy_node(self):
         self.stop.set()
@@ -523,7 +533,9 @@ class CaseNode(Node):
                             self.status = "Ready: Waiting for target image…"
                     continue
                 if (processed == (gen, seq)
-                        and not proposal_tracker.has_result()):
+                        and not proposal_tracker.has_result()
+                        and not (self.param("pose_enabled") and isinstance(frame, ImageMsg)
+                                 and self.bbox3d_worker.has_result())):
                     continue
                 start = time.monotonic()
                 header = frame.header if isinstance(frame, ImageMsg) else None
@@ -605,8 +617,16 @@ class CaseNode(Node):
                         continue
                     for item in detections:
                         item["bbox_visible"] = True
+                bbox3d_schedule = None
+                bbox3d_info = depth_inputs[1] if depth_inputs else None
                 if self.param("pose_enabled") and header is not None:
-                    self.estimate_bboxes3d(detections, depth_inputs)
+                    if depth_inputs is None:
+                        depth_inputs = self.depth_inputs_for(frame)
+                    detections, measured_info, bbox3d_schedule = self.bbox3d_worker.update(
+                        detections, depth_inputs, header=header,
+                        frame_key=(gen, seq), context=context, captured_at=received_at,
+                    )
+                    bbox3d_info = measured_info or bbox3d_info
                 else:
                     for item in detections:
                         item["bbox3d_status"] = "disabled" if not self.param("pose_enabled") else "no_camera_depth"
@@ -648,6 +668,7 @@ class CaseNode(Node):
                         recognize_ms=(recognition["recognize_ms"] if recognition_changed else 0.0),
                         bbox3d_ms=(bbox3d_at - recognized_at) * 1000,
                         bbox3d_count=sum("bbox3d" in item for item in detections),
+                        bbox3d_schedule=bbox3d_schedule,
                         render_ms=None,
                         frame_id=seq,
                         processing_ms=(completed_at - start) * 1000,
@@ -665,7 +686,7 @@ class CaseNode(Node):
                     if self.pending_render is not None:
                         self.pending_render[0].release()
                     self.pending_render = (shared_frame.retain(), detections, header, gen,
-                                           seq, depth_inputs[1] if depth_inputs else None, completed_at)
+                                           seq, bbox3d_info, completed_at)
                     self.render_changed.set()
                     self.publish_changed.set()
                 processed = (gen, seq)

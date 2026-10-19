@@ -162,3 +162,16 @@ def test_browser_2d_coordinates_and_resize_before_color_conversion():
     assert rectangle.call_args.args[1:3] == ((20, 10), (59, 49))
     assert tuple(display[-1, -1]) == (30, 80, 200)
     assert tuple(rgb[-1, -1]) == (200, 80, 30)
+
+
+def test_wireframe_projects_rotated_local_axes():
+    image = np.zeros((120, 160, 3), np.uint8)
+    data = dict(position=[0., 0., 1.], size=[.2, .1, .2],
+                rotation=[[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
+    with patch("dinov3_cases.visualization.cv2.line", wraps=cv2.line) as line:
+        assert draw_bbox3d(image, data, calibration(), (60, 220, 80))
+    segments = [(call.args[1], call.args[2]) for call in line.call_args_list]
+    # Local X edge is vertical after a 90-degree rotation about camera Z.
+    assert segments[0] == ((91, 38), (91, 82))
+    assert segments[4] == ((89, 42), (89, 78))
+    assert line.call_count == 12

@@ -6,6 +6,7 @@
 # 本工作區 ROS / cv_bridge 使用 NumPy 1.x；OpenCV 4.12 起的 NumPy 需求不同。
 numpy>=1.26,<2
 opencv-contrib-python>=4.8,<4.12
+open3d
 Pillow>=10
 
 # HTTP 服務與圖庫管理

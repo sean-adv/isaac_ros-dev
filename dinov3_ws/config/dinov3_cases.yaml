@@ -41,10 +41,14 @@ dinov3_cases:
     depth_topic: /camera/depth/image_raw
     depth_camera_info_topic: /camera/depth/camera_info
     pose_sync_tolerance: 0.2
-    pose_min_depth: 0.2
+    pose_min_depth: 0.15
     pose_max_depth: 2.0
     # Foreground depth tolerance around the central patch median (meters).
+    # Full 3D center/size/rotation in background; independent of SAM3 interval.
+    # Measure first processed RGB frame, then every 5 unique processed frames.
+    bbox3d_interval: 3
+    bbox3d_max_age: 1.5
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 80
-    # Trim each XYZ axis at 2% / 98%; 0 uses the full component bounds.
+    # Trim box-local axes at the configured quantiles; 0 uses full bounds.
     bbox3d_quantile: 0.05

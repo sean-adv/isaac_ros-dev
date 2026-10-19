@@ -57,3 +57,15 @@ def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     CaseNode.estimate_bboxes3d(node, items, inputs)
     assert items[0]["bbox3d"]["position"][2] == pytest.approx(1.)
     CaseNode.estimate_bboxes3d(node, [dict(label="medicine")], None)
+
+
+def test_depth_snapshot_does_not_wait_for_future_depth():
+    condition = Mock()
+    condition.__enter__ = Mock(return_value=condition)
+    condition.__exit__ = Mock(return_value=False)
+    values = dict(pose_enabled=True, pose_sync_tolerance=.05)
+    node = SimpleNamespace(param=values.__getitem__, depth_changed=condition,
+                           depth_frames=[], depth_infos=[calibration()])
+    frame = Image(header=header(), width=160, height=120)
+    assert CaseNode.depth_inputs_for(node, frame) is None
+    condition.wait.assert_not_called()

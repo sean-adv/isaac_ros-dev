@@ -1,7 +1,8 @@
-"""Camera-aligned robust bounds of a central registered-depth component."""
+"""Plane-oriented robust bounds of a central registered-depth component."""
 
 import cv2
 import numpy as np
+import open3d as o3d
 
 
 def _undistort_pixels(pixels, k, distortion, model):
@@ -42,18 +43,79 @@ class ProjectionRayCache:
         return self._rays
 
 
+def _surface_rotation(points, threshold, min_points):
+    """Dominant plane + longest rectangle edge; columns map local to camera.
+
+    Open3D estimates and refines the plane on the full component in native code.
+    Normal points away from the camera; the long axis has its largest camera
+    component positive. These conventions cannot resolve 180-degree symmetry.
+    """
+    cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    try:
+        plane, indices = cloud.segment_plane(
+            distance_threshold=threshold, ransac_n=3, num_iterations=128,
+            probability=0.999,
+        )
+    except RuntimeError as error:
+        raise ValueError("plane_segmentation_failed") from error
+    normal = np.asarray(plane[:3], dtype=np.float64)
+    length = np.linalg.norm(normal)
+    if not np.isfinite(plane).all() or length < 1e-12:
+        raise ValueError("degenerate_plane")
+    if len(indices) < max(min_points, int(np.ceil(len(points) * .5))):
+        raise ValueError("no_dominant_plane")
+    normal /= length
+    inliers = points[np.asarray(indices, dtype=np.intp)]
+    origin = inliers.mean(axis=0)
+    if np.dot(normal, origin) < 0:
+        normal = -normal
+    reference = np.eye(3)[np.argmin(np.abs(normal))]
+    u = reference - np.dot(reference, normal) * normal
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    planar = np.column_stack(((inliers - origin) @ u, (inliers - origin) @ v))
+    rect = cv2.boxPoints(cv2.minAreaRect(planar.astype(np.float32)))
+    edges = np.roll(rect, -1, axis=0) - rect
+    lengths = np.linalg.norm(edges, axis=1)
+    if lengths.min() < 1e-6:
+        raise ValueError("degenerate_rectangle")
+    edge = edges[np.argmax(lengths)]
+    x_axis = edge[0] * u + edge[1] * v
+    x_axis /= np.linalg.norm(x_axis)
+    if x_axis[np.argmax(np.abs(x_axis))] < 0:
+        x_axis = -x_axis
+    rotation = np.column_stack((x_axis, np.cross(normal, x_axis), normal))
+    status = "ambiguous_in_plane" if lengths.max() / lengths.min() < 1.05 else "ok"
+    return rotation, len(indices), status
+
+
+def _rotation_quaternion(rotation):
+    """Return an xyzw unit quaternion, including rotations near 180 degrees."""
+    vector, _ = cv2.Rodrigues(np.asarray(rotation, dtype=np.float64))
+    vector = vector.ravel()
+    angle = np.linalg.norm(vector)
+    if angle < 1e-12:
+        return [0., 0., 0., 1.]
+    return [*(vector * (np.sin(angle / 2) / angle)), float(np.cos(angle / 2))]
+
+
 def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                     depth_band=0.08, min_points=80, quantile=0.02,
-                    depth_scale=1.0, ray_cache=None):
+                    depth_scale=1.0, ray_cache=None, plane_threshold=0.005):
     """Segment around the central median Z and bound its visible point cloud.
 
-    Quantiles determine box sizes and XY centers; Z uses the component mean.
-    The box is not a strict enclosure
-    or an estimate of the unseen backside. Four corner-near samples and the
-    nearest component point are diagnostics only, not inputs to the bounds.
+    RANSAC fits the visible plane; its longest rectangle edge sets local X.
+    Quantiles in that coordinate system determine the box center and sizes.
+    Local Z size is visible surface variation, not unseen physical thickness.
+    Failed plane fits retain camera-aligned bounds with an explicit status.
+    The box is not a strict enclosure or an estimate of the unseen backside.
+    Four corner-near samples and the nearest component point are diagnostics
+    only, not inputs to the bounds.
     depth_scale converts input units to meters inside the clipped ROI only.
     An optional worker-owned ray_cache reuses calibrated pixel directions.
     """
+    if not np.isfinite(plane_threshold) or plane_threshold <= 0:
+        raise ValueError("invalid_plane_threshold")
     if not np.isfinite(depth_band) or depth_band <= 0:
         raise ValueError("invalid_bbox_depth_band")
     if not np.isfinite(quantile) or not 0 <= quantile < 0.5:
@@ -122,10 +184,21 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     points = np.column_stack((rays * depths[:, None], depths))
     if not np.isfinite(points).all():
         raise ValueError("invalid_unprojected_points")
-    lower, upper = np.quantile(points, [quantile, 1-quantile], axis=0)
+    depth_range = np.quantile(depths, [quantile, 1-quantile])
+    rotation = np.eye(3)
+    plane_inliers = 0
+    try:
+        rotation, plane_inliers, orientation_status = _surface_rotation(
+            points, plane_threshold, min_points)
+    except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
+        orientation_status = "camera_aligned_fallback:" + str(error)
+    origin = points.mean(axis=0)
+    local = (points - origin) @ rotation
+    lower, upper = np.quantile(local, [quantile, 1-quantile], axis=0)
     size = upper-lower
-    position = (lower+upper)/2
-    position[2] = float(np.mean(depths))
+    position = origin + rotation @ ((lower+upper)/2)
+    if orientation_status.startswith("camera_aligned_fallback:"):
+        position[2] = float(np.mean(depths))
     if size[0] <= 0 or size[1] <= 0:
         raise ValueError("empty_projected_bbox")
 
@@ -137,6 +210,8 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                for corner in corner_pixels]
     nearest = int(np.argmin(depths))
     return dict(position=position.tolist(), size=size.tolist(),
+                rotation=rotation.tolist(), orientation_status=orientation_status,
+                plane_inlier_count=plane_inliers, plane_threshold=float(plane_threshold),
                 corners=points[samples].tolist(), corner_depths=depths[samples].tolist(),
                 corner_pixels=corner_pixels.tolist(),
                 corner_sample_pixels=pixels[samples].astype(int).tolist(),
@@ -144,8 +219,9 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                 nearest_pixel=pixels[nearest].astype(int).tolist(),
                 seed_depth=seed_depth, point_count=len(points),
                 foreground_depth_band=float(depth_band), quantile=float(quantile),
-                depth_range=[float(lower[2]), float(upper[2])],
-                method="central_depth_component_mean_z")
+                depth_range=depth_range.tolist(),
+                method=("central_depth_component_mean_z" if orientation_status.startswith(
+                    "camera_aligned_fallback:") else "central_depth_component_plane_rectangle"))
 
 
 def attach_bboxes3d(items, depth, info, **options):
@@ -161,42 +237,53 @@ def attach_bboxes3d(items, depth, info, **options):
 
 
 def bbox_vertices(data):
-    """Eight camera-aligned vertices, used by visualization."""
-    lower = np.asarray(data["position"]) - np.asarray(data["size"]) / 2
-    upper = np.asarray(data["position"]) + np.asarray(data["size"]) / 2
-    return np.array([(x, y, z) for z in (lower[2], upper[2])
-                     for x, y in [(lower[0], lower[1]), (upper[0], lower[1]),
-                                  (upper[0], upper[1]), (lower[0], upper[1])]])
+    """Eight camera-frame vertices using the same local axes as ROS poses."""
+    half = np.asarray(data["size"]) / 2
+    local = np.array([(x, y, z) for z in (-half[2], half[2])
+                      for x, y in [(-half[0], -half[1]), (half[0], -half[1]),
+                                   (half[0], half[1]), (-half[0], half[1])]])
+    return local @ np.asarray(data.get("rotation", np.eye(3))).T + data["position"]
 
 
 def bboxes3d_message(items, header):
     """Standard detections: visible-component position, dimensions and class.
 
-    Positions and dimensions are meters in header.frame_id. The pose uses the
-    quantile XY center and mean depth as its reference point; its quaternion describes the
-    camera-aligned box axes, not an estimated physical object orientation.
+    Positions are meters in header.frame_id; dimensions are along local axes.
+    The quaternion maps box-local axes to header.frame_id, matching visualization.
+    The pose bounds visible points and does not locate the unseen physical center.
     Covariance remains at the message default; uncertainty is not estimated.
     """
     from vision_msgs.msg import Detection3D, Detection3DArray, ObjectHypothesisWithPose
-    from geometry_msgs.msg import Point
+    from geometry_msgs.msg import Point, Quaternion
 
     message = Detection3DArray(header=header)
     for item in items:
         if not item.get("bbox_visible", True) or "bbox3d" not in item:
             continue
         data = item["bbox3d"]
-        detection = Detection3D(header=header)
+        source = item.get("bbox3d_source")
+        measured_header = header
+        if source is not None:
+            measured_header = type(header)(
+                frame_id=source["frame_id"], stamp=type(header.stamp)(**source["stamp"]))
+        detection = Detection3D(header=measured_header)
         detection.id = str(item.get("track_id", ""))
         center = detection.bbox.center
         x, y, z = map(float, data["position"])
         center.position = Point(x=x, y=y, z=z)
-        center.orientation.w = 1.0
+        qx, qy, qz, qw = map(float, _rotation_quaternion(data.get("rotation", np.eye(3))))
+        center.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
         detection.bbox.size.x, detection.bbox.size.y, detection.bbox.size.z = map(float, data["size"])
         result = ObjectHypothesisWithPose()
         result.hypothesis.class_id = item["label"]
         result.hypothesis.score = float(item["score"] or 0.0)
         result.pose.pose.position = Point(x=x, y=y, z=z)
-        result.pose.pose.orientation.w = 1.0
+        result.pose.pose.orientation = Quaternion(x=qx, y=qy, z=qz, w=qw)
         detection.results = [result]
         message.detections.append(detection)
+    if message.detections:
+        # The array uses the newest measurement time; each detection retains its
+        # own source time when cached objects were measured on different frames.
+        message.header = max((item.header for item in message.detections),
+                             key=lambda h: (h.stamp.sec, h.stamp.nanosec))
     return message
