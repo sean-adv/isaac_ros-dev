@@ -1,12 +1,18 @@
-# 此部署版本的相容性限制，不是完整 lockfile，也不會主動安裝套件。
-# 僅適用 Thor / aarch64 / Python 3.12 / ROS Jazzy。
-# 先安裝平台適用的 torch / torchvision wheel，再搭配 -c 使用。
-# 不在此設定 timm：TRTMC 的 timm 版本由建置環境決定。
-# 本機 pip metadata 是 2.14.1，torch.__version__ 是 2.14.1+cu130。
-# pip 約束固定公開版本；CUDA 13.0 與 GPU 可用性需額外確認。
+# Tested: Thor SM110 / aarch64 / Python 3.12 / CUDA 13.0 / ROS Jazzy.
+# These pins constrain an installation; they are not a CUDA wheel index.
 torch==2.14.1
 torchvision==0.29.1
+torch-tensorrt==2.14.0
 tensorrt==11.1.0.106
+tensorrt-cu13==11.1.0.106
 transformers==5.2.0
 numpy==1.26.4
-opencv-python>=4.8,<4.12
+opencv-contrib-python==4.11.0.86
+open3d==0.20.0
+scipy==1.17.1
+Pillow==12.3.0
+Flask==3.1.3
+Werkzeug==3.1.9
+huggingface-hub==1.33.0
+safetensors==0.8.0
+ftfy==6.3.1

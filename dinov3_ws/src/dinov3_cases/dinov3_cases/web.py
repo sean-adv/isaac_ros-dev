@@ -7,7 +7,8 @@ from PIL import Image
 from werkzeug.exceptions import ServiceUnavailable
 from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
 from .patches import reference_grid_image
-from .grounded import prepare_object, validate_settings
+from .grounded import validate_settings
+from .cat2real import prepare_cat2real_image
 from .kcf import kcf_factory
 from .display_stream import display_uses_overlay
 from .image_manager import register_image_manager
@@ -142,7 +143,7 @@ def create_app(node):
             item = dict(name=path.name, version=f"{path.stat().st_mtime_ns}-{path.stat().st_size}")
             try:
                 original = decode_image(path)
-                reference = prepare_object(original, INPUT_SIZE, stride)
+                reference = prepare_cat2real_image(original, INPUT_SIZE)
                 item.update(
                     original_size=list(original.size),
                     size=list(reference.size),
@@ -161,7 +162,7 @@ def create_app(node):
             stride = node.reference_stride
         if stride is None:
             return jsonify(error="The model is loading."), 503
-        reference = prepare_object(decode_image(path), INPUT_SIZE, stride)
+        reference = prepare_cat2real_image(decode_image(path), INPUT_SIZE)
         data = BytesIO()
         reference_grid_image(reference, stride).save(data, format="PNG")
         return Response(

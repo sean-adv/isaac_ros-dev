@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 set -e
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-workspace_dir="$(dirname -- "$script_dir")"
+# Use the same large-image transport in camera and inference processes.
+# Keep explicit caller-provided DDS profiles.
+if [[ -z "${FASTDDS_DEFAULT_PROFILES_FILE:-}" && -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+  export FASTRTPS_DEFAULT_PROFILES_FILE="$script_dir/config/fastdds_rgbd.xml"
+fi
 source /opt/ros/jazzy/setup.bash
-source "$workspace_dir/orbbec_sdk/install/setup.bash"
+if [[ -n "${ORBBEC_SETUP:-}" ]]; then
+  source "$ORBBEC_SETUP"
+elif ! ros2 pkg prefix orbbec_camera >/dev/null 2>&1; then
+  # A fresh terminal may only have the base ROS environment sourced.
+  workspace_camera_setup="$script_dir/../orbbec_sdk/install/setup.bash"
+  if [[ -r "$workspace_camera_setup" ]]; then
+    source "$workspace_camera_setup"
+  fi
+fi
+if ! ros2 pkg prefix orbbec_camera >/dev/null 2>&1; then
+  printf '%s\n' 'orbbec_camera is not installed in this ROS environment. Set ORBBEC_SETUP to its install/setup.bash.' >&2
+  exit 1
+fi
 exec ros2 launch orbbec_camera gemini_330_series.launch.py \
   enable_color:=true enable_depth:=true \
   enable_left_ir:=false enable_right_ir:=false \

@@ -1,4 +1,4 @@
-"""Real dual-runtime ROS/HTTP smoke, including a deliberately stalled renderer."""
+"""Official-model ROS/HTTP smoke, including a deliberately stalled renderer."""
 import io
 import json
 from pathlib import Path
@@ -13,11 +13,11 @@ from PIL import Image
 import rclpy
 
 from dinov3_cases.node import CaseNode
-from dinov3_cases.runtime import ARTIFACTS, WORKSPACE
+from dinov3_cases.runtime import ARTIFACTS
 
 
 def main():
-    image = Image.open(WORKSPACE / 'DART/dartf/data/train2017/000000230971.jpg').convert('RGB')
+    image = Image.open(ARTIFACTS / 'validation/person.jpg').convert('RGB')
     entered, release = threading.Event(), threading.Event()
     original_encode = cv2.imencode
 
@@ -59,7 +59,7 @@ def main():
                 assert entered.wait(5)
                 detections = client.get('/api/detections').json['detections']
                 assert detections and not status['overlay_ready']
-                assert status['grounding_worker']['tensorrt'].startswith('10.')
+                assert status['grounding_worker']['tensorrt'].startswith('11.')
                 assert status['grounding_execution'] == 'subprocess'
                 assert status['performance']['render_ms'] is None
                 release.set()

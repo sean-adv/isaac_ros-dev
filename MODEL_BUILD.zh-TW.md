@@ -1,5 +1,7 @@
 # Thor 模型環境與轉換簡短教學
 
+`dinov3_ws` 的目前部署已改為獨立的官方 SAM3／Cat2Real 流程，請使用 [獨立建置與執行說明](dinov3_ws/BUILD_GUIDE.md)。下方工具保留給舊 DART／Facebook ViT-B 基準模型，並非目前的服務建置入口。
+
 入口：`scripts/build_thor_models.sh`，請使用 **Bash**。此腳本依目前工作區的 Thor 成功建置紀錄整理；不會安裝主機 driver、CUDA 或系統 apt 套件。需要目前含 Thor 相容性調整的 `DART/dartf` 與 `dinov3_tensorrt` 原始碼。
 
 | 選項 | Python 環境 | 主要版本 | 模型輸出 |

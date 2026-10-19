@@ -24,12 +24,13 @@ class AsyncKCFProposals:
     """
 
     def __init__(self, factory=None, wake=None, roi_padding=0.5,
-                 max_replay_frames=8, replay_budget_ms=150.0):
+                 max_replay_frames=8, replay_budget_ms=150.0, max_roi_side=0):
         validate_replay_limits(max_replay_frames, replay_budget_ms)
         self.max_replay_frames = max_replay_frames
         self.replay_budget_ms = replay_budget_ms
         self.factory = factory
         self.roi_padding = roi_padding
+        self.max_roi_side = max_roi_side
         self.wake = wake or (lambda: None)
         self.lock = threading.Lock()
         self.closed = False
@@ -41,7 +42,7 @@ class AsyncKCFProposals:
         self.serial = 0
         self.last_key = None
         self.ready = self.error = None
-        self.active = KCFProposals(factory, roi_padding=roi_padding)
+        self.active = KCFProposals(factory, roi_padding=roi_padding, max_roi_side=max_roi_side)
         self.frames_since_submit = 0
         self.force_detection = True
         self.last_metrics = {}
@@ -92,7 +93,8 @@ class AsyncKCFProposals:
                 if self.closed or version != self.version:
                     return
             init_started = time.monotonic()
-            candidate = KCFProposals(self.factory, roi_padding=self.roi_padding)
+            candidate = KCFProposals(self.factory, roi_padding=self.roi_padding,
+                                     max_roi_side=self.max_roi_side)
             candidate.update(pixels, serial, version, 2**63, lambda: proposals)
             init_ms = (time.monotonic() - init_started) * 1000
             if candidate.retry_detection:
@@ -170,7 +172,8 @@ class AsyncKCFProposals:
             if identity != self.context:
                 self.context = identity
                 self.version += 1
-                self.active = KCFProposals(self.factory, roi_padding=self.roi_padding)
+                self.active = KCFProposals(self.factory, roi_padding=self.roi_padding,
+                                           max_roi_side=self.max_roi_side)
                 self.latest = None
                 self.last_key = None
                 self.ready = self.error = None

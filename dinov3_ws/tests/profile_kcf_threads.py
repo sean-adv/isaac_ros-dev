@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--boxes', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--threads', type=int, nargs='+', default=[1, 2, 4, 14])
+    parser.add_argument('--max-roi-side', type=int, default=0, help='Limit each KCF working ROI; 0 disables resizing')
     parser.add_argument('--preview', action='store_true', help='Include 30 FPS color conversion, resize and JPEG preview stress')
     parser.add_argument('--rounds', type=int, default=3)
     parser.add_argument('--seconds', type=float, default=3)
@@ -43,7 +44,7 @@ def main():
                 cv2.setNumThreads(count)
                 modes = ('foreground_plus_replay_and_preview',) if args.preview else ('foreground_only', 'foreground_plus_replay')
                 for mode in modes:
-                    trackers = [KCFProposals(roi_padding=.5) for _ in range(2)]
+                    trackers = [KCFProposals(roi_padding=.5, max_roi_side=args.max_roi_side) for _ in range(2)]
                     for tracker in trackers:
                         tracker.update(pixels, 0, 'threads', 2**63, lambda: boxes)
                         for n in range(1, 11):
@@ -119,7 +120,7 @@ def main():
                     ticks = after_ticks[0]-before_ticks[0]
                     idle = after_ticks[1]-before_ticks[1]
                     row = dict(round=repeat+1, threads=count, mode=mode, objects=len(boxes),
-                               samples=len(values), median_ms=float(np.median(values)),
+                               max_roi_side=args.max_roi_side, samples=len(values), median_ms=float(np.median(values)),
                                p95_ms=float(np.percentile(values,95)),
                                foreground_fps=len(values)/elapsed,
                                replay_fps=len(replay_times)/elapsed,

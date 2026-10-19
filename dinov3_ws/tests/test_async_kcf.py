@@ -951,3 +951,42 @@ def test_initial_replay_timeout_remains_retryable(monkeypatch):
     finally:
         release.set()
         pipeline.close()
+
+
+def test_roi_limit_survives_background_handoff_and_context_reset():
+    shapes = []
+
+    class StationaryTracker:
+        def init(self, image, box):
+            shapes.append(image.shape)
+            self.box = box
+
+        def update(self, image):
+            shapes.append(image.shape)
+            return True, self.box
+
+    image = np.zeros((800, 1200, 3), dtype=np.uint8)
+    boxes = [dict(bbox=[400, 200, 600, 400], area=40000, label='known')]
+    recognized_shapes = []
+
+    def recognize(seed, items, key):
+        recognized_shapes.append(seed.shape)
+        return items, {'frame_id': key}
+
+    pipeline = AsyncKCFProposals(StationaryTracker, roi_padding=.5, max_roi_side=200)
+    try:
+        for context in ('camera-a', 'camera-b'):
+            result = pipeline.update(image, (context, 0), context, 30,
+                                     lambda frame: (boxes, {}), recognize=recognize,
+                                     wait_for_initial_result=True)
+            assert result[0][0]['bbox'] == boxes[0]['bbox']
+            assert pipeline.active.max_roi_side == 200
+            result = pipeline.update(image, (context, 1), context, 30,
+                                     lambda frame: (boxes, {}))
+            assert result[1] == 'kcf'
+            assert result[0][0]['bbox'] == boxes[0]['bbox']
+            assert result[0][0]['label'] == 'known'
+        assert shapes and all(shape == (200, 200, 3) for shape in shapes)
+        assert recognized_shapes == [(800, 1200, 3)] * 2
+    finally:
+        pipeline.close()

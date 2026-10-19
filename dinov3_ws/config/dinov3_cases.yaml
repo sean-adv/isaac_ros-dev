@@ -12,6 +12,9 @@ dinov3_cases:
     grounding_detection_interval: 30
     # Fixed KCF crop: expand each side by this fraction; clipped to image bounds.
     kcf_roi_padding: 0.3
+    # Resize only each KCF working ROI; SAM3/Cat2Real/depth keep original pixels.
+    # 0 restores full-resolution tracking. Keep >=16 target pixels where possible.
+    kcf_max_roi_side: 256
     # Catch-up call/time limits; skip intermediate frames. Excludes SAM3/init time.
     # Time limit is checked between KCF updates. Restart to apply.
     kcf_replay_max_frames: 8
@@ -21,7 +24,7 @@ dinov3_cases:
     opencv_num_threads: 1
     # Moving average over raw SAM3/KCF boxes per object; 1 disables smoothing.
     # Counts unique processed frames. Config only; restart after changes.
-    bbox_smoothing_frames: 3
+    bbox_smoothing_frames: 5
     # Original-image bbox after clipping/rounding; pixels / pixels squared.
     # 0 disables each threshold. All enabled thresholds must be met (>=).
     grounding_min_bbox_width: 0
@@ -29,7 +32,7 @@ dinov3_cases:
     grounding_min_bbox_area: 0
     recognition_threshold: 0.8
     recognition_margin: 0.05
-    # ViT-B/16 uses fixed 224×224 inputs; run.sh selects the Torch-TensorRT artifact.
+    # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
     # Preview and the configured overlay JPEG have fixed 960x540 output.
     jpeg_quality: 70
@@ -46,7 +49,7 @@ dinov3_cases:
     # Foreground depth tolerance around the central patch median (meters).
     # Full 3D center/size/rotation in background; independent of SAM3 interval.
     # Measure first processed RGB frame, then every 5 unique processed frames.
-    bbox3d_interval: 2
+    bbox3d_interval: 3
     bbox3d_max_age: 1.5
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 80

@@ -22,6 +22,41 @@ def kcf_factory():
     )
 
 
+class _ResizedTracker:
+    """Bound KCF working pixels while returning coordinates in the original ROI."""
+
+    def __init__(self, tracker, max_side):
+        self.tracker, self.max_side = tracker, max_side
+        self.size = None
+        self.scale = (1.0, 1.0)
+
+    def _image(self, image):
+        if self.size == (image.shape[1], image.shape[0]):
+            return image
+        return cv2.resize(image, self.size, interpolation=cv2.INTER_AREA)
+
+    def init(self, image, box):
+        height, width = image.shape[:2]
+        # Keep at least 16 pixels on the target's smaller side, where possible.
+        ratio = min(1.0, max(self.max_side / max(width, height),
+                             16 / min(box[2], box[3])))
+        self.size = (max(1, round(width * ratio)), max(1, round(height * ratio)))
+        self.scale = (self.size[0] / width, self.size[1] / height)
+        sx, sy = self.scale
+        x, y, w, h = box
+        scaled_box = (round(x * sx), round(y * sy),
+                      max(1, round(w * sx)), max(1, round(h * sy)))
+        return self.tracker.init(self._image(image), scaled_box)
+
+    def update(self, image):
+        ok, box = self.tracker.update(self._image(image))
+        if not ok:
+            return ok, box
+        sx, sy = self.scale
+        x, y, w, h = box
+        return ok, (x / sx, y / sy, w / sx, h / sy)
+
+
 class KCFProposals:
     """Count unique processed frames, never camera callbacks or gallery refreshes.
 
@@ -30,15 +65,20 @@ class KCFProposals:
     can retain valid survivors and request a background refresh instead. Detection
     scores on tracked proposals remain the last SAM3 score, not KCF confidence.
     Trackers use fixed crops padded per side until the next detection.
+    max_roi_side bounds working pixels only; boxes stay in input-image coordinates.
+    Small targets limit downsampling to retain at least 16 pixels where possible.
     refresh_requested signals an approaching crop boundary to the async caller.
     """
 
-    def __init__(self, factory=None, roi_padding=0.5):
+    def __init__(self, factory=None, roi_padding=0.5, max_roi_side=0):
         if roi_padding is not None and (
             isinstance(roi_padding, bool) or not isinstance(roi_padding, (int, float))
             or not math.isfinite(roi_padding) or roi_padding < 0
         ):
             raise ValueError("roi_padding must be finite and >= 0, or None for full-frame.")
+        if type(max_roi_side) is not int or max_roi_side < 0:
+            raise ValueError("max_roi_side must be an integer >= 0 (0 disables resizing).")
+        self.max_roi_side = max_roi_side
         self.roi_padding = roi_padding
         self.factory = factory
         self.reset()
@@ -155,6 +195,8 @@ class KCFProposals:
                 factory = self.factory or kcf_factory()
                 for proposal in proposals:
                     tracker = factory()
+                    if self.max_roi_side:
+                        tracker = _ResizedTracker(tracker, self.max_roi_side)
                     x0, y0, x1, y1 = proposal["bbox"]
                     roi = self._roi(proposal["bbox"], pixels)
                     try:

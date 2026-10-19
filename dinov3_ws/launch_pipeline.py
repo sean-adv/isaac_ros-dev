@@ -5,15 +5,15 @@ import os
 from pathlib import Path
 import sys
 
-from dinov3_cases.runtime import GROUNDING_ENGINE, DINO_ENGINE, GROUNDING_PYTHON
+from dinov3_cases.runtime import GROUNDING_ENGINE, DINO_ENGINE, GROUNDING_PYTHON, CASES_DIR
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run SAM3 W8A8 and DINOv3 object recognition."
+        description="Run official SAM3 and Cat2Real object recognition."
     )
     if any(arg == "--mode" or arg.startswith("--mode=") for arg in sys.argv[1:]):
-        parser.error("--mode has been removed; SAM3 TRT10 and DINOv3 TRT11 always run separately")
+        parser.error("--mode has been removed; SAM3 and Cat2Real use the official Torch-TensorRT runtime")
     _, extra_args = parser.parse_known_args()
     workspace = Path(__file__).resolve().parent
     config = workspace / "config" / "dinov3_cases.yaml"
@@ -30,7 +30,7 @@ def main():
             "--params-file",
             str(config),
             "-p",
-            f'cases_dir:={workspace.parent / "dinov3_cases_data"}',
+            f"cases_dir:={CASES_DIR}",
             "-p",
             f"engine_path:={DINO_ENGINE}",
             "-p",

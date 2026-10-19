@@ -151,7 +151,7 @@ async function refresh() {
 
 const objectHelp = {
   heatmap: 'Local patch similarity overlaid on the original ROI. Fixed scale: 0 (dark blue) → 0.5 (green) → 1 (red). Negative values appear dark blue.',
-  crop: 'Object crop detected by SAM3 W8A8 in original image coordinates, preserving its aspect ratio.',
+  crop: 'Object crop detected by SAM3 in original image coordinates, preserving its aspect ratio.',
   grid: 'Actual DINOv3 model input. Yellow lines mark patch boundaries; the area outside the blue box is right/bottom padding.',
   patches: 'Maximum cosine similarity between each ROI patch and all patches of the best reference image. Shows the full model grid, including padding.',
   similarity: 'Similarity map with padding removed, mapped back to the ROI. Fixed scale of 0–1; negative values appear dark blue.',

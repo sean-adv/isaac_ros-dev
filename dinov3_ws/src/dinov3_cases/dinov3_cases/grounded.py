@@ -112,9 +112,13 @@ def prepare_object(image, max_side=INPUT_SIZE, stride=16, minimum=32):
 
 @torch.inference_mode()
 def encode_object(encoder, image, max_side, stride):
-    prepared = prepare_object(image, max_side, stride)
-    features = encoder.encode(prepared)
-    vector = features.float().mean(dim=0)
+    prepare = getattr(encoder, 'prepare_image', prepare_object)
+    prepared = prepare(image, max_side, stride)
+    if hasattr(encoder, 'encode_with_descriptor'):
+        features, vector = encoder.encode_with_descriptor(prepared)
+    else:
+        features = encoder.encode(prepared)
+        vector = features.float().mean(dim=0)
     if not torch.isfinite(vector).all() or vector.norm() < 1e-8:
         raise ValueError("Invalid object descriptor.")
     return prepared, features, F.normalize(vector, dim=0)

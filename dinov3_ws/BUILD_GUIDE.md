@@ -1,4 +1,4 @@
-# SAM3 + DINOv3 使用與建置
+# 官方 SAM3 + Cat2Real 使用與建置
 
 所有指令從工作區根目錄執行。容器設定見 [DOCKER_HOST.md](../DOCKER_HOST.md)。
 
@@ -47,28 +47,36 @@ KCF 前景與背景 replay 都使用固定 ROI；`kcf_roi_padding: 0.5` 表示�
 
 主程序的 `opencv_num_threads` 預設設定為 `1`，限制 OpenCV 內部執行緒池以控制 CPU 負載；前景、背景 replay、發布及繪圖仍並行。設定為 `0` 保留 OpenCV 函式庫預設值。此設定只作用於主程序，不更改 SAM3 子程序或 PyTorch／BLAS 執行緒數，修改後重新啟動。
 
-KCF 需要主程序環境安裝 `opencv-contrib-python`（包含 [OpenCV KCF](https://docs.opencv.org/4.x/d2/da2/classcv_1_1TrackerKCF.html)）。若原先使用一般 OpenCV wheel，先移除同名 `cv2` 套件再安裝，避免重疊檔案；不需修改 SAM3 的 DART 環境：
+KCF 需要主程序環境安裝 `opencv-contrib-python`（包含 [OpenCV KCF](https://docs.opencv.org/4.x/d2/da2/classcv_1_1TrackerKCF.html)）。若原先使用一般 OpenCV wheel，先移除同名 `cv2` 套件再安裝，避免重疊檔案；主程序與 SAM3 worker 共用同一份 `.venv` 套件：
 
 ```bash
-dinov3_trt11_venv/bin/python -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python-headless
-dinov3_trt11_venv/bin/python -m pip install 'opencv-contrib-python>=4.8,<4.12'
+dinov3_ws/.venv/bin/python -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python-headless
+dinov3_ws/.venv/bin/python -m pip install 'opencv-contrib-python>=4.8,<4.12'
 ```
 
 ## 執行環境與模型
 
-兩個程序固定使用各自的 TensorRT 環境；路徑預設定義於 `src/dinov3_cases/dinov3_cases/runtime.py`。
+模型執行、下載與編譯均在 `dinov3_ws` 內完成，使用官方 Hugging Face、PyTorch、Torch-TensorRT 與 TensorRT 套件。預設不需要相鄰的 DART、dinov3_tensorrt 或 TensorRT-Model-Connect 原始碼、venv、plugin 或模型路徑。
 
-| 用途 | Python | 模型／引擎 |
+| 用途 | 執行方式 | 本專案內模型 |
 | --- | --- | --- |
-| SAM3 偵測 | `DART/.venv/bin/python`，TensorRT 10 | `DART/dartf/assets_bbox/vision_int8.plan` |
-| DINOv3 辨識 | `dinov3_trt11_venv/bin/python`，TensorRT 11 | `dinov3_tensorrt/artifacts/thor-vitb/vitb16-fp16-trt.ts` |
-| DINOv3 前處理 | 主程序環境 | `DART/models/dinov3-vitb16` |
+| SAM3 vision | 官方 Torch-TensorRT FP16，1008×1008 | `artifacts/sam3/vision-fp16.ts` 與同名 `.json` |
+| SAM3 bbox／文字 | 官方 Transformers PyTorch FP16，文字依 prompt 快取 | `artifacts/sam3/source/` |
+| Cat2Real | 官方 Torch-TensorRT FP32，384×384 | `artifacts/cat2real-dinov3-384/cat2real-fp32-trt.ts` 與同名 `.json` |
+| Cat2Real 前處理 | Transformers processor | `artifacts/cat2real-dinov3-384/source/` |
+| 商品圖庫 | 首次載入／修改後重新編碼 | `data/gallery/` |
 
-SAM3 bundle 還需 `ground_c1m_fp16.plan`、`ground_c4m_fp16.plan`、`text_c16.onnx`（含外部權重）、`bpe_simple_vocab_16e6.txt.gz`、`img_pos_c1.npy`、`img_pos_c4.npy`，以及 `DART/dartf/plugins/lq_plugins.so`。缺少時依 DART 的 `dartf/scripts/build_bbox.sh` 準備；更換模型後重新啟動服務。
+兩個程序都使用 `dinov3_ws/.venv/bin/python` 與 TensorRT 11，保留 IPC 以配合背景偵測和影格租約。SAM3 head 回傳 bbox、logits 與 presence，不執行 mask／SAM3 tracking，也不載入自訂 plugin 或 ONNX Runtime。支援 1–4 類別，直接使用實際類別數，沒有舊 K=1／K=4 engine bucket。
 
-SAM3 使用套件內的 `sam3_runtime`，輸入為 RGB 1008×1008、bilinear resize、`pixel / 127.5 - 1`；單類使用 K=1 head，2–4 類使用 K=4 head。DINOv3 將 bbox 與參考圖等比例縮放、補邊至 224×224，再比對 patch 特徵。參考圖庫存於 `dinov3_cases_data/`。
+SAM3 前處理為 RGB bilinear 1008×1008、`pixel / 127.5 - 1`。Cat2Real 置中補白成正方形後以 OpenCV bilinear 縮放至 384×384，做一次 rescale 與 ImageNet normalize。辨識使用 L2-normalized CLS/pooler_output（1024 維），24×24 patch 特徵供熱圖。沿用 DINO 閾值篩選再以 Lab 選參考圖的分類流程。
 
-主程序依賴見 [requirements.txt](requirements.txt)；先安裝平台相容的 CUDA、PyTorch／torchvision，再安裝一般依賴。ROS 2 Jazzy、cv_bridge、vision_msgs、isaac_ros_apriltag_interfaces 與相機驅動需另外準備。SAM3 worker 沿用 DART 的獨立環境，不能套用 TRT11 的依賴限制。
+環境清單在 [requirements.txt](requirements.txt)、[requirements-build.txt](requirements-build.txt)；Thor 的已驗證版本在 [constraints-thor.txt](constraints-thor.txt)。目前環境已放在 `.venv/` 並通過 pip check；從零安裝可執行：
+
+```bash
+bash dinov3_ws/setup_env.sh
+```
+
+這個入口先從官方 CUDA 13.0 wheel index 安裝 Torch／torchvision，再安裝受 constraints 限制的套件。預設 Python 3.12；可用 `PYTHON_BIN` 與 `DINOV3_VENV` 指定位置。CUDA driver/runtime、ROS 2 Jazzy、cv_bridge、vision_msgs、isaac_ros_apriltag_interfaces 與相機驅動是系統前提，不由 pip 安裝。`run_camera.sh` 使用 ROS 已能找到的 `orbbec_camera`，或透過 `ORBBEC_SETUP=/path/to/install/setup.bash` 載入已安裝的相機套件。
 
 ## 程式與工具入口
 
@@ -102,103 +110,31 @@ SAM3 使用套件內的 `sam3_runtime`，輸入為 RGB 1008×1008、bilinear res
 
 逐欄比較的輸出差異為 0。此測試回放相同實際深度與固定 ROI，相機驅動持續運作，未執行 SAM3／DINO 或 JPEG；耗時包含深度轉換與 3D 框計算，不代表整體辨識 FPS，也不能直接套用前次不同場景的 15.4 ms。原版、深度輸入與報告保存在 `artifacts/depth_bbox_optimization_20261018/`，重跑方式見測試 README。
 
-## 可選模型建置
+## 模型重建與驗證
 
-目前服務使用 ViT-B/16 FP16、224×224 輸入，對應 14×14 patch grid。依 `dinov3_tensorrt` 的 Torch-TensorRT CLI 重建並驗證：
-
-```bash
-IMAGE_SIZE=224 OUTPUT_DIR="$PWD/dinov3_tensorrt/artifacts/thor-vitb" ./dinov3_tensorrt/scripts/run_thor_vitb.sh
-```
-
-目前使用先前已建置的 224×224 engine，產物與精度報告位於 `dinov3_tensorrt/artifacts/thor-vitb/`。160×160 engine 保留於 `dinov3_tensorrt/artifacts/thor-vitb-160/`。
-
-目前服務直接載入上表的既有產物。以下工具供另建引擎及驗證使用，產物不會自動取代目前部署。
-
-- `build_dinov3.sh`：透過 TensorRT-Model-Connect 建置原生 TensorRT bundle，預設為 ViT-S/16、224×224、FP16；後端仍支援此格式。
-- `build_sam3_plugins.sh`、`build_sam3.sh`：實驗性 SAM3 TRT11 轉建；目前 SAM3 worker 固定使用 TRT10，不能直接載入這些產物。
-
-建置依賴見 [requirements-build.txt](requirements-build.txt)。DINOv3 需準備 `TensorRT-Model-Connect` 原始碼及其依賴，並取得 Hugging Face 模型存取權：
+以下指令不載入其他專案的 Python 程式：
 
 ```bash
-dinov3_trt11_venv/bin/hf auth login
-./dinov3_ws/build_dinov3.sh --download
+# 用現有本機權重重建兩個模型
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py
+
+# 分別建置
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target sam3
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target cat2real
+
+# 需要下載時使用固定 revision；SAM3 需先取得官方存取權並登入
+dinov3_ws/.venv/bin/hf auth login
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --download
+
+# 不重新編譯，只重載產物與原始 FP32 比較
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --validate-only
+
+# 單／四類別、圖庫與 IPC 的實際 GPU 回歸
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
 ```
 
-已快取權重時使用 `--offline`。可用 `--model /path/to/model`、`--output /path/to/new-output` 指定本機模型與新產物目錄；其餘參數見 `./dinov3_ws/build_dinov3.sh --help`。原生引擎建置需以 `admin` 執行，避免權重與產物權限問題。
+Cat2Real 固定 revision `a763964f2041722ffcc5bc4c72e3cb241530727e`；SAM3 固定 `3c879f39826c281e95690f02c7821c4de09afae7`。兩者都要求 vision 圖完整編譯，儲存 TorchScript 後重新載入，與重新載入的原始 FP32 權重比較，通過才寫入部署中繼資料。`validation.json` 保存模型 SHA256、套件版本、樣本結果與測速。Cat2Real FP16 在此 Thor 上會產生 NaN，因此固定 FP32。
 
-SAM3 TRT11 轉建需來源 `artifacts/sam3/bbox_w8a8/`、DART CUTLASS、CUDA 13 與匹配的 TensorRT 11 headers；`TRT_INC` 可指定 headers 位置：
+SAM3 整個 bbox 圖目前無法直接完整編譯：decoder 有 scalar extraction 與 TensorRT reshape 限制。因此只將 vision 編譯成 TensorRT，bbox／文字使用原始官方 PyTorch 模組。`model_modules.py` 只包裝官方模組呼叫，省略不需要的分割遮罩。
 
-```bash
-./dinov3_ws/build_sam3_plugins.sh
-./dinov3_ws/build_sam3.sh
-```
-
-## 測試與診斷
-
-回歸測試、GPU 整合驗證及效能量測指令見 [tests/README.md](tests/README.md)。歷史精度與效能分析保留於 [OMDET_DINOV3_THOR_ANALYSIS.md](OMDET_DINOV3_THOR_ANALYSIS.md)，僅供查閱過去量測；舊 OmDet 程式與離線 prompt 設定已移除。
-
-## 相機依賴
-
-以下假設 ROS 2 Jazzy 已安裝：
-
-```bash
-source /opt/ros/jazzy/setup.bash
-rosdep install --from-paths dinov3_ws/src --ignore-src -r -y --rosdistro jazzy
-
-sudo apt update
-sudo apt install libgflags-dev nlohmann-json3-dev \
-  ros-${ROS_DISTRO}-image-transport \
-  ros-${ROS_DISTRO}-image-transport-plugins \
-  ros-${ROS_DISTRO}-compressed-image-transport \
-  ros-${ROS_DISTRO}-image-publisher \
-  ros-${ROS_DISTRO}-camera-info-manager \
-  ros-${ROS_DISTRO}-diagnostic-updater \
-  ros-${ROS_DISTRO}-diagnostic-msgs \
-  ros-${ROS_DISTRO}-statistics-msgs \
-  ros-${ROS_DISTRO}-xacro \
-  ros-${ROS_DISTRO}-backward-ros \
-  libdw-dev libssl-dev mesa-utils libgl1 libgoogle-glog-dev
-```
-
-## 編譯相機驅動
-
-需要使用相機時，先準備好 `orbbec_sdk/src` 內的驅動原始碼，再執行：
-
-```bash
-cd /workspaces/isaac_ros-dev/orbbec_sdk
-source /opt/ros/jazzy/setup.bash
-rosdep install --from-paths src --ignore-src -r -y --rosdistro jazzy
-colcon build --event-handlers console_direct+ --cmake-args -DCMAKE_BUILD_TYPE=Release
-cd /workspaces/isaac_ros-dev
-```
-
-請在 `orbbec_sdk` 建置，因為 `run_camera.sh` 會載入 `orbbec_sdk/install/setup.bash`。
-目前相機啟動腳本使用 `gemini_330_series.launch.py`；僅上傳圖片時可略過相機建置與啟動。
-
-網頁 FPS 為辨識結果完成率，以最近約 3 秒的完成間隔總數除以總耗時，包含 SAM3／KCF 交替、辨識與排程等待；不是相機輸入或單一模型 FPS。切換輸入／設定時重新計算，首個結果尚無 FPS。API 的 `performance.result_fps` 為平滑值，`result_fps_instant` 保留相鄰結果的瞬時值。
-
-## 框線繪製模式
-
-在 `config/dinov3_cases.yaml` 設定 `bbox_visualization_mode: "3d"`（目前預設），或改成 `"2d"`，重新啟動辨識服務後生效。瀏覽器先將 RGB 原圖縮為 960×540，再轉色與繪製指定模式；2D 座標與 3D 投影內參依寬高比例換算，公尺座標及畸變係數保持原值。只有 ROS debug image 有訂閱者時才另外繪製全解析度疊圖；網頁不提供切換，舊網址的 `bbox` 查詢參數也不會覆寫設定。
-
-3D 模式需要 `pose_enabled: true` 與有效同步深度；沒有有效 3D 資料的物件不繪框，也不退回 2D。2D bbox 仍用於偵測、追蹤、辨識裁切與 3D 計算；此設定只決定繪製方式，不會停用這些必要運算或改變 3D 結果發布。
-
-## DINO 分類更新頻率
-
-DINO 與 SAM3 共用 `grounding_detection_interval`：每次背景工作先由 SAM3 找框，再對同一偵測影格的框執行 DINO／Lab，完成 KCF replay 後一起交接。兩個模型依序執行，因為 DINO 需要 SAM3 的候選框；等待期間前景 KCF 持續更新位置並沿用原分類。分類欄位隨各自的 proposal 保留，不新增數字 ID，也不將分類跨組配對。來源、解析度或設定變更會重建追蹤；`grounding_detection_interval: 1` 則停用 KCF，由推論 worker 每個新影格依序執行兩個模型。
-
-框座標、3D 深度與 ROS 結果依當前處理影格更新。Diagnostic images 保留 SAM3 偵測影格上的辨識裁切與特徵，KCF 影格不重建診斷快照。圖庫更新於下一次背景工作套用；網頁修改圖庫或設定會使舊結果失效，靜態上傳圖片則每秒可提交刷新工作。`performance.recognition_source` 為 `dino`／`cached`／`none`，`recognition_frame_id` 指出背景辨識使用的偵測影格，可能早於當前 KCF 影格。需重新啟動辨識服務生效。
-
-## DINO + Lab 相似度
-
-`recognition_threshold` 只篩選 DINO descriptor cosine similarity；每張達到門檻的參考圖都是候選，不限制 DINO 前三個分類。從候選中選 Lab 分數最高的參考圖，採用其分類；同分依序以 DINO 分數、分類名稱及參考圖順序決定。沒有參考圖達到 DINO 門檻時回傳 unknown。Lab 使用 bbox 原始裁切與每張參考圖的聯合 L/a/b 直方圖（8×16×16 bins，L1 正規化），以 Bhattacharyya coefficient 計算 0～1 相似度。直方圖不含模型輸入 padding，參考圖完全透明的像素不計入；全透明參考圖會拒絕載入。
-
-不再計算加權分數。網頁與 ROS 的 `score` 等於所選參考圖的 `dino_score`，另保留 `lab_score`。`margin` 僅回報不同候選分類的 Lab 分數差；舊設定 `recognition_margin` 保留相容但不再拒絕最高 Lab 分類。自動診斷圖使用相同門檻與參考圖選擇；unknown 顯示 DINO 最高的參考圖供檢查。指定分類時則比較該分類所有參考圖並選 Lab 最高者，comparison score 為其 DINO 分數；patch heatmap 維持 DINO patch similarity。
-
-Lab 跟隨 DINO 在同一背景工作更新，KCF 影格沿用；圖庫或辨識門檻改變於下一次背景辨識套用。重新啟動辨識服務後生效。
-
-## 追蹤遺失與分類快取恢復
-
-非同步 KCF 遺失部分物件時，保留其餘當幀有效框，立即嘗試提交背景 SAM3（不等待 detection interval，仍限制單一任務）。有效框保留各自原有分類，前景不因框數改變重跑 DINO／Lab，也不依列表位置重新配對分類；下一次背景 SAM3＋DINO 完成後再一起交接新結果。全部追蹤遺失時清除失效框與分類，持續輸出無框影像並等待新 SAM3 結果。
-
-同一影格收到 SAM3 交接結果時，bbox 平滑快取會檢查原始框的數量、順序與座標，避免截掉新增物件；同幀修正取代原樣本，不重複累積平滑權重。真正的模型／影像處理例外仍沿用既有錯誤處理；上述恢復針對追蹤狀態與分類快取變化。
+`build_cat2real.py`、`build_sam3.py` 與 shell 建置入口轉交 `build_models.py`。舊 ONNX／TRTMC／Qwen 實驗程式不屬於目前部署，不需要安裝它們的依賴或執行它們。從零重建 engine 需要相容 GPU 與 TensorRT 版本。

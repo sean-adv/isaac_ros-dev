@@ -1,4 +1,4 @@
-"""Build DINOv3 bundles and validate direct-engine accuracy and latency."""
+"""Legacy native-engine helpers; CLI now builds official Torch-TensorRT Cat2Real."""
 import argparse
 import hashlib
 import json
@@ -330,10 +330,6 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as error:
-        print(f'ERROR: {error}', file=sys.stderr)
-        if isinstance(error,subprocess.CalledProcessError):
-            print('See the output directory build.log for the TensorRT error.',file=sys.stderr)
-        sys.exit(1)
+    from build_models import main as build_official
+    sys.argv[1:1] = ['--target', 'cat2real']
+    build_official()

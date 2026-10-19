@@ -274,3 +274,54 @@ def test_real_opencv_kcf_tracks_motion_in_fixed_roi():
         assert abs((x0+x1)/2-(68+2*n)) < 5
         assert abs((y0+y1)/2-(58+n)) < 5
     detector.assert_called_once()
+
+
+@pytest.mark.parametrize('limit', [-1, True, 1.5, '256'])
+def test_invalid_max_roi_side(limit):
+    with pytest.raises(ValueError, match='max_roi_side'):
+        KCFProposals(max_roi_side=limit)
+
+
+def test_resized_roi_maps_tracking_back_to_original_image():
+    image = np.zeros((800, 1200, 3), dtype=np.uint8)
+    fake = SimpleNamespace(init=Mock(return_value=None),
+                           update=Mock(return_value=(True, (55, 60, 100, 100))))
+    tracker = KCFProposals(lambda: fake, roi_padding=.5, max_roi_side=200)
+    detect = Mock(return_value=[dict(proposal(), bbox=[400, 200, 600, 400])])
+    tracker.update(image, 0, 'camera', 100, detect)
+    assert fake.init.call_args.args[0].shape == (200, 200, 3)
+    assert fake.init.call_args.args[1] == (50, 50, 100, 100)
+    items, source = tracker.update(image, 1, 'camera', 100, detect)
+    assert source == 'kcf'
+    assert items[0]['bbox'] == [410, 220, 610, 420]
+    assert items[0]['area'] == 40000
+    assert items[0]['detection_score'] == proposal()['detection_score']
+    detect.assert_called_once_with()
+
+
+def test_resized_roi_keeps_small_targets_at_least_sixteen_pixels():
+    image = np.zeros((1000, 1000, 3), dtype=np.uint8)
+    fake = SimpleNamespace(init=Mock(return_value=None))
+    tracker = KCFProposals(lambda: fake, roi_padding=None, max_roi_side=100)
+    tracker.update(image, 0, 'camera', 100,
+                   lambda: [dict(proposal(), bbox=[400, 400, 420, 500])])
+    assert fake.init.call_args.args[0].shape == (800, 800, 3)
+    assert fake.init.call_args.args[1] == (320, 320, 16, 80)
+
+
+def test_real_resized_kcf_tracks_motion_in_original_coordinates():
+    texture = np.random.default_rng(7).integers(0, 256, (120, 120, 3), dtype=np.uint8)
+    image = np.zeros((600, 800, 3), dtype=np.uint8)
+    image[220:340, 300:420] = texture
+    tracker = KCFProposals(roi_padding=.5, max_roi_side=120)
+    detect = Mock(return_value=[dict(proposal(), bbox=[300, 220, 420, 340])])
+    tracker.update(image, 0, 'camera', 100, detect)
+    for n in range(1, 5):
+        moved = np.zeros_like(image)
+        moved[220+2*n:340+2*n, 300+4*n:420+4*n] = texture
+        items, source = tracker.update(moved, n, 'camera', 100, detect)
+        assert source == 'kcf'
+        x0, y0, x1, y1 = items[0]['bbox']
+        assert abs((x0+x1)/2 - (360+4*n)) < 8
+        assert abs((y0+y1)/2 - (280+2*n)) < 8
+    detect.assert_called_once()

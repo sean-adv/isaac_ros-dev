@@ -17,17 +17,20 @@ def object_debug_views(roi, prepared, features, reference_patches, max_side, str
     roi_size = roi.size if roi_size is None else roi_size
     scale = max_side / max(roi_size)
     content_w, content_h = [max(1, round(n * scale)) for n in roi_size]
+    x0, y0, x1, y1 = prepared.info.get('content_box', (0, 0, content_w, content_h))
+    content_w, content_h = x1 - x0, y1 - y0
     views = dict(
         crop=cv2.cvtColor(np.asarray(roi), cv2.COLOR_RGB2BGR),
         grid=cv2.cvtColor(np.asarray(reference_grid_image(prepared, stride)), cv2.COLOR_RGB2BGR),
     )
     # Mark the real ROI's edge; the right/bottom remainder is replicate padding.
-    cv2.rectangle(views["grid"], (0, 0), (content_w - 1, content_h - 1), (255, 130, 50), 1)
+    cv2.rectangle(views["grid"], (x0, y0), (x1 - 1, y1 - 1), (255, 130, 50), 1)
     metadata = dict(
         roi_size=list(roi_size),
         input_size=list(prepared.size),
         preview_size=list(roi.size),
         content_size=[content_w, content_h],
+        content_box=[x0, y0, x1, y1],
         patch_grid=[gh, gw],
         heatmap_available=reference_patches is not None,
     )
@@ -45,7 +48,7 @@ def object_debug_views(roi, prepared, features, reference_patches, max_side, str
     # Patch rendering shows the full model grid. The ROI heatmap excludes padding.
     views["patches"] = cv2.resize(color(scores), prepared.size, interpolation=cv2.INTER_NEAREST)
     pixels = cv2.resize(scores, prepared.size, interpolation=cv2.INTER_LINEAR)[
-        :content_h, :content_w
+        y0:y1, x0:x1
     ]
     mapped = cv2.resize(pixels, roi.size, interpolation=cv2.INTER_LINEAR)
     views["similarity"] = color(mapped)

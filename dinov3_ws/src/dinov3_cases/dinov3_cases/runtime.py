@@ -1,15 +1,18 @@
-"""Paths for the SAM3 TRT10 worker and DINOv3 TRT11 process."""
-
+"""Self-contained model/data paths for the official Torch-TensorRT deployment."""
 from pathlib import Path
+import sys
 
-WORKSPACE = Path(__file__).resolve().parents[4]
-ARTIFACTS = WORKSPACE / "dinov3_ws/artifacts"
-MODEL_ID = "facebook/dinov3-vitb16-pretrain-lvd1689m"
-GROUNDING_MODEL_ID = "facebook/sam3"
-INPUT_SIZE = 224
-DINO_ENGINE = WORKSPACE / "dinov3_tensorrt/artifacts/thor-vitb/vitb16-fp16-trt.ts"
-DINO_MODEL = WORKSPACE / "DART/models/dinov3-vitb16"
-SAM3_ASSETS = WORKSPACE / "DART/dartf/assets_bbox"
-GROUNDING_ENGINE = SAM3_ASSETS / "vision_int8.plan"
-GROUNDING_PYTHON = WORKSPACE / "DART/.venv/bin/python"
-SAM3_PLUGIN = WORKSPACE / "DART/dartf/plugins/lq_plugins.so"
+PROJECT = Path(__file__).resolve().parents[3]
+WORKSPACE = PROJECT.parent  # Retained for workspace-level ROS/camera diagnostics.
+ARTIFACTS = PROJECT / 'artifacts'
+CASES_DIR = PROJECT / 'data/gallery'
+MODEL_ID = 'zhanganyi88/Cat2Real-DINOv3-384'
+GROUNDING_MODEL_ID = 'facebook/sam3'
+SAM3_REVISION = '3c879f39826c281e95690f02c7821c4de09afae7'
+INPUT_SIZE = 384
+DINO_ENGINE = ARTIFACTS / 'cat2real-dinov3-384/cat2real-fp32-trt.ts'
+DINO_MODEL = ARTIFACTS / 'cat2real-dinov3-384/source'
+SAM3_ASSETS = ARTIFACTS / 'sam3'
+SAM3_MODEL = SAM3_ASSETS / 'source'
+GROUNDING_ENGINE = SAM3_ASSETS / 'vision-fp16.ts'
+GROUNDING_PYTHON = Path(sys.executable)

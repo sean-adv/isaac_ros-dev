@@ -1,3 +1,21 @@
+# 目前部署測試
+
+一般回歸使用 `dinov3_ws/.venv`。`test_qwen_encoder.py` 為舊 Qwen 實驗，其缺少的設定常數早於本次切換；目前部署不執行該測試：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=dinov3_ws/src/dinov3_cases:$PYTHONPATH \
+  dinov3_ws/.venv/bin/pytest dinov3_ws/tests --ignore=dinov3_ws/tests/test_qwen_encoder.py
+```
+
+實際 GPU 回歸：
+
+```bash
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
+```
+
+測試影像預設為 `artifacts/validation/person.jpg`。報告輸出 `artifacts/standalone-pipeline-validation.json`，檢查本機模型路徑、FP32 bbox IoU、1–4 類別、Cat2Real 圖庫、IPC parity，以及沒有載入其他模型專案的模組或自訂 SAM3 plugin。數值模型驗證另執行 `build_models.py --validate-only`。下方保留其他功能回歸與歷史效能診斷入口；舊模型實驗腳本不屬於目前部署。
+
 # 測試與診斷
 
 此目錄只保留目前 SAM3 + DINOv3 流程的回歸測試，以及部署驗證與效能診斷工具。舊 OmDet 的離線 prompt、FP16/FP32 精度比較、IPC GPU 比較與舊版整合腳本已移除；原始量測報告仍保留。
@@ -10,7 +28,7 @@
 source /opt/ros/jazzy/setup.bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
-dinov3_trt11_venv/bin/python -m pytest -q dinov3_ws/tests
+dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests
 ```
 
 使用專案 TRT11 Python 環境，並先載入 ROS 2 Jazzy；若 `isaac_ros_apriltag_interfaces` 安裝於額外的工作區，還需載入該工作區環境。保留既有 `PYTHONPATH`，讓 ROS 訊息可匯入。停用自動載入 pytest 外掛，是為了避免未使用的 ROS launch-testing 外掛引入額外依賴；本套測試不依賴外掛。
@@ -47,16 +65,16 @@ node --test dinov3_ws/tests/test_images_ui.cjs
 以下工具需要實際 GPU、模型與 ROS 環境，修改引擎或部署流程時才執行，不納入日常 pytest：
 
 - `check_gpu_environment.py`：檢查 CUDA driver、PyTorch allocation 與 TensorRT Builder。
-- `check_sam3_trt_pipeline.py`：比較 SAM3 TRT10 direct／IPC 結果，並驗證 DINOv3 crop 特徵。
+- `check_sam3_trt_pipeline.py`：轉交 `check_official_pipeline.py`，驗證官方 SAM3 單／四類別、Cat2Real 與同環境 TRT11 IPC。
 - `check_async_kcf_pipeline.py`：真實 SAM3／DINOv3 流程，先以 30 FPS 持續輸入並延遲首次 SAM3，確認以最新 RGB 初始化並略過偵測期間影格；再刻意阻塞穩態背景 SAM3，確認前景 KCF 持續完成、SAM3 偵測影格上完成 DINOv3 後，框、分類與診斷圖片一起交接。
-- `check_grounded_trt_pipeline.py`：實際雙環境 HTTP／ROS 流程，以及刻意阻塞 JPEG 時的 bbox 發布。
+- `check_grounded_trt_pipeline.py`：實際SAM3／Cat2Real HTTP／ROS 流程，以及刻意阻塞 JPEG 時的 bbox 發布。
 
 從工作區根目錄執行：
 
 ```bash
-LD_LIBRARY_PATH="$PWD/dinov3_trt11_venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
+LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
 PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
-dinov3_trt11_venv/bin/python dinov3_ws/tests/check_sam3_trt_pipeline.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_sam3_trt_pipeline.py
 ```
 
 其他部署工具使用相同環境，替換腳本名稱即可。工具會載入實際模型並寫出驗證報告，執行前可查看腳本中的輸出位置。
@@ -76,9 +94,9 @@ dinov3_trt11_venv/bin/python dinov3_ws/tests/check_sam3_trt_pipeline.py
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-LD_LIBRARY_PATH="$PWD/dinov3_trt11_venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" \
+LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" \
 PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \
-dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_kcf_intervals.py \
+dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_kcf_intervals.py \
   --intervals 30 15 10 5 30 --seconds 20 --warmup-seconds 5 \
   --output dinov3_ws/artifacts/kcf_interval_profile.json
 ```
@@ -90,7 +108,7 @@ dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_kcf_intervals.py \
 
 ```bash
 PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \
-dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_kcf_threads.py \
+dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_kcf_threads.py \
   --image dinov3_ws/artifacts/kcf_roi_camera_sample.png \
   --boxes dinov3_ws/artifacts/kcf_roi_manual_boxes.json \
   --preview --output dinov3_ws/artifacts/kcf_threads_preview.json
@@ -100,7 +118,7 @@ dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_kcf_threads.py \
 相機輸入量測需使用與待測服務一致的 QoS；目前 Orbbec 部署選用 RELIABLE、KEEP_LAST depth=1。沿用上方 ROS/Python 環境執行：
 
 ```bash
-dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_camera_input.py \
+dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_camera_input.py \
   --reliability reliable --queue-depth 1 --seconds 10 \
   --output dinov3_ws/artifacts/camera_reliable_input.json
 ```
@@ -116,7 +134,7 @@ dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_camera_input.py \
 
 ```bash
 PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \
-dinov3_trt11_venv/bin/python dinov3_ws/tests/profile_depth_bbox.py \
+dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_depth_bbox.py \
   --baseline dinov3_ws/artifacts/depth_bbox_optimization_20261018/baseline_depth_bbox.py \
   --samples dinov3_ws/artifacts/depth_bbox_optimization_20261018 \
   --output dinov3_ws/artifacts/depth_bbox_recheck.json

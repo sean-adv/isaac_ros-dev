@@ -74,7 +74,7 @@ class SharedMemoryGroundingDetector:
         env["PYTHONPATH"] = os.pathsep.join(
             p
             for p in env.get("PYTHONPATH", "").split(os.pathsep)
-            if p and not any(v in p for v in ("dinov3_trt11_venv", "trtmc_venv"))
+            if p
         )
         env["OMP_NUM_THREADS"] = env["OPENBLAS_NUM_THREADS"] = "8"
         try:
@@ -217,9 +217,9 @@ def worker_main(fd, detector_factory=None, version=None):
                 import torch
                 from .sam3_trt import Sam3Detector
 
-                if trt.__version__.split(".")[0] != "10":
+                if trt.__version__.split(".")[0] != "11":
                     raise RuntimeError(
-                        f"Expected TensorRT 10, got {trt.__version__}"
+                        f"Expected TensorRT 11, got {trt.__version__}"
                     )
                 detector_factory = Sam3Detector
                 version = dict(tensorrt=trt.__version__, torch=torch.__version__, pid=os.getpid(), python=__import__("sys").executable)

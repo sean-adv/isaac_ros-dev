@@ -1,4 +1,4 @@
-"""ROS input, inference scheduling and result publication with isolated TRT10/TRT11 runtimes."""
+"""ROS input, inference scheduling and result publication with official Torch-TensorRT models."""
 
 import threading
 import time
@@ -26,7 +26,7 @@ from .kcf import KCFProposals, kcf_factory
 from .async_kcf import AsyncKCFProposals, validate_replay_limits
 from .async_bbox3d import AsyncBBox3D, validate_bbox3d_schedule
 from .runtime import (
-    WORKSPACE,
+    CASES_DIR,
     DINO_ENGINE,
     GROUNDING_ENGINE,
     GROUNDING_PYTHON,
@@ -66,7 +66,7 @@ class CaseNode(Node):
     def __init__(self):
         super().__init__("dinov3_cases")
         defaults = dict(
-            cases_dir=str(WORKSPACE / "dinov3_cases_data"),
+            cases_dir=str(CASES_DIR),
             grounding_worker_python=str(GROUNDING_PYTHON),
             grounding_ipc_timeout=60.0,
             grounding_engine_path=str(GROUNDING_ENGINE),
@@ -77,6 +77,7 @@ class CaseNode(Node):
             grounding_detection_interval=1,
             bbox_smoothing_frames=3,
             kcf_roi_padding=0.5,
+            kcf_max_roi_side=0,
             opencv_num_threads=0,
             kcf_replay_max_frames=8,
             kcf_replay_budget_ms=150.0,
@@ -123,7 +124,8 @@ class CaseNode(Node):
             cv2.setNumThreads(opencv_threads)
         validate_replay_limits(self.param("kcf_replay_max_frames"),
                                self.param("kcf_replay_budget_ms"))
-        KCFProposals(roi_padding=self.param("kcf_roi_padding"))
+        KCFProposals(roi_padding=self.param("kcf_roi_padding"),
+                     max_roi_side=self.param("kcf_max_roi_side"))
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
@@ -492,7 +494,7 @@ class CaseNode(Node):
             with self.lock:
                 self.reference_stride = stride
                 self.backend_description = encoder.description
-                self.status = "Loading SAM3 W8A8 model…"
+                self.status = "Loading official SAM3 model…"
             detector = SharedMemoryGroundingDetector(
                 self.param("grounding_engine_path"), encoder.device,
                 python=self.param("grounding_worker_python"),
@@ -517,6 +519,7 @@ class CaseNode(Node):
         proposal_tracker = AsyncKCFProposals(
             wake=self.image_changed.set,
             roi_padding=self.param("kcf_roi_padding"),
+            max_roi_side=self.param("kcf_max_roi_side"),
             max_replay_frames=self.param("kcf_replay_max_frames"),
             replay_budget_ms=self.param("kcf_replay_budget_ms"),
         )
@@ -691,7 +694,7 @@ class CaseNode(Node):
                         ),
                     )
                     self.status = (
-                        f"{('SAM3 W8A8' if proposal_source == 'sam3' else 'KCF')} → "
+                        f"{('SAM3 Torch-TensorRT' if proposal_source == 'sam3' else 'KCF')} → "
                         f"{encoder.description}{'' if recognition_changed else ' (cached)'} | {len(detections)} objects | "
                         f"{recognition['class_count']} classes / {recognition['reference_count']} references | "
                         f"{time.monotonic()-start:.2f}s inference"

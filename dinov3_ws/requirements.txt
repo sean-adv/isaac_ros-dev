@@ -1,26 +1,19 @@
-# 一般執行依賴；在目標 Python / ROS 環境中安裝：
-#   python -m pip install -r dinov3_ws/requirements.txt
-# 先依 GPU / CUDA 平台安裝相容的 torch、torchvision；此處不指定 CUDA wheel 來源。
-# TensorRT、ROS 2、相機驅動與自訂 ROS 訊息需另外安裝／建置，見 BUILD_GUIDE.md。
-
-# 本工作區 ROS / cv_bridge 使用 NumPy 1.x；OpenCV 4.12 起的 NumPy 需求不同。
-numpy>=1.26,<2
+# Official SAM3 + Cat2Real deployment. Thor pins: -c constraints-thor.txt
+# Install CUDA-compatible torch/torchvision wheels first; see BUILD_GUIDE.md.
+numpy>=1.26.4,<2
 opencv-contrib-python>=4.8,<4.12
-open3d
+open3d>=0.20,<0.21
 scipy>=1.11
 Pillow>=10
+Flask>=3,<4
+Werkzeug>=3,<4
 
-# HTTP 服務與圖庫管理
-Flask>=3
-Werkzeug>=3
-
-# DINOv3 影像前處理與 TensorRT 的 CUDA tensor
-# 不固定 torch / torchvision 版本，保留目標平台預裝的相容組合。
-torch
-torchvision
-transformers>=4.56,<6
-
-# SAM3 text encoder and exact prompt tokenizer
-onnxruntime>=1.24,<2
+torch>=2.14,<2.15
+torchvision>=0.29,<0.30
+torch-tensorrt>=2.14,<2.15
+tensorrt>=11.1,<11.2
+tensorrt-cu13>=11.1,<11.2
+transformers>=5.2,<5.3
+huggingface-hub>=1,<2
+safetensors>=0.8,<1
 ftfy>=6,<7
-regex

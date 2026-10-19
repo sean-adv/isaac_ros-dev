@@ -38,3 +38,6 @@ DART/
 copy/
 dinov3_tensorrt/
 sam2_trt_inference/
+/dinov3_ws/.venv/
+/dinov3_ws/data/
+/dinov3_ort_gpu_venv/
