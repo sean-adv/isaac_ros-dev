@@ -24,7 +24,7 @@ dinov3_trt11_venv/bin/python -m pytest -q dinov3_ws/tests
 | `test_trt_backend.py`、`test_build_dinov3.py` | 引擎輸入限制、建置產物與驗證證據 |
 | `test_frame_pool.py`、`test_grounding_ipc.py` | 共享影格生命週期、子程序失敗、逾時與清理 |
 | `test_realtime.py`、`test_display_stream.py` | 最新影格排程、發布與繪圖互不阻塞、主頁單路相機／bbox 自動切換及編碼需求 |
-| `test_depth_bbox.py`、`test_depth_sync.py` | 深度同步、有效座標、3D 框與 ROS 訊息 |
+| `test_cloud_filter.py`、`test_depth_bbox.py`、`test_depth_sync.py` | 深度同步、有效座標、3D 框與 ROS 訊息 |
 | `test_apriltag.py` | Isaac ROS 訊息序列化、座標及空結果發布 |
 | `test_bbox_visualization.py` | 2D/3D 框投影、config 指定單一模式與首頁顯示 |
 | `test_image_manager.py`、`test_camera_capture.py` | 圖庫、去背、相機擷取與 bbox 預覽 |

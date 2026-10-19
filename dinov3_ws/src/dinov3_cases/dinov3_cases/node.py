@@ -37,6 +37,7 @@ from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
 from .apriltag import apriltag_message
 from .depth_sync import matched_inputs
 from .display_stream import has_display_boxes, display_overlay_requested, display_uses_overlay
+from .cloud_filter import CloudFilter
 from .depth_bbox import ProjectionRayCache, attach_bboxes3d, bboxes3d_message
 from .web import create_app
 from .visualization import render_bbox_overlay, render_display_overlay
@@ -97,6 +98,10 @@ class CaseNode(Node):
             bbox3d_depth_band=0.08,
             bbox3d_min_points=80,
             bbox3d_quantile=0.02,
+            bbox3d_min_cloud_coverage=0.15,
+            bbox3d_min_coverage_ratio=0.35,
+            bbox3d_max_depth_jump=0.10,
+            bbox3d_depth_confirmations=3,
             engine_path=str(DINO_ENGINE),
             port=8090,
             host="127.0.0.1",
@@ -159,6 +164,12 @@ class CaseNode(Node):
         if self.param("pose_min_depth") >= self.param("pose_max_depth"):
             raise ValueError("pose_min_depth must be less than pose_max_depth.")
         validate_bbox3d_schedule(self.param("bbox3d_interval"), self.param("bbox3d_max_age"))
+        self.cloud_filter = CloudFilter(
+            min_coverage=self.param("bbox3d_min_cloud_coverage"),
+            min_coverage_ratio=self.param("bbox3d_min_coverage_ratio"),
+            max_depth_jump=self.param("bbox3d_max_depth_jump"),
+            confirmations=self.param("bbox3d_depth_confirmations"),
+        )
         self.root = Path(self.param("cases_dir")).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.bridge = CvBridge()
@@ -294,6 +305,9 @@ class CaseNode(Node):
                 depth_band=self.param("bbox3d_depth_band"),
                 min_points=self.param("bbox3d_min_points"),
                 quantile=self.param("bbox3d_quantile"),
+                cloud_filter=self.cloud_filter,
+                cloud_frame=(depth_msg.header.frame_id, depth_msg.header.stamp.sec,
+                             depth_msg.header.stamp.nanosec),
             )
         except (ValueError, CvBridgeError) as error:
             for item in detections:

@@ -42,7 +42,8 @@ def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     values = dict(pose_min_depth=.1, pose_max_depth=5., pose_enabled=True,
                   pose_sync_tolerance=.05, bbox3d_depth_band=.08, bbox3d_min_points=80, bbox3d_quantile=.02)
     from dinov3_cases.depth_bbox import ProjectionRayCache
-    node = SimpleNamespace(depth_ray_cache=ProjectionRayCache(),
+    from dinov3_cases.cloud_filter import CloudFilter
+    node = SimpleNamespace(cloud_filter=CloudFilter(), depth_ray_cache=ProjectionRayCache(),
                            param=values.__getitem__, bridge=Mock(), stop=threading.Event(),
                            depth_changed=threading.Condition(), depth_frames=deque(),
                            depth_infos=deque([calibration()]))

@@ -52,3 +52,8 @@ dinov3_cases:
     bbox3d_min_points: 80
     # Trim box-local axes at the configured quantiles; 0 uses full bounds.
     bbox3d_quantile: 0.05
+    # Reject sparse/depth-jumping components after Z quantile trimming, before RANSAC.
+    bbox3d_min_cloud_coverage: 0.15  # retained points / clipped bbox pixels
+    bbox3d_min_coverage_ratio: 0.35  # relative to last accepted coverage
+    bbox3d_max_depth_jump: 0.10  # meters
+    bbox3d_depth_confirmations: 3  # distinct depth frames; sparse fragments stay rejected

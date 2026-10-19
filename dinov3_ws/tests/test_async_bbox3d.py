@@ -161,3 +161,53 @@ def test_invalid_interval(interval):
 def test_invalid_max_age(max_age):
     with pytest.raises(ValueError, match='bbox3d_max_age'):
         validate_bbox3d_schedule(5, max_age)
+
+
+def test_cloud_histories_follow_object_identity_and_reset_on_context_change():
+    completed = threading.Event()
+    calls = []
+
+    def measure(items, inputs):
+        for item in items:
+            state = item['_cloud_filter_state']
+            calls.append((item['bbox'][0], state.get('accepted')))
+            state['accepted'] = item['bbox'][0]
+            item['bbox3d_status'] = 'ok'
+
+    pipeline = AsyncBBox3D(measure, interval=1, wake=completed.set)
+    try:
+        submit(pipeline, 1, items=[detection(0), detection(80)])
+        assert completed.wait(1)
+        completed.clear()
+        submit(pipeline, 2, items=[detection(81), detection(1)])
+        assert completed.wait(1)
+        assert calls[-2:] == [(81, 80), (1, 0)]
+        completed.clear()
+        submit(pipeline, 3, items=[detection(2)], context='new')
+        assert completed.wait(1)
+        assert calls[-1] == (2, None)
+        submit(pipeline, 3, items=[], context='new')
+        assert pipeline.cloud_states == {}
+    finally:
+        pipeline.close()
+
+
+def test_running_old_context_cannot_commit_cloud_history():
+    entered, release, completed = threading.Event(), threading.Event(), threading.Event()
+
+    def measure(items, inputs):
+        entered.set()
+        assert release.wait(2)
+        items[0]['_cloud_filter_state']['accepted'] = 'obsolete'
+
+    pipeline = AsyncBBox3D(measure, wake=completed.set)
+    try:
+        submit(pipeline)
+        assert entered.wait(1)
+        submit(pipeline, 2, items=[], context='new')
+        release.set()
+        assert completed.wait(1)
+        assert pipeline.cloud_states == {}
+    finally:
+        release.set()
+        pipeline.close()

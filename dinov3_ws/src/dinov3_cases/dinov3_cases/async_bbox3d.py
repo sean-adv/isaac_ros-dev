@@ -41,6 +41,7 @@ class AsyncBBox3D:
         self.ids = []
         self.pending = None
         self.cache = {}
+        self.cloud_states = {}
         self.version = self.consumed = 0
         self.last_ms = None
         self.camera_info = None
@@ -62,6 +63,7 @@ class AsyncBBox3D:
                 self.frame_count = 0
                 self.previous, self.ids = [], []
                 self.cache.clear()
+                self.cloud_states.clear()
                 self.pending = None
                 self.camera_info = None
             boxes = [list(item["bbox"]) for item in detections]
@@ -78,6 +80,7 @@ class AsyncBBox3D:
             self.previous, self.ids = boxes, ids
             live = set(ids)
             self.cache = {key: value for key, value in self.cache.items() if key in live}
+            self.cloud_states = {key: value for key, value in self.cloud_states.items() if key in live}
             changed = frame_key != self.frame_key
             due = changed and self.frame_count % self.interval == 0
             if changed:
@@ -137,7 +140,9 @@ class AsyncBBox3D:
                 if self.closed:
                     return
                 job, self.pending = self.pending, None
-            epoch, ids, proposals, inputs, source, submitted = job
+                epoch, ids, proposals, inputs, source, submitted = job
+                for identity, item in zip(ids, proposals):
+                    item["_cloud_filter_state"] = copy.deepcopy(self.cloud_states.get(identity, {}))
             started = time.monotonic()
             try:
                 self.measure(proposals, inputs)
@@ -151,6 +156,11 @@ class AsyncBBox3D:
                     live = set(self.ids)
                     for identity, item in zip(ids, proposals):
                         if identity in live:
+                            state = item["_cloud_filter_state"]
+                            if "bbox3d" not in item and not item.get("bbox3d_status", "").startswith(
+                                    "cloud_change_pending:"):
+                                state.pop("pending", None)
+                            self.cloud_states[identity] = state
                             measured = {key: value for key, value in item.items()
                                         if key in ("bbox3d", "bbox3d_status")}
                             self.cache[identity] = (measured, source, submitted)

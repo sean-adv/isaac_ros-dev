@@ -101,7 +101,8 @@ def _rotation_quaternion(rotation):
 
 def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                     depth_band=0.08, min_points=80, quantile=0.02,
-                    depth_scale=1.0, ray_cache=None, plane_threshold=0.005):
+                    depth_scale=1.0, ray_cache=None, plane_threshold=0.005,
+                    cloud_filter=None, cloud_state=None, cloud_frame=None):
     """Segment around the central median Z and bound its visible point cloud.
 
     RANSAC fits the visible plane; its longest rectangle edge sets local X.
@@ -185,11 +186,21 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     if not np.isfinite(points).all():
         raise ValueError("invalid_unprojected_points")
     depth_range = np.quantile(depths, [quantile, 1-quantile])
+    # Depth quantiles are available before orientation. Only these retained
+    # samples reach RANSAC; box-local quantiles below still define the bounds.
+    plane_points = points[(depths >= depth_range[0]) & (depths <= depth_range[1])]
+    if len(plane_points) < min_points:
+        raise ValueError("insufficient_filtered_depth_points")
+    coverage = len(plane_points) / roi.size
+    cloud_depth = float(np.median(plane_points[:, 2]))
+    if cloud_filter is not None:
+        cloud_filter.check(coverage, cloud_depth,
+                           {} if cloud_state is None else cloud_state, cloud_frame)
     rotation = np.eye(3)
     plane_inliers = 0
     try:
         rotation, plane_inliers, orientation_status = _surface_rotation(
-            points, plane_threshold, min_points)
+            plane_points, plane_threshold, min_points)
     except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
         orientation_status = "camera_aligned_fallback:" + str(error)
     origin = points.mean(axis=0)
@@ -218,6 +229,8 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                 nearest_point=points[nearest].tolist(), nearest_depth=float(depths[nearest]),
                 nearest_pixel=pixels[nearest].astype(int).tolist(),
                 seed_depth=seed_depth, point_count=len(points),
+                plane_input_count=len(plane_points), cloud_coverage=float(coverage),
+                cloud_depth=cloud_depth,
                 foreground_depth_band=float(depth_band), quantile=float(quantile),
                 depth_range=depth_range.tolist(),
                 method=("central_depth_component_mean_z" if orientation_status.startswith(
@@ -230,7 +243,8 @@ def attach_bboxes3d(items, depth, info, **options):
         item.pop("pose_status", None)
         item.pop("bbox3d", None)
         try:
-            item["bbox3d"] = estimate_bbox3d(depth, info, item["bbox"], **options)
+            item["bbox3d"] = estimate_bbox3d(
+                depth, info, item["bbox"], cloud_state=item.get("_cloud_filter_state"), **options)
             item["bbox3d_status"] = "ok"
         except (ValueError, cv2.error) as error:
             item["bbox3d_status"] = str(error)
