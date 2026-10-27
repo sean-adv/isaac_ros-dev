@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import threading
 
-import numpy as np
 import pytest
 
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
@@ -36,7 +35,7 @@ def test_serialized_pixel_bounds_and_metric_pose_preserve_headers():
     assert detection.pose.header == header
     pose = detection.pose.pose.pose
     assert (pose.position.x, pose.position.y) == (.1, -.2)
-    assert pose.position.z == pytest.approx(np.linalg.norm([.1, -.2, 1.3]))
+    assert pose.position.z == pytest.approx(1.3)
     assert (pose.orientation.x, pose.orientation.y, pose.orientation.z,
             pose.orientation.w) == (0., 0., 0., 1.)
     assert list(detection.pose.pose.covariance) == [0.] * 36
@@ -44,12 +43,12 @@ def test_serialized_pixel_bounds_and_metric_pose_preserve_headers():
 
 
 @pytest.mark.parametrize("position", [[0., 0., 1.3], [.3, -.4, 1.2]])
-def test_topic_z_is_radial_distance_without_modifying_source(position):
+def test_topic_z_is_camera_depth_without_modifying_source(position):
     item = object_detection(bbox3d=dict(position=position.copy()))
     detection, = apriltag_message([item], Header()).detections
     output = detection.pose.pose.pose.position
     assert (output.x, output.y) == tuple(position[:2])
-    assert output.z == pytest.approx(np.linalg.norm(position))
+    assert output.z == pytest.approx(position[2])
     assert item["bbox3d"]["position"] == position
 
 

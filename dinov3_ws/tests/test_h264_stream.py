@@ -98,6 +98,8 @@ def render_node(audience=True, boxes=True, source='camera'):
         stop=stop, lock=threading.Lock(), generation=0, source=source,
         render_changed=threading.Event(), camera_frame=camera, camera_seq=2,
         pending_render=(frame, detections, camera.header, 0, 2, None, time.monotonic()),
+        pending_annotated_image=None, annotated_image_changed=threading.Event(),
+        annotated_image_pub=Mock(get_subscription_count=Mock(return_value=0)),
         bbox_visualization_mode='2d', video_hub=hub, video_encoder=H264Encoder('libx264'),
         param=lambda _: 30, bridge=bridge, performance={}, get_logger=lambda: Mock(),
     )
@@ -123,6 +125,83 @@ def test_draw_and_encode_once_for_all_consumers_and_preserve_header(audience, bo
         assert (decoded.width, decoded.height) == (960, 540)
         assert node.performance['video_encoder'] == 'libx264'
     node.get_logger().error.assert_not_called()
+
+
+@pytest.mark.parametrize('audience', [0, 1])
+def test_rviz_raw_image_without_requiring_encoded_viewers(audience):
+    node, frame, readers = render_node(audience)
+    node.annotated_image_pub.get_subscription_count.return_value = 1
+    with patch.object(node.video_encoder, 'encode', wraps=node.video_encoder.encode) as encode:
+        CaseNode.run_rendering(node)
+    node.annotated_image_pub.publish.assert_not_called()
+    node.stop.is_set.side_effect = [False, True]
+    CaseNode.run_image_publications(node)
+    node.annotated_image_pub.publish.assert_called_once()
+    message = node.annotated_image_pub.publish.call_args.args[0]
+    assert message.encoding == 'bgr8'
+    assert (message.width, message.height) == (960, 540)
+    assert message.header == node.camera_frame.header
+    assert encode.call_count == int(audience > 0)
+    frame.release.assert_called_once()
+    node.get_logger().error.assert_not_called()
+
+
+def test_slow_rviz_does_not_hold_state_lock_and_next_publication_uses_latest_frame():
+    node, _, _ = render_node(audience=False)
+    node.stop = threading.Event()
+    node.annotated_image_pub.get_subscription_count.return_value = 1
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+    received = []
+
+    def job(seq):
+        header = Header()
+        header.stamp.sec = seq
+        return (np.zeros((2, 2, 3), np.uint8), header, 0)
+
+    def publish(message):
+        received.append(message.header.stamp.sec)
+        if len(received) == 1:
+            entered.set()
+            assert release.wait(3)
+        else:
+            node.stop.set()
+            done.set()
+
+    node.annotated_image_pub.publish.side_effect = publish
+    node.pending_annotated_image = job(1)
+    node.annotated_image_changed.set()
+    worker = threading.Thread(target=CaseNode.run_image_publications, args=(node,))
+    worker.start()
+    try:
+        assert entered.wait(3)
+        assert node.lock.acquire(timeout=1), "DDS publication must not hold the state lock"
+        try:
+            node.pending_annotated_image = job(2)
+            node.pending_annotated_image = job(3)
+            node.annotated_image_changed.set()
+        finally:
+            node.lock.release()
+        release.set()
+        assert done.wait(3)
+        assert received == [1, 3]
+    finally:
+        release.set()
+        node.stop.set()
+        node.annotated_image_changed.set()
+        worker.join(3)
+    assert not worker.is_alive()
+
+
+@pytest.mark.parametrize('generation,readers', [(1, 1), (0, 0)])
+def test_raw_image_worker_discards_old_source_and_unsubscribed_frames(generation, readers):
+    node, _, _ = render_node(audience=False)
+    node.generation = generation
+    node.annotated_image_pub.get_subscription_count.return_value = readers
+    node.pending_annotated_image = (np.zeros((2, 2, 3), np.uint8), Header(), 0)
+    node.annotated_image_changed.set()
+    CaseNode.run_image_publications(node)
+    node.annotated_image_pub.publish.assert_not_called()
+    assert node.pending_annotated_image is None
 
 
 def test_old_generation_render_is_released_and_not_sent():

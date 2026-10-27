@@ -146,9 +146,17 @@ WebRTC 目前使用 host ICE candidates，適用本機／可直連區網；跨 N
 最多同時 8 個網頁觀看者。播放器每 3 秒續租，連線中斷或分頁強制關閉後，
 伺服器會在約 15–17 秒內回收未續租的已連線觀看者；協商未完成的連線最多保留 30 秒。狀態 API 的 `video_error` 與 `performance.video_*` 提供編碼診斷。
 
+RViz2 可新增 **Image** display，選擇 `/medicine_recognition/image_annotated`，
+Transport Hint 設為 `raw`、Reliability 設為 `Reliable`。
+此 topic 由 `annotated_image_topic` 設定，發布編碼前的 960×540 `sensor_msgs/msg/Image`（`bgr8`），
+保留來源 header，與網頁共用同一份疊圖及 `video_fps` 上限。
+僅有 RViz2 訂閱時也會繪圖及發布，不啟動 H.264 編碼。
+原始影像由獨立 worker 發布，待傳佇列只保留最新一張；DDS 傳送期間不持有共用鎖，
+避免 RViz2 接收變慢拖住繪圖、追蹤與網頁編碼。RViz2 Image 的 Queue Size 建議設為 1，
+並將全域 Frame Rate 設為 30。實際更新率仍受相機、追蹤與傳輸速度限制。
+
 舊 `/view.mjpg`、`/camera.mjpg`、`/overlay.mjpg`、`/overlay.jpg`，
-以及 `/dinov3/heatmap/overlay`、`/medicine_recognition/debug_image` 與原始解析度
-`/medicine_recognition/image_annotated` 影像輸出已移除。
+以及 `/dinov3/heatmap/overlay`、`/medicine_recognition/debug_image` 影像輸出已移除。
 物件診斷與圖庫的靜態圖片仍保留。結構化結果維持 `/medicine_recognition/detections`、
 `/medicine_recognition/detections_3d` 與 AprilTag topic。
 

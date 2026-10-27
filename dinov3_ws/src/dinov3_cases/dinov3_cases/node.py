@@ -80,6 +80,7 @@ class CaseNode(Node):
             recognition_margin=0.05,
             image_topic="/camera/color/image_raw",
             h264_topic="/medicine_recognition/image_annotated/h264",
+            annotated_image_topic="/medicine_recognition/image_annotated",
             tag_topic="/tag_detections",
             pose_enabled=True,
             depth_topic="/camera/depth/image_raw",
@@ -180,6 +181,8 @@ class CaseNode(Node):
         self.performance = {}
         self.frame_pool = SharedFramePool(slots=3)
         self.pending_render = None
+        self.pending_annotated_image = None
+        self.annotated_image_changed = threading.Event()
         self.render_changed = threading.Event()
         self.pending_publication = None
         self.publish_changed = threading.Event()
@@ -213,6 +216,11 @@ class CaseNode(Node):
         self.h264_pub = self.create_publisher(
             CompressedImage, self.param("h264_topic"), 30
         )
+        self.annotated_image_pub = self.create_publisher(
+            ImageMsg, self.param("annotated_image_topic"),
+            QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
+                       reliability=ReliabilityPolicy.RELIABLE),
+        )
         self.video_hub = PacketHub(wake=self.render_changed.set)
         self.webrtc = WebRTCVideo(self.video_hub)
         image_qos = QoSProfile(
@@ -230,6 +238,8 @@ class CaseNode(Node):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.video_publisher_worker = threading.Thread(target=self.run_video_publications, daemon=True)
         self.video_publisher_worker.start()
+        self.image_publisher_worker = threading.Thread(target=self.run_image_publications, daemon=True)
+        self.image_publisher_worker.start()
         self.publisher_worker = threading.Thread(target=self.run_publications, daemon=True)
         self.publisher_worker.start()
         self.renderer_worker = threading.Thread(target=self.run_rendering, daemon=True)
@@ -374,7 +384,9 @@ class CaseNode(Node):
                     generation, source = self.generation, self.source
                     camera, camera_seq = self.camera_frame, self.camera_seq
                 try:
-                    if not self.video_hub.has_readers:
+                    encoded_readers = self.video_hub.has_readers
+                    image_readers = self.annotated_image_pub.get_subscription_count() > 0
+                    if not encoded_readers and not image_readers:
                         self.video_encoder.reset()
                         cached, last_key = None, None
                         continue
@@ -418,6 +430,17 @@ class CaseNode(Node):
                         pixels = render_display_overlay(rgb, [], mode=self.bbox_visualization_mode)
                     if header is None:
                         header = Header(stamp=self.get_clock().now().to_msg())
+                    if image_readers:
+                        with self.lock:
+                            if generation != self.generation:
+                                continue
+                            # Replace queued frames instead of waiting for DDS in the renderer.
+                            self.pending_annotated_image = (pixels, header, generation)
+                            self.annotated_image_changed.set()
+                    if not encoded_readers:
+                        self.video_encoder.reset()
+                        last_encoded, last_key = time.monotonic(), key
+                        continue
                     # Clear before encode so requests arriving during encode survive.
                     self.video_hub.keyframe_requested.clear()
                     encode_start = time.monotonic()
@@ -453,6 +476,30 @@ class CaseNode(Node):
                         job[0].release()
         finally:
             self.video_encoder.reset()
+
+    def run_image_publications(self):
+        """Publish only the newest raw overlay without blocking rendering or tracking."""
+        while not self.stop.is_set():
+            self.annotated_image_changed.wait(0.2)
+            self.annotated_image_changed.clear()
+            with self.lock:
+                job, self.pending_annotated_image = self.pending_annotated_image, None
+                generation = self.generation
+            if job is None:
+                continue
+            pixels, header, gen = job
+            if gen != generation or not self.annotated_image_pub.get_subscription_count():
+                continue
+            try:
+                message = self.bridge.cv2_to_imgmsg(pixels, encoding="bgr8")
+                message.header = header
+                with self.lock:
+                    if gen != self.generation:
+                        continue
+                # DDS may wait for a slow reader; never hold the shared state lock here.
+                self.annotated_image_pub.publish(message)
+            except Exception as error:
+                self.get_logger().error(f"Raw image publication failed: {error}")
 
     def run_video_publications(self):
         """DDS cannot block the encoder or the WebRTC viewers."""
@@ -501,6 +548,8 @@ class CaseNode(Node):
         self.video_hub.close()
         self.webrtc.close()
         self.render_changed.set()
+        self.annotated_image_changed.set()
+        self.image_publisher_worker.join(timeout=3)
         self.renderer_worker.join(timeout=3)
         self.video_publisher_worker.join(timeout=3)
         with self.lock:
