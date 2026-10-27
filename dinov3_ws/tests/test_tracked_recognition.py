@@ -178,7 +178,7 @@ def test_async_handoff_triggers_dino_but_background_submission_does_not(setup):
         if result is None:
             return None
         proposals, source = result
-        # The production worker binds the cache to this active set object.
+        # Exercise legacy cache consumers bound to the merged tracker set.
         detections, _, _ = run(setup, proposals, (pipeline.active, 'camera', None))
         return detections, source
 
@@ -194,10 +194,11 @@ def test_async_handoff_triggers_dino_but_background_submission_does_not(setup):
         pipeline.thread.join(3)
         assert not pipeline.thread.is_alive()
         detections, source = step(3)
-        assert source == 'sam3' and detections[0]['label'] == 'blue'
-        assert setup[1].calls == 2
+        assert source == 'sam3' and [item['label'] for item in detections] == ['blue', 'red']
+        # The new detection is a separate object; the valid red KCF survives.
+        assert setup[1].calls == 3
         step(4)
-        assert setup[1].calls == 2
+        assert setup[1].calls == 3
     finally:
         pipeline.close()
 
@@ -255,7 +256,10 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     scheduler.update.side_effect = proposal_update
     parameters = dict(engine_path='unused', grounding_engine_path='unused',
                       grounding_worker_python='unused', grounding_ipc_timeout=1.,
-                      kcf_roi_padding=.5, kcf_replay_max_frames=8, kcf_replay_budget_ms=150.,
+                      kcf_roi_padding=.5, kcf_max_roi_side=0,
+                      kcf_replay_max_frames=8, kcf_replay_budget_ms=150.,
+                      kcf_max_missed_detections=3,
+                      kcf_max_unconfirmed_seconds=5.,
                       grounding_nms_iou=1., grounding_max_detections=20,
                       grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                       grounding_min_bbox_area=0, pose_enabled=False)
@@ -271,23 +275,20 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
         object_debug_revision=0, object_debug_snapshot=None,
         render_changed=threading.Event(), publish_changed=threading.Event(),
         param=parameters.__getitem__, get_logger=lambda: logger,
-        jpeg=b'previous image', clear_object_debug=Mock(),
+        video_at=123., clear_object_debug=Mock(),
     )
     observations = []
 
     def ticks():
         from dinov3_cases.visualization import render_display_overlay
-        import cv2
         for seq, positions, _, _, _, _ in rows:
             node.frame_seq = seq
             yield
-            assert node.jpeg == b'previous image'
+            assert node.video_at == 123.
             assert node.pending_publication[0] is node.detections
             # Every result, including no surviving boxes, still queues an image.
             frame, items, *_ = node.pending_render
             overlay = render_display_overlay(frame.pixels, items, mode='2d')
-            ok, jpeg = cv2.imencode('.jpg', overlay)
-            assert ok and jpeg.size > 0
             assert overlay.shape == (540, 960, 3)
             observations.append((node.object_debug_revision, node.object_debug_snapshot,
                                  [item['label'] for item in node.detections], node.performance.copy()))

@@ -70,9 +70,10 @@
 </p>
 <p id="bbox-help" role="status">{% if bbox_mode == '3d' %}Showing projected 3D bounding box wireframes. Boxes require valid synchronized depth; objects without valid 3D data have no box.{% else %}Showing original 2D bounding boxes.{% endif %}</p>
 <p><small>Shows bounding boxes when available; otherwise shows the live camera.</small></p>
-<img id="overlay" src="/view.mjpg" alt="Live camera with available bounding boxes">
+<video id="overlay" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
+<p data-video-status role="status">Connecting video…</p>
 <p>
-<small>det is the last SAM3 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects.</small>
+<small>det is the last SAM3 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects. Track status: confirmed has SAM3 support; coasting temporarily tolerates missed detections. New and established tracks use the same removal limits. Stale tracks are removed even if KCF continues tracking.</small>
 </p>
 <div id="recognition-list">
 </div>
@@ -113,6 +114,7 @@
 <div id="object-gallery" class="reference-gallery">
 </div>
 </section>
+<script src="/static/video.js"></script>
 <script src="/static/cases.js">
 </script>
 </body>

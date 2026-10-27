@@ -189,7 +189,7 @@ class KCFProposals:
             # Retry detection if the detector raises before this frame commits.
             self.retry_detection = True
             proposals = [dict(p, bbox=list(p["bbox"]), bbox_source="sam3") for p in detect()]
-            trackers, rois = [], []
+            trackers, rois, initialized_proposals = [], [], []
             failed_init = False
             if interval > 1:
                 factory = self.factory or kcf_factory()
@@ -208,10 +208,15 @@ class KCFProposals:
                     # Modern OpenCV returns None; the legacy API returns bool.
                     if ok is not None and not ok:
                         failed_init = True
+                        if retain_valid_tracks:
+                            continue
                     trackers.append(tracker)
                     rois.append(roi)
+                    initialized_proposals.append(proposal)
+                if retain_valid_tracks:
+                    proposals = initialized_proposals
             self.trackers, self.rois = trackers, rois
-            self.retry_detection = failed_init
+            self.retry_detection = failed_init and (not retain_valid_tracks or not proposals)
             self.since_detection = 0
             self.source = "sam3"
         else:

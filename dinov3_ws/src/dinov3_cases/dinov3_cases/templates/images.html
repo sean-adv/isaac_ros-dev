@@ -38,7 +38,8 @@
 </form>
 <p id="camera-label-status" class="muted">No label selected</p>
 <label>SAM3 prompt <input id="camera-prompt" type="text" placeholder="Enter an object description" autocomplete="off"></label>
-<div class="imagebox"><img id="camera-live" src="/camera.mjpg" alt="Live camera feed"></div>
+<div class="imagebox"><video id="camera-live" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
+<p data-video-status role="status">Connecting video…</p></div>
 <div class="toolbar"><button id="camera-bbox-preview">Preview Bounding Boxes</button><span id="camera-bbox-status" role="status">Enter a prompt to preview.</span></div>
 <div class="imagebox"><img id="camera-bbox-image" hidden alt="SAM3 bounding box preview"></div>
 <p class="muted">The preview shows the frame captured when you click the button. Saving captures a new frame.</p>
@@ -113,6 +114,7 @@
 </section>
 </div>
 </main>
+<script src="/static/video.js"></script>
 <script src="/static/images.js">
 </script>
 </body>

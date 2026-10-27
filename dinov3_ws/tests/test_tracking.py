@@ -2,7 +2,7 @@
 
 import pytest
 
-from dinov3_cases.tracking import BBoxSmoother
+from dinov3_cases.tracking import BBoxSmoother, TrackIdentities, TrackLifecycle
 
 
 def test_bbox_smoothing_averages_last_three_raw_frames():
@@ -82,6 +82,121 @@ def test_bbox_smoothing_rejects_invalid_window(window):
 
 def box(x=0, label="medicine"):
     return dict(bbox=[x, 0, x + 100, 100], label=label)
+
+
+def test_new_track_uses_same_miss_allowance_as_established_tracks():
+    lifecycle = TrackLifecycle()
+    item = dict(box(), track_id=1)
+    first, _ = lifecycle.update([item], {1}, now=0)
+    assert first[0]['track_status'] == 'confirmed'
+    # KCF callbacks cannot count as supporting detections.
+    for _ in range(10):
+        tracked, _ = lifecycle.update(first, now=.5)
+        assert tracked[0]['sam3_hits'] == 1
+    for now in (1, 2):
+        coasting, retired = lifecycle.update(first, set(), now=now)
+        assert not retired and coasting[0]['sam3_misses'] == now
+        assert coasting[0]['track_status'] == 'coasting'
+    assert lifecycle.update(first, set(), now=3) == ([], {1})
+
+
+def test_confirmed_track_tolerates_isolated_miss_then_retires_after_three():
+    lifecycle = TrackLifecycle()
+    item = dict(box(), track_id=1)
+    lifecycle.update([item], {1}, now=0)
+    confirmed, _ = lifecycle.update([item], {1}, now=1)
+    assert confirmed[0]['track_status'] == 'confirmed'
+    coasting, _ = lifecycle.update([item], set(), now=2)
+    assert coasting[0]['track_status'] == 'coasting'
+    assert coasting[0]['sam3_misses'] == 1
+    # Repeated camera frames do not increment misses or renew detector age.
+    for _ in range(10):
+        tracked, _ = lifecycle.update(coasting, now=2.5)
+        assert tracked[0]['sam3_misses'] == 1
+        assert tracked[0]['sam3_age_seconds'] == 1.5
+    restored, _ = lifecycle.update([item], {1}, now=3)
+    assert restored[0]['sam3_misses'] == 0
+    assert restored[0]['track_status'] == 'confirmed'
+    assert lifecycle.update([item], set(), now=4)[0]
+    assert lifecycle.update([item], set(), now=5)[0]
+    assert lifecycle.update([item], set(), now=6) == ([], {1})
+
+
+def test_detector_timeout_retires_track_even_without_new_detector_results():
+    lifecycle = TrackLifecycle()
+    item = dict(box(), track_id=1)
+    lifecycle.update([item], {1}, detected_at=0, now=.4)
+    assert lifecycle.update([item], now=4.99)[0]
+    assert lifecycle.update([item], now=5) == ([], {1})
+
+
+def test_stale_detection_result_cannot_start_a_fresh_track_lifetime():
+    lifecycle = TrackLifecycle()
+    assert lifecycle.update([dict(box(), track_id=1)], {1}, detected_at=0, now=6) == ([], {1})
+
+
+def test_track_lifetime_is_independent_for_each_object_and_unknown_is_allowed():
+    lifecycle = TrackLifecycle()
+    items = [dict(box(), track_id=1), dict(box(300, 'unknown'), track_id=2)]
+    lifecycle.update(items, {1, 2}, now=0)
+    lifecycle.update(items, {1, 2}, now=.5)
+    lifecycle.update(items, {2}, now=1)
+    lifecycle.update(items, {2}, now=2)
+    remaining, retired = lifecycle.update(items, {2}, now=3)
+    assert retired == {1}
+    assert [item['track_id'] for item in remaining] == [2]
+    assert remaining[0]['label'] == 'unknown'
+    assert remaining[0]['sam3_misses'] == 0
+
+
+@pytest.mark.parametrize('options', [
+    {'max_missed_detections': True}, {'max_missed_detections': -1},
+    {'max_missed_detections': 0}, {'max_missed_detections': 1.5},
+    {'max_unconfirmed_seconds': False}, {'max_unconfirmed_seconds': 0},
+    {'max_unconfirmed_seconds': float('inf')}, {'max_unconfirmed_seconds': float('nan')},
+])
+def test_invalid_lifecycle_limits_are_rejected(options):
+    with pytest.raises(ValueError, match='kcf_'):
+        TrackLifecycle(**options)
+
+
+def test_lost_identity_expires_without_displaying_stale_boxes(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr('dinov3_cases.tracking.time.monotonic', lambda: now[0])
+    identities = TrackIdentities()
+    first, _ = identities.assign([box()], [])
+    now[0] = .5
+    assert identities.assign([], [])[0] == []
+    recovered, _ = identities.assign([box(10)], [])
+    assert recovered[0]['track_id'] == first[0]['track_id']
+    now[0] = 2.0
+    fresh, _ = identities.assign([box(10)], [])
+    assert fresh[0]['track_id'] != first[0]['track_id']
+
+
+def test_live_identity_has_priority_over_nearby_lost_identity():
+    identities = TrackIdentities()
+    first, _ = identities.assign([box(0), box(40)], [])
+    # A missing neighbor is closer to the detector correction, but the live
+    # track must get first refusal rather than having its ID stolen.
+    result, _ = identities.assign([box(5)], [first[1]])
+    assert result[0]['track_id'] == first[1]['track_id']
+
+
+def test_smoothing_uses_object_id_and_does_not_inherit_neighbor_history():
+    smoother = BBoxSmoother()
+    smoother.update([dict(box(0), track_id=1), dict(box(300), track_id=2)], 1, 'camera')
+    items = smoother.update([dict(box(310), track_id=2), dict(box(10), track_id=3)],
+                            2, 'camera')
+    assert [item['bbox'][0] for item in items] == [305, 10]
+
+
+def test_same_frame_identity_change_replaces_smoothing_history():
+    smoother = BBoxSmoother()
+    smoother.update([dict(box(0), track_id=1)], 1, 'camera')
+    smoother.update([dict(box(10), track_id=1)], 2, 'camera')
+    items = smoother.update([dict(box(10), track_id=2)], 2, 'camera')
+    assert items[0]['bbox'][0] == 10
 
 
 def test_ros_2d_and_3d_use_same_tracking_id():

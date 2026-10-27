@@ -19,12 +19,16 @@ dinov3_cases:
     # Time limit is checked between KCF updates. Restart to apply.
     kcf_replay_max_frames: 8
     kcf_replay_budget_ms: 500.0
+    # All tracks tolerate isolated misses, then retire after N misses.
+    # KCF success does not reset these limits. Config only; restart to apply.
+    kcf_max_missed_detections: 2
+    kcf_max_unconfirmed_seconds: 3.0
     # OpenCV internal pool in the main process; independent workers remain concurrent.
     # 0 preserves the library default. Restart to apply.
     opencv_num_threads: 1
     # Moving average over raw SAM3/KCF boxes per object; 1 disables smoothing.
     # Counts unique processed frames. Config only; restart after changes.
-    bbox_smoothing_frames: 5
+    bbox_smoothing_frames: 1
     # Original-image bbox after clipping/rounding; pixels / pixels squared.
     # 0 disables each threshold. All enabled thresholds must be met (>=).
     grounding_min_bbox_width: 0
@@ -34,9 +38,11 @@ dinov3_cases:
     recognition_margin: 0.05
     # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
-    # Preview and the configured overlay JPEG have fixed 960x540 output.
-    jpeg_quality: 70
-    # Select one overlay for browser and ROS debug images: 2d or 3d. Restart to apply.
+    # One 960x540 overlay + H.264 encode shared by WebRTC and ROS. Restart to apply.
+    video_fps: 30
+    h264_bitrate: 2000000
+    h264_encoder: auto  # NVENC first; libx264 fallback. Can explicitly select either.
+    h264_topic: /medicine_recognition/image_annotated/h264
     bbox_visualization_mode: "3d"
     # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
     # Legacy pose_* names now configure corner/nearest-depth 3D boxes.

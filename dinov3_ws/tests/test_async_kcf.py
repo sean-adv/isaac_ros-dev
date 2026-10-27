@@ -52,6 +52,13 @@ def seed(pipeline, interval=2):
     assert update(pipeline, 0, interval=interval)[1] == "sam3"
 
 
+def refresh(pipeline, n, detector=detect, interval=100):
+    pipeline.force_detection = True
+    update(pipeline, n, detector, interval=interval)
+    finish(pipeline)
+    return update(pipeline, n, detector, interval=interval)
+
+
 @pytest.fixture
 def candidate_init():
     gate = SimpleNamespace(armed=False, entered=threading.Event(), release=threading.Event())
@@ -346,15 +353,232 @@ def test_failed_background_replay_is_discarded(candidate_init):
         pipeline.close()
 
 
-def test_empty_detection_clears_active_tracks_on_handoff():
+def test_empty_detection_preserves_valid_active_tracks_on_handoff():
     pipeline = AsyncKCFProposals(MovingTracker)
     try:
         seed(pipeline)
+        refresh(pipeline, 0, interval=2)  # Confirm with a second SAM3 observation.
+        original_tracker = pipeline.active.trackers[0]
+        identity = pipeline.active.proposals[0]['track_id']
         update(pipeline, 1)
         update(pipeline, 2, lambda _: ([], {}))
         finish(pipeline)
-        assert update(pipeline, 2) == ([], "sam3")
-        assert pipeline.active.trackers == []
+        items, source = update(pipeline, 2)
+        assert source == 'sam3' and items[0]['bbox'] == [12, 12, 32, 32]
+        assert items[0]['track_id'] == identity
+        assert pipeline.active.trackers == [original_tracker]
+        assert update(pipeline, 3)[0][0]['bbox'] == [13, 12, 33, 32]
+    finally:
+        pipeline.close()
+
+
+def test_initial_bad_bbox_is_removed_even_when_kcf_always_succeeds():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+    try:
+        seed(pipeline, interval=100)
+        identity = pipeline.active.proposals[0]['track_id']
+        for frame in (1, 2):
+            items, _ = refresh(pipeline, frame, lambda _: ([], {}))
+            assert items[0]['track_id'] == identity
+            assert items[0]['sam3_misses'] == frame
+        items, _ = refresh(pipeline, 3, lambda _: ([], {}))
+        assert items == []
+        assert pipeline.active.proposals == pipeline.active.trackers == pipeline.active.rois == []
+        assert identity not in pipeline.identities.recent
+    finally:
+        pipeline.close()
+
+
+def test_disappeared_object_retires_without_affecting_confirmed_neighbor():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+
+    def two(image):
+        n = int(image[0, 0, 0])
+        return proposals(n) + [dict(proposals(n)[0], bbox=[50+n, 12, 70+n, 32])], {}
+
+    def right_only(image):
+        return two(image)[0][1:], {}
+
+    try:
+        update(pipeline, 0, two, interval=100)
+        finish(pipeline)
+        update(pipeline, 0, two, interval=100)
+        before, _ = refresh(pipeline, 0, two)
+        for frame in (1, 2):
+            items, _ = refresh(pipeline, frame, right_only)
+            by_id = {item['track_id']: item for item in items}
+            assert set(by_id) == {item['track_id'] for item in before}
+            assert by_id[before[0]['track_id']]['sam3_misses'] == frame
+            assert by_id[before[1]['track_id']]['sam3_misses'] == 0
+        items, _ = refresh(pipeline, 3, right_only)
+        assert [item['track_id'] for item in items] == [before[1]['track_id']]
+        assert len(pipeline.active.trackers) == len(pipeline.active.rois) == 1
+        assert update(pipeline, 4, right_only, interval=100)[0][0]['bbox'] == [54, 12, 74, 32]
+        assert before[0]['track_id'] not in pipeline.identities.recent
+    finally:
+        pipeline.close()
+
+
+def test_sam3_timeout_removes_successful_kcf_while_job_is_pending(monkeypatch):
+    import dinov3_cases.async_kcf as async_kcf
+    clock = [0.0]
+    monkeypatch.setattr(async_kcf, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(image):
+        entered.set()
+        assert release.wait(3)
+        return detect(image)
+
+    try:
+        seed(pipeline, interval=100)
+        pipeline.force_detection = True
+        update(pipeline, 1, slow, interval=100)
+        assert entered.wait(2)
+        clock[0] = 5.0
+        assert update(pipeline, 2, slow, interval=100)[0] == []
+        assert pipeline.active.trackers == pipeline.active.rois == []
+        release.set()
+        finish(pipeline)
+        # A delayed result's seed time, not completion time, bounds its life.
+        assert update(pipeline, 2, slow, interval=100)[0] == []
+    finally:
+        release.set()
+        pipeline.close()
+
+
+def test_partial_refresh_updates_only_matched_object_and_keeps_other_tracker():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+
+    def initial(image):
+        return [dict(proposals()[0], label='left'),
+                dict(proposals()[0], bbox=[50, 12, 70, 32], label='right')], {}
+
+    try:
+        update(pipeline, 0, initial, interval=100)
+        finish(pipeline)
+        update(pipeline, 0, initial, interval=100)
+        before, _ = refresh(pipeline, 0, initial)
+        old_trackers = pipeline.active.trackers[:]
+        pipeline.force_detection = True
+        update(pipeline, 1, lambda _: ([dict(proposals(2)[0], label='corrected')], {}),
+               interval=100)
+        finish(pipeline)
+        items, source = update(pipeline, 2, interval=100)
+        assert source == 'sam3'
+        assert [item['track_id'] for item in items] == [item['track_id'] for item in before]
+        assert [item['label'] for item in items] == ['corrected', 'right']
+        # Candidate starts at x=12 on frame 1, then catches up to x=13.
+        assert [item['bbox'][0] for item in items] == [13, 52]
+        assert pipeline.active.trackers[0] is not old_trackers[0]
+        assert pipeline.active.trackers[1] is old_trackers[1]
+        assert [item['bbox'][0] for item in update(pipeline, 3, interval=100)[0]] == [14, 53]
+    finally:
+        pipeline.close()
+
+
+def test_reordered_refresh_keeps_ids_and_allocates_new_object_id():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+    boxes = [dict(proposals()[0], bbox=[x, 12, x+10, 22]) for x in (10, 50)]
+    try:
+        update(pipeline, 0, lambda _: (boxes, {}), interval=100)
+        finish(pipeline)
+        before, _ = update(pipeline, 0, interval=100)
+        pipeline.force_detection = True
+        new_boxes = [dict(boxes[1], bbox=[51, 12, 61, 22]),
+                     dict(boxes[0], bbox=[11, 12, 21, 22]),
+                     dict(boxes[0], bbox=[80, 12, 90, 22])]
+        update(pipeline, 1, lambda _: (new_boxes, {}), interval=100)
+        finish(pipeline)
+        items, _ = update(pipeline, 1, interval=100)
+        assert [item['track_id'] for item in items[:2]] == [
+            before[1]['track_id'], before[0]['track_id']]
+        assert items[2]['track_id'] not in {item['track_id'] for item in before}
+        assert len({item['track_id'] for item in items}) == 3
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize('failure', ['init', 'replay'])
+def test_one_bad_candidate_does_not_discard_other_objects(failure):
+    entered, release = threading.Event(), threading.Event()
+
+    class PartialFailure(MovingTracker):
+        def init(self, image, box):
+            super().init(image, box)
+            if (failure == 'init' and threading.current_thread().name == 'sam3-kcf-replay'
+                    and self.previous == 1 and box[0] < 40):
+                return False
+
+        def update(self, image):
+            if (failure == 'replay' and threading.current_thread().name == 'sam3-kcf-replay'
+                    and self.box[0] < 40):
+                return False, (0, 0, 0, 0)
+            return super().update(image)
+
+    pipeline = AsyncKCFProposals(PartialFailure, roi_padding=None)
+
+    def two(image):
+        n = int(image[0, 0, 0])
+        return proposals(n) + [dict(proposals(n)[0], bbox=[50+n, 12, 70+n, 32])], {}
+
+    def slow(image):
+        entered.set()
+        assert release.wait(3)
+        return two(image)
+
+    try:
+        update(pipeline, 0, two, interval=100)
+        finish(pipeline)
+        update(pipeline, 0, two, interval=100)
+        before, _ = refresh(pipeline, 0, two)
+        old_trackers = pipeline.active.trackers[:]
+        pipeline.force_detection = True
+        update(pipeline, 1, slow, interval=100)
+        assert entered.wait(2)
+        update(pipeline, 2, slow, interval=100)
+        release.set()
+        finish(pipeline)
+        assert pipeline.ready is not None
+        items, _ = update(pipeline, 2, interval=100)
+        by_id = {item['track_id']: (item, tracker)
+                 for item, tracker in zip(items, pipeline.active.trackers)}
+        assert set(by_id) == {item['track_id'] for item in before}
+        assert by_id[before[0]['track_id']][1] is old_trackers[0]
+        assert by_id[before[1]['track_id']][1] is not old_trackers[1]
+        assert sorted(item['bbox'][0] for item in items) == [12, 52]
+    finally:
+        release.set()
+        pipeline.close()
+
+
+def test_lost_object_recovers_same_id_without_dropping_survivor():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
+    boxes = proposals() + [dict(proposals()[0], bbox=[50, 12, 70, 32])]
+    try:
+        update(pipeline, 0, lambda _: (boxes, {}), interval=100)
+        finish(pipeline)
+        before, _ = update(pipeline, 0, interval=100)
+        pipeline.active.trackers[0].update = Mock(return_value=(False, (0, 0, 0, 0)))
+        items, _ = update(pipeline, 1, lambda _: (boxes, {}), interval=100)
+        assert [item['track_id'] for item in items] == [before[1]['track_id']]
+        finish(pipeline)
+        recovered, _ = update(pipeline, 1, interval=100)
+        assert [item['track_id'] for item in recovered] == [item['track_id'] for item in before]
+    finally:
+        pipeline.close()
+
+
+def test_context_reset_never_reuses_old_object_id():
+    pipeline = AsyncKCFProposals(MovingTracker)
+    try:
+        seed(pipeline)
+        old_id = pipeline.active.proposals[0]['track_id']
+        update(pipeline, 0, context='new-camera')
+        finish(pipeline)
+        items, _ = update(pipeline, 0, context='new-camera')
+        assert items[0]['track_id'] != old_id
     finally:
         pipeline.close()
 

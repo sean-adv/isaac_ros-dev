@@ -71,8 +71,14 @@ class AsyncBBox3D:
             ids = []
             for index, box in enumerate(boxes):
                 previous = matches.get(index)
+                track_id = detections[index].get("track_id")
                 # Reject weak matches; proximity alone is not enough for a pose.
-                if previous is not None and _iou(self.previous[previous], box) >= .2:
+                if track_id is not None:
+                    # Stable object IDs take precedence over geometry after a
+                    # detector correction or reordering. Namespace legacy IDs.
+                    ids.append(("track", track_id))
+                elif (previous is not None and isinstance(self.ids[previous], int)
+                      and _iou(self.previous[previous], box) >= .2):
                     ids.append(self.ids[previous])
                 else:
                     self.next_id += 1

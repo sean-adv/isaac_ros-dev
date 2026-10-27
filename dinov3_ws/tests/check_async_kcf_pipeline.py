@@ -131,14 +131,12 @@ def main():
         finally:
             release.set()
             node.stop.set()
-            for event in (node.image_changed, node.preview_changed,
+            for event in (node.image_changed,
                           node.publish_changed, node.render_changed):
                 event.set()
-            with node.stream_changed:
-                node.stream_changed.notify_all()
             node.server.shutdown()
             node.close_grounding_worker()
-            for worker in (node.preview_worker, node.worker, node.publisher_worker,
+            for worker in (node.video_publisher_worker, node.worker, node.publisher_worker,
                            node.renderer_worker):
                 worker.join(10)
             node.destroy_node()

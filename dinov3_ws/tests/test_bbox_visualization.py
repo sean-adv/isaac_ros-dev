@@ -75,20 +75,11 @@ def test_modes_share_input_without_drawing_2d_fallback_in_3d():
 @pytest.mark.parametrize("mode", ["2d", "3d"])
 def test_web_serves_only_configured_overlay_and_has_no_mode_switch(tmp_path, mode):
     lock = threading.Lock()
-    cached = (mode + "-configured").encode()
-    node = SimpleNamespace(root=tmp_path, lock=lock, stream_changed=threading.Condition(lock),
-                           stop=threading.Event(), jpeg=cached, bbox_visualization_mode=mode)
+    node = SimpleNamespace(root=tmp_path, lock=lock, bbox_visualization_mode=mode)
     app = create_app(node)
     client = app.test_client()
-    assert client.get('/overlay.jpg').data == cached
-    # Old browser URLs cannot select another mode or trigger another render.
-    for query in ('2d', '3d', 'wrong'):
-        assert client.get('/overlay.jpg?bbox=' + query).data == cached
-    with app.test_request_context('/overlay.mjpg?bbox=2d'):
-        response = app.view_functions['overlay_stream']()
-        frames = iter(response.response)
-        assert cached in next(frames)
-        frames.close()
+    assert client.get('/overlay.jpg').status_code == 404
+    assert client.get('/overlay.mjpg').status_code == 404
     html = client.get('/').data
     assert b'id="bbox-view"' not in html
     assert (b'Showing projected 3D' if mode == '3d' else b'Showing original 2D') in html

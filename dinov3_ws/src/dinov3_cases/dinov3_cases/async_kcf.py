@@ -5,6 +5,7 @@ import math
 import time
 
 from .kcf import KCFProposals, validate_detection_interval
+from .tracking import TrackIdentities, TrackLifecycle
 
 
 def validate_replay_limits(max_replay_frames, replay_budget_ms):
@@ -18,13 +19,17 @@ def validate_replay_limits(max_replay_frames, replay_budget_ms):
 class AsyncKCFProposals:
     """Seed candidates on the detection image and repeatedly track the latest frame.
 
-    The main thread keeps active trackers until a candidate catches up and is
-    handed off atomically. Each update skips intermediate arrivals; frame and
+    The main thread keeps active trackers until a candidate catches up. Matched
+    objects switch individually; unmatched valid trackers survive briefly until
+    detector miss/age limits retire them. All tracks use the same limits.
+    Each update skips intermediate arrivals; frame and
     time budgets bound catch-up work. Interval=1 disables async KCF.
     """
 
     def __init__(self, factory=None, wake=None, roi_padding=0.5,
-                 max_replay_frames=8, replay_budget_ms=150.0, max_roi_side=0):
+                 max_replay_frames=8, replay_budget_ms=150.0, max_roi_side=0,
+                 max_missed_detections=3,
+                 max_unconfirmed_seconds=5.0):
         validate_replay_limits(max_replay_frames, replay_budget_ms)
         self.max_replay_frames = max_replay_frames
         self.replay_budget_ms = replay_budget_ms
@@ -48,6 +53,8 @@ class AsyncKCFProposals:
         self.last_metrics = {}
         self.last_recognition = None
         self.last_replay = {}
+        self.identities = TrackIdentities()
+        self.lifecycle = TrackLifecycle(max_missed_detections, max_unconfirmed_seconds)
 
     def has_result(self):
         with self.lock:
@@ -77,6 +84,7 @@ class AsyncKCFProposals:
         seed_skipped_frames = 0
         catchup_skipped_frames = 0
         discard_reason = "cancelled"
+        detected_at = time.monotonic()
         try:
             try:
                 proposals, metrics = detect(frame if frame is not None else pixels)
@@ -95,7 +103,9 @@ class AsyncKCFProposals:
             init_started = time.monotonic()
             candidate = KCFProposals(self.factory, roi_padding=self.roi_padding,
                                      max_roi_side=self.max_roi_side)
-            candidate.update(pixels, serial, version, 2**63, lambda: proposals)
+            candidate.detected_at = detected_at
+            candidate.update(pixels, serial, version, 2**63, lambda: proposals,
+                             retain_valid_tracks=True)
             init_ms = (time.monotonic() - init_started) * 1000
             if candidate.retry_detection:
                 discard_reason = "init_failed"
@@ -123,7 +133,8 @@ class AsyncKCFProposals:
                 catchup_skipped_frames += next_serial - serial - 1
                 serial = next_serial
                 replay_frames += 1
-                _, source = candidate.update(image, serial, version, 2**63, lambda: [])
+                _, source = candidate.update(image, serial, version, 2**63, lambda: [],
+                                             retain_valid_tracks=True)
                 if source != "kcf":
                     discard_reason = "tracking_lost"
                     return
@@ -182,13 +193,13 @@ class AsyncKCFProposals:
                 self.last_metrics = {}
                 self.last_recognition = None
                 self.last_replay = {}
+                self.identities.clear()
+                self.lifecycle.clear()
             if self.error is not None:
                 error, self.error = self.error, None
                 raise error
-            applied = self.ready is not None
-            if applied:
-                self.active, self.last_metrics, self.last_recognition = self.ready
-                self.ready = None
+            ready, self.ready = self.ready, None
+            applied = ready is not None
             changed = frame_key != self.last_key
             # Only asynchronous detection needs owned replay images.
             if changed and interval > 1:
@@ -202,24 +213,65 @@ class AsyncKCFProposals:
             version = self.version
 
         if interval == 1:
+            previous = self.active.proposals
+
             def synchronous():
                 proposals, self.last_metrics = detect(frame if frame is not None else pixels)
                 if recognize is not None:
                     proposals, self.last_recognition = recognize(pixels, proposals, frame_key)
                 return proposals
-            return self.active.update(pixels, frame_key, identity, 1, synchronous)
+            proposals, source = self.active.update(pixels, frame_key, identity, 1, synchronous)
+            proposals, _ = self.identities.assign(proposals, previous)
+            self.active.proposals = proposals
+            return proposals, source
 
         result = None
         lost = False
+        detected_ids = None
+        detected_at = None
         if self.active.initialized:
             # Foreground and candidate keys use the same admitted-frame serials.
             proposals, source = self.active.update(
                 pixels, serial, version, 2**63, lambda: [], retain_valid_tracks=True,
             )
             lost = source == "sam3" and changed
-            if applied:
-                source = "sam3"
+            self.identities.observe(proposals)
             result = proposals, source
+
+        if applied:
+            candidate, metrics, recognition = ready
+            # Foreground and candidate must refer to this same image before
+            # association, including arrivals after the worker published ready.
+            candidate.update(pixels, serial, version, 2**63, lambda: [],
+                             retain_valid_tracks=True)
+            live = self.active.proposals if self.active.initialized else []
+            candidate.proposals, matches = self.identities.assign(candidate.proposals, live)
+            detected_ids = {item["track_id"] for item in candidate.proposals}
+            detected_at = candidate.detected_at
+            replaced = set(matches.values())
+            for index, (proposal, tracker, roi) in enumerate(zip(
+                    live, self.active.trackers, self.active.rois)):
+                if index not in replaced:
+                    candidate.proposals.append(proposal)
+                    candidate.trackers.append(tracker)
+                    candidate.rois.append(roi)
+            if len(replaced) < len(live):
+                candidate.refresh_requested |= self.active.refresh_requested
+            self.active = candidate
+            self.last_metrics, self.last_recognition = metrics, recognition
+            self.identities.observe(candidate.proposals)
+            result = [dict(p, bbox=list(p["bbox"])) for p in candidate.proposals], "sam3"
+
+        if result is not None:
+            proposals, retired = self.lifecycle.update(
+                self.active.proposals, detected_ids, detected_at, now=time.monotonic())
+            keep = [index for index, item in enumerate(self.active.proposals)
+                    if item["track_id"] not in retired]
+            self.active.trackers = [self.active.trackers[index] for index in keep]
+            self.active.rois = [self.active.rois[index] for index in keep]
+            self.active.proposals = proposals
+            self.identities.forget(retired)
+            result = [dict(p, bbox=list(p["bbox"])) for p in proposals], result[1]
 
         with self.lock:
             self.force_detection |= lost or self.active.refresh_requested

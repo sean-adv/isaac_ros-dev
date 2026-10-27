@@ -33,6 +33,11 @@ async function refreshDetections() {
     if (!item.label) continue;
     const row = document.createElement('p');
     row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · DINO ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · closest match ' + item.candidate : '') + (item.margin === null ? '' : ' · Lab gap ' + item.margin.toFixed(3));
+    if (item.track_status) {
+      row.textContent += ' · track: ' + item.track_status;
+      if (Number.isFinite(item.sam3_age_seconds)) row.textContent += ' · SAM3 ' + item.sam3_age_seconds.toFixed(1) + 's ago';
+      if (item.sam3_misses) row.textContent += ' · missed ' + item.sam3_misses + ' refresh(es)';
+    }
     list.append(row);
   }
 }
@@ -135,7 +140,7 @@ async function refresh() {
   const d = await r.json();
   updateGrounding(d);
   el('status').textContent = d.status + ' | source: ' + d.source + (d.overlay_age === null ? '' : ' | result age: ' + d.overlay_age.toFixed(1) + 's');
-  el('camera-status').textContent = d.preview_error || (d.camera_connected ? 'Live · ' + d.camera_topic : 'No recent camera frames · ' + d.camera_topic + ' · start the Orbbec driver');
+  el('camera-status').textContent = d.video_error || (d.camera_connected ? 'Live · ' + d.camera_topic : 'No recent camera frames · ' + d.camera_topic + ' · start the Orbbec driver');
   if (d.camera_connected && Number.isFinite(d.camera_fps)) el('camera-status').textContent += ' · ' + d.camera_fps.toFixed(1) + ' input FPS';
   el('overlay').style.opacity = d.source === 'upload' || d.camera_connected ? '1' : '0.3';
   const s = el('cases');

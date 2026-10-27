@@ -2,6 +2,7 @@
 
 from collections import deque
 import math
+import time
 
 
 def _iou(a, b):
@@ -11,6 +12,132 @@ def _iou(a, b):
     union = ((a[2] - a[0]) * (a[3] - a[1])
              + (b[2] - b[0]) * (b[3] - b[1]) - intersection)
     return intersection / union if union > 0 else 0.0
+
+
+def match_objects(previous, current):
+    """Conservative one-to-one association in a common frame's coordinates.
+
+    Nearby centers allow modest detector corrections, but size and distance
+    gates prevent a neighboring object from inheriting an unrelated tracker.
+    Recognition labels are deliberately not identities (two items can match).
+    """
+    candidates = []
+    for old_index, old in enumerate(previous):
+        a = old["bbox"]
+        aw, ah = a[2] - a[0], a[3] - a[1]
+        if min(aw, ah) <= 0:
+            continue
+        for index, item in enumerate(current):
+            b = item["bbox"]
+            bw, bh = b[2] - b[0], b[3] - b[1]
+            if min(bw, bh) <= 0 or not .25 <= bw * bh / (aw * ah) <= 4:
+                continue
+            distance = math.hypot((a[0]+a[2]-b[0]-b[2]) / (aw+bw),
+                                  (a[1]+a[3]-b[1]-b[3]) / (ah+bh))
+            overlap = _iou(a, b)
+            if overlap >= .2 or distance <= .5:
+                candidates.append((overlap, -distance, old_index, index))
+    matches, used = {}, set()
+    for _, _, old_index, index in sorted(candidates, reverse=True):
+        if old_index not in used and index not in matches:
+            matches[index] = old_index
+            used.add(old_index)
+    return matches
+
+
+class TrackIdentities:
+    """Keep IDs across refreshes and briefly remember lost, undisplayed items."""
+
+    def __init__(self, recovery_seconds=1.0):
+        self.recovery_seconds = recovery_seconds
+        self.next_id = 0
+        self.clear()
+
+    def clear(self):
+        # IDs must not be recycled when camera/settings context changes.
+        self.recent = {}
+
+    def forget(self, identities):
+        for identity in identities:
+            self.recent.pop(identity, None)
+
+    def observe(self, items):
+        now = time.monotonic()
+        self.recent = {key: value for key, value in self.recent.items()
+                       if now - value[1] <= self.recovery_seconds}
+        for item in items:
+            self.recent[item["track_id"]] = (dict(item, bbox=list(item["bbox"])), now)
+
+    def assign(self, items, live):
+        self.observe(live)
+        matches = match_objects(live, items)
+        live_ids = {item["track_id"] for item in live}
+        lost = [item for key, (item, _) in self.recent.items() if key not in live_ids]
+        unmatched = [index for index in range(len(items)) if index not in matches]
+        recovered = match_objects(lost, [items[index] for index in unmatched])
+        identities = {index: live[old]["track_id"] for index, old in matches.items()}
+        identities.update({unmatched[index]: lost[old]["track_id"]
+                           for index, old in recovered.items()})
+        output = []
+        for index, item in enumerate(items):
+            identity = identities.get(index)
+            if identity is None:
+                self.next_id += 1
+                identity = self.next_id
+            output.append(dict(item, track_id=identity))
+        self.observe(output)
+        return output, matches
+
+
+class TrackLifecycle:
+    """Require detector support; KCF success alone never renews a track's life."""
+
+    def __init__(self, max_missed_detections=3,
+                 max_unconfirmed_seconds=5.0):
+        if type(max_missed_detections) is not int or max_missed_detections < 1:
+            raise ValueError("kcf_max_missed_detections must be an integer >= 1")
+        if (isinstance(max_unconfirmed_seconds, bool)
+                or not isinstance(max_unconfirmed_seconds, (int, float))
+                or not math.isfinite(max_unconfirmed_seconds) or max_unconfirmed_seconds <= 0):
+            raise ValueError("kcf_max_unconfirmed_seconds must be finite and > 0")
+        self.max_missed_detections = max_missed_detections
+        self.max_unconfirmed_seconds = max_unconfirmed_seconds
+        self.clear()
+
+    def clear(self):
+        self.states = {}
+
+    def update(self, items, detected_ids=None, detected_at=None, *, now=None):
+        """Count one miss per committed SAM3 result, never per KCF/camera frame.
+
+        No detector result (pending/error/discarded) is not a miss. An absolute
+        detector age bound still removes stale boxes if detection stops working.
+        New and established tracks use the same miss and age limits.
+        """
+        now = time.monotonic() if now is None else now
+        detected_at = now if detected_at is None else detected_at
+        states, output, retired = {}, [], set()
+        for item in items:
+            identity = item["track_id"]
+            state = dict(self.states.get(identity,
+                                         dict(hits=0, misses=0, confirmed_at=detected_at)))
+            if detected_ids is not None:
+                if identity in detected_ids:
+                    state.update(hits=state["hits"] + 1, misses=0, confirmed_at=detected_at)
+                else:
+                    state["misses"] += 1
+            age = max(0.0, now - state["confirmed_at"])
+            if (age >= self.max_unconfirmed_seconds
+                    or state["misses"] >= self.max_missed_detections):
+                retired.add(identity)
+                continue
+            states[identity] = state
+            output.append(dict(item,
+                               track_status="coasting" if state["misses"] else "confirmed",
+                               sam3_hits=state["hits"], sam3_misses=state["misses"],
+                               sam3_age_seconds=age))
+        self.states = states
+        return output, retired
 
 
 class BBoxSmoother:
@@ -31,6 +158,7 @@ class BBoxSmoother:
         self.histories = {}
         self.boxes = []
         self.raw_boxes = None
+        self.track_ids = None
         self.initialized = False
 
     def update(self, items, frame_key, context):
@@ -39,12 +167,18 @@ class BBoxSmoother:
             self.initialized = False
             self.context = context
         raw_boxes = tuple(tuple(item["bbox"]) for item in items)
+        track_ids = tuple(item.get("track_id") for item in items)
         same_frame = self.initialized and frame_key == self.frame_key
-        if not same_frame or raw_boxes != self.raw_boxes:
+        if not same_frame or raw_boxes != self.raw_boxes or track_ids != self.track_ids:
             # A background SAM3 handoff may change count/order on the same frame.
             # Cache by raw boxes too, so zip below can never truncate new objects.
-            # Keep matching on raw coordinates; recognition/ID fields stay outside.
+            # Prefer object identity; legacy callers still match raw coordinates.
             matches = _match_boxes(self.raw_boxes or (), raw_boxes) if self.initialized else {}
+            if (self.initialized and all(key is not None for key in track_ids)
+                    and all(key is not None for key in self.track_ids)):
+                previous = {key: index for index, key in enumerate(self.track_ids)}
+                matches = {index: previous[key] for index, key in enumerate(track_ids)
+                           if key in previous}
             histories, boxes = {}, []
             for index, bbox in enumerate(raw_boxes):
                 previous = matches.get(index)
@@ -59,6 +193,7 @@ class BBoxSmoother:
                               math.ceil(mean[2]), math.ceil(mean[3])])
             self.histories, self.boxes = histories, boxes
             self.raw_boxes = raw_boxes
+            self.track_ids = track_ids
             self.frame_key = frame_key
             self.initialized = True
         return [dict(item, bbox=list(box), area=(box[2] - box[0]) * (box[3] - box[1]))

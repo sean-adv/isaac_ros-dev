@@ -16,3 +16,6 @@ Werkzeug==3.1.9
 huggingface-hub==1.33.0
 safetensors==0.8.0
 ftfy==6.3.1
+
+av==16.1.0
+aiortc==1.15.0

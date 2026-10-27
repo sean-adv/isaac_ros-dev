@@ -77,7 +77,6 @@ def test_publication_worker_publishes_empty_array_to_clear_previous_objects():
         stop=stop, publish_changed=threading.Event(), lock=threading.Lock(),
         pending_publication=([], header, 0), generation=0,
         tag_pub=tag_pub, recognition_pub=inactive, bbox3d_pub=inactive,
-        pub=inactive, recognition_debug_pub=inactive, bridge=Mock(),
         get_logger=lambda: logger,
     )
     node.publish_changed.set()

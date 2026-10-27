@@ -66,8 +66,8 @@ def main():
                     '-p', 'pose_enabled:=' + str(not args.no_pose).lower()])
     node = ProfileNode()
     if args.browser_streams:
-        with node.lock:
-            node.stream_viewers.update(jpeg=1, preview_jpeg=1)
+        from sensor_msgs.msg import CompressedImage
+        node.create_subscription(CompressedImage, node.param("h264_topic"), lambda _: None, 30)
     reports = []
 
     def spin_until(deadline):
@@ -129,14 +129,12 @@ def main():
             print(json.dumps(summary), flush=True)
     finally:
         node.stop.set()
-        for event in (node.image_changed, node.preview_changed, node.publish_changed, node.render_changed):
+        for event in (node.image_changed, node.publish_changed, node.render_changed):
             event.set()
-        with node.stream_changed:
-            node.stream_changed.notify_all()
         node.server.shutdown()
         node.worker.join(15)
         node.close_grounding_worker()
-        for worker in (node.preview_worker, node.publisher_worker, node.renderer_worker):
+        for worker in (node.video_publisher_worker, node.publisher_worker, node.renderer_worker):
             worker.join(3)
         node.destroy_node()
         rclpy.shutdown()

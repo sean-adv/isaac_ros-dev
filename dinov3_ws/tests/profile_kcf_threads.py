@@ -10,6 +10,8 @@ import numpy as np
 from PIL import Image
 
 from dinov3_cases.kcf import KCFProposals
+from dinov3_cases.h264_stream import H264Encoder
+from dinov3_cases.visualization import render_display_overlay
 
 
 def cpu_ticks():
@@ -24,7 +26,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--threads', type=int, nargs='+', default=[1, 2, 4, 14])
     parser.add_argument('--max-roi-side', type=int, default=0, help='Limit each KCF working ROI; 0 disables resizing')
-    parser.add_argument('--preview', action='store_true', help='Include 30 FPS color conversion, resize and JPEG preview stress')
+    parser.add_argument('--preview', action='store_true', help='Include shared 960x540 H.264 preview encoding at 30 FPS')
     parser.add_argument('--rounds', type=int, default=3)
     parser.add_argument('--seconds', type=float, default=3)
     args = parser.parse_args()
@@ -68,13 +70,11 @@ def main():
 
                     def preview():
                         try:
+                            encoder = H264Encoder()
                             deadline = time.perf_counter()
                             while not stopped.is_set():
-                                bgr = cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR)
-                                resized = cv2.resize(bgr, (960, round(pixels.shape[0]*960/pixels.shape[1])))
-                                ok, _ = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                                if not ok:
-                                    raise RuntimeError('Preview JPEG failed')
+                                bgr = render_display_overlay(pixels, [], mode='2d')
+                                encoder.encode(bgr, None, 0)
                                 deadline += 1/30
                                 stopped.wait(max(0, deadline-time.perf_counter()))
                         except Exception as error:

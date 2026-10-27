@@ -22,6 +22,21 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
 
 ## 日常回歸測試
 
+KCF 非同步模式（`grounding_detection_interval > 1`）採逐物品交接：背景 SAM3
+結果在偵測影格初始化、補追到目前影格後，以框重疊、中心距離及尺寸配對。
+配對物品沿用固定 `track_id` 並更新自己的 KCF／ROI；SAM3 漏偵測或回傳空集合時，
+舊 KCF 可在有限時間內繼續追蹤。新舊框統一可短暫 coasting，但連續漏掉三次
+SAM3 結果或距最後 SAM3 支持達五秒即淘汰，即使 KCF 仍回報成功也不續命。
+這些限制分別由 `kcf_max_missed_detections` 與
+`kcf_max_unconfirmed_seconds` 設定，修改後重啟。漏偵測次數僅計算完成交接的
+SAM3 結果；相機／KCF 更新不增加次數。偵測過期時間從 SAM3 輸入影格時間起算，
+不從延遲結果完成時重新起算。被淘汰的身分也會從恢復快取移除。網頁物品清單
+顯示 track 狀態、SAM3 age 及 miss 次數；`unknown` 類別本身不會觸發淘汰。
+失效的 KCF 不顯示舊框，但保留最後身分一秒供鄰近位置
+重新配對；逾時、相機或設定 context 改變後不沿用舊身分。外觀近似物品交叉或
+移動過遠仍可能換 ID，這版配對尚未加入外觀特徵。同步模式（間隔為 1）仍逐幀
+使用 SAM3，沒有 KCF 可以在漏偵測時保留。
+
 在工作區根目錄執行，不需啟動相機或載入部署引擎：
 
 ```bash
@@ -41,7 +56,7 @@ dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests
 | `test_patches.py`、`test_reference_gallery.py` | DINOv3 前處理、patch 順序與參考圖對齊 |
 | `test_trt_backend.py`、`test_build_dinov3.py` | 引擎輸入限制、建置產物與驗證證據 |
 | `test_frame_pool.py`、`test_grounding_ipc.py` | 共享影格生命週期、子程序失敗、逾時與清理 |
-| `test_realtime.py`、`test_display_stream.py` | 最新影格排程、發布與繪圖互不阻塞、主頁單路相機／bbox 自動切換及編碼需求 |
+| `test_realtime.py`、`test_h264_stream.py` | 最新影格排程、發布與繪圖互不阻塞、共用 H.264 編碼、IDR 恢復、ROS 封包與雙 WebRTC 接收端實際解碼（不重新編碼） |
 | `test_cloud_filter.py`、`test_depth_bbox.py`、`test_depth_sync.py` | 深度同步、有效座標、3D 框與 ROS 訊息 |
 | `test_apriltag.py` | Isaac ROS 訊息序列化、座標及空結果發布 |
 | `test_bbox_visualization.py` | 2D/3D 框投影、config 指定單一模式與首頁顯示 |
@@ -67,7 +82,7 @@ node --test dinov3_ws/tests/test_images_ui.cjs
 - `check_gpu_environment.py`：檢查 CUDA driver、PyTorch allocation 與 TensorRT Builder。
 - `check_sam3_trt_pipeline.py`：轉交 `check_official_pipeline.py`，驗證官方 SAM3 單／四類別、Cat2Real 與同環境 TRT11 IPC。
 - `check_async_kcf_pipeline.py`：真實 SAM3／DINOv3 流程，先以 30 FPS 持續輸入並延遲首次 SAM3，確認以最新 RGB 初始化並略過偵測期間影格；再刻意阻塞穩態背景 SAM3，確認前景 KCF 持續完成、SAM3 偵測影格上完成 DINOv3 後，框、分類與診斷圖片一起交接。
-- `check_grounded_trt_pipeline.py`：實際SAM3／Cat2Real HTTP／ROS 流程，以及刻意阻塞 JPEG 時的 bbox 發布。
+- `check_grounded_trt_pipeline.py`：實際SAM3／Cat2Real HTTP／ROS 流程，以及刻意阻塞 H.264 編碼時的 bbox 發布。
 
 從工作區根目錄執行：
 
@@ -104,7 +119,7 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_kcf_intervals.py \
 使用目前 YAML 設定與真實相機、SAM3、DINOv3，直接計時主流程 KCF 與背景 replay，保存每幀資料及 median／p95。初始化與切換間隔期間持續接收相機輸入，使用正式流程的初始化等待與 replay 預算；每組仍在首次結果後暖機再量測穩態。冷啟動連續輸入與首次交接另由 `check_async_kcf_pipeline.py` 驗證。測試程序使用隨機 HTTP port，不修改正式參數檔。`kcf_update_ms` 包含 RGB→BGR、所有物件 KCF 更新與框整理；`kcf_detect_stage_ms` 另外包含主流程的影像準備、深度等待及非同步排程。間隔以處理影格計算，應搭配 `processed_frame_fps` 解讀。
 
 
-`profile_kcf_threads.py` 比較 OpenCV 的 `1 / 2 / 4 / 14` 個內部執行緒。以固定 ROI 追蹤相同靜態相機影像中的手動標註框，在實際相機驅動繼續運作時，分別量測前景 KCF、前景＋持續背景 replay；加上 `--preview` 則改測 replay＋30 FPS 的 RGB→BGR、960 寬縮放與 JPEG。各組先暖機，三輪交替正反順序，每組預設 3 秒，執行緒池只在所有測試 worker 停止時調整。程序 CPU 的 100% 代表一個 CPU 核心；system CPU 是全機平均。這是靜態輸入 CPU 壓力測試，未執行 SAM3／DINOv3，不能視為模型推論 FPS。
+`profile_kcf_threads.py` 比較 OpenCV 的 `1 / 2 / 4 / 14` 個內部執行緒。以固定 ROI 追蹤相同靜態相機影像中的手動標註框，在實際相機驅動繼續運作時，分別量測前景 KCF、前景＋持續背景 replay；加上 `--preview` 則改測 replay＋30 FPS 的 960×540 縮放、色彩轉換與共用 H.264 編碼。各組先暖機，三輪交替正反順序，每組預設 3 秒，執行緒池只在所有測試 worker 停止時調整。程序 CPU 的 100% 代表一個 CPU 核心；system CPU 是全機平均。這是靜態輸入 CPU 壓力測試，未執行 SAM3／DINOv3，不能視為模型推論 FPS。
 
 ```bash
 PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \

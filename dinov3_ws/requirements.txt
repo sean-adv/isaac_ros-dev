@@ -7,6 +7,8 @@ scipy>=1.11
 Pillow>=10
 Flask>=3,<4
 Werkzeug>=3,<4
+av>=16,<17
+aiortc>=1.15,<2
 
 torch>=2.14,<2.15
 torchvision>=0.29,<0.30

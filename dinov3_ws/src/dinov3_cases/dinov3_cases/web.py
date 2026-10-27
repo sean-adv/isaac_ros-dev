@@ -10,7 +10,6 @@ from .patches import reference_grid_image
 from .grounded import validate_settings
 from .cat2real import prepare_cat2real_image
 from .kcf import kcf_factory
-from .display_stream import display_uses_overlay
 from .image_manager import register_image_manager
 from .gallery_files import (
     group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
@@ -27,20 +26,18 @@ def create_app(node):
 
     @app.after_request
     def wake_after_update(response):
-        if request.method != "GET":
+        if request.method != "GET" and not request.path.startswith("/api/video/"):
             node.image_changed.set()
-            with node.stream_changed:
-                node.stream_changed.notify_all()
+            node.render_changed.set()
         return response
 
     def invalidate_results():
         """Caller holds node.lock; discard output from the previous input revision."""
         node.generation += 1
-        node.jpeg = None
+        node.video_at = None
+        node.video_hub.reset()
         node.clear_object_debug()
         node.detections = []
-        node.overlay_at = None
-        node.overlay_has_boxes = False
 
     def images_changed(group):
         with node.lock:
@@ -98,7 +95,7 @@ def create_app(node):
                 source=node.source,
                 status=node.status,
                 performance=node.performance,
-                overlay_ready=node.jpeg is not None,
+                overlay_ready=node.video_at is not None,
                 bbox_visualization_mode=node.bbox_visualization_mode,
                 grounding=node.grounding_settings,
                 grounding_model_id=GROUNDING_MODEL_ID,
@@ -122,9 +119,9 @@ def create_app(node):
                 camera_age=age,
                 camera_fps=getattr(node, "camera_fps", None),
                 camera_connected=age is not None and age < 3,
-                preview_error=node.preview_error,
+                video_error=node.video_error,
                 overlay_age=(
-                    None if node.overlay_at is None else time.monotonic() - node.overlay_at
+                    None if node.video_at is None else time.monotonic() - node.video_at
                 ),
             )
 
@@ -241,66 +238,21 @@ def create_app(node):
             invalidate_results()
         return jsonify(ok=True)
 
-    def stream(attribute):
-        if hasattr(node, "stream_requested_at"):
-            with node.lock:
-                node.stream_requested_at[attribute] = time.monotonic()
+    @app.post("/api/video/offer")
+    def video_offer():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get("sdp"), str):
+            raise ValueError("Expected a JSON WebRTC SDP offer")
+        return jsonify(node.webrtc.offer(data["sdp"], data.get("type")))
 
-        def current_frame():
-            selected = attribute
-            if attribute == "display":
-                selected = ("jpeg" if node.source == "upload" or display_uses_overlay(node)
-                            else "preview_jpeg")
-            return selected, getattr(node, selected)
+    @app.post("/api/video/peers/<peer_id>/heartbeat")
+    def video_heartbeat(peer_id):
+        return Response(status=204 if node.webrtc.heartbeat(peer_id) else 404)
 
-        def frames():
-            tracked = hasattr(node, "stream_viewers")
-            if tracked:
-                with node.lock:
-                    node.stream_viewers[attribute] = node.stream_viewers.get(attribute, 0) + 1
-            try:
-                previous_kind, previous = None, None
-                while not node.stop.is_set():
-                    def changed():
-                        kind, data = current_frame()
-                        return node.stop.is_set() or kind != previous_kind or data is not previous
-                    with node.stream_changed:
-                        node.stream_changed.wait_for(changed, timeout=0.5)
-                        kind, data = current_frame()
-                    if data is None or (kind == previous_kind and data is previous):
-                        previous_kind, previous = kind, data
-                        continue
-                    previous_kind, previous = kind, data
-                    # No per-client frame queue: slow clients pick the newest result next.
-                    yield (
-                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                        + str(len(data)).encode()
-                        + b"\r\n\r\n"
-                        + data
-                        + b"\r\n"
-                    )
-            finally:
-                if tracked:
-                    with node.lock:
-                        node.stream_viewers[attribute] -= 1
-
-        return Response(
-            frames(),
-            mimetype="multipart/x-mixed-replace; boundary=frame",
-            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-        )
-
-    @app.get("/view.mjpg")
-    def display_stream():
-        return stream("display")
-
-    @app.get("/camera.mjpg")
-    def camera_stream():
-        return stream("preview_jpeg")
-
-    @app.get("/overlay.mjpg")
-    def overlay_stream():
-        return stream("jpeg")
+    @app.delete("/api/video/peers/<peer_id>")
+    def video_disconnect(peer_id):
+        node.webrtc.disconnect(peer_id)
+        return Response(status=204)
 
     @app.get("/api/detections")
     def detections():
@@ -354,20 +306,6 @@ def create_app(node):
         return Response(
             data or b"",
             status=200 if data else 404,
-            mimetype="image/jpeg",
-            headers={"Cache-Control": "no-store"},
-        )
-
-    @app.get("/overlay.jpg")
-    def overlay():
-        attribute = "jpeg"
-        with node.lock:
-            if hasattr(node, "stream_requested_at"):
-                node.stream_requested_at[attribute] = time.monotonic()
-            data = getattr(node, attribute, None)
-        return Response(
-            data or b"",
-            status=200 if data else 204,
             mimetype="image/jpeg",
             headers={"Cache-Control": "no-store"},
         )

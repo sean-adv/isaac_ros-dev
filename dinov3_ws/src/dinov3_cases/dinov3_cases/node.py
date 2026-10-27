@@ -12,7 +12,7 @@ from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from sensor_msgs.msg import Image as ImageMsg, CameraInfo
+from sensor_msgs.msg import Image as ImageMsg, CameraInfo, CompressedImage
 from std_msgs.msg import Header
 from werkzeug.serving import make_server
 
@@ -36,11 +36,11 @@ from vision_msgs.msg import Detection2DArray, Detection3DArray
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
 from .apriltag import apriltag_message
 from .depth_sync import matched_inputs
-from .display_stream import has_display_boxes, display_overlay_requested, display_uses_overlay
+from .h264_stream import H264Encoder, PacketHub, WebRTCVideo
 from .cloud_filter import CloudFilter
 from .depth_bbox import ProjectionRayCache, attach_bboxes3d, bboxes3d_message
 from .web import create_app
-from .visualization import render_bbox_overlay, render_display_overlay
+from .visualization import render_display_overlay
 from .object_visualization import ObjectVisualizationSnapshot
 from .grounded import (
     DEFAULT_PROMPT,
@@ -50,16 +50,6 @@ from .grounded import (
     TrackedObjectRecognizer,
     recognition_message,
 )
-
-
-def encode_display_jpeg(pixels, quality):
-    """Encode browser images at one fixed size, with at most one resize."""
-    if pixels.shape[:2] != (540, 960):
-        pixels = cv2.resize(pixels, (960, 540), interpolation=cv2.INTER_AREA)
-    ok, data = cv2.imencode(".jpg", pixels, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    if not ok:
-        raise RuntimeError("JPEG encoding failed")
-    return data.tobytes()
 
 
 class CaseNode(Node):
@@ -81,12 +71,15 @@ class CaseNode(Node):
             opencv_num_threads=0,
             kcf_replay_max_frames=8,
             kcf_replay_budget_ms=150.0,
+            kcf_max_missed_detections=3,
+            kcf_max_unconfirmed_seconds=5.0,
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
             recognition_threshold=0.75,
             recognition_margin=0.05,
             image_topic="/camera/color/image_raw",
+            h264_topic="/medicine_recognition/image_annotated/h264",
             tag_topic="/tag_detections",
             pose_enabled=True,
             depth_topic="/camera/depth/image_raw",
@@ -107,7 +100,9 @@ class CaseNode(Node):
             port=8090,
             host="127.0.0.1",
             inference_hz=0.0,
-            jpeg_quality=70,
+            video_fps=30,
+            h264_bitrate=2_000_000,
+            h264_encoder="auto",
             bbox_visualization_mode="3d",
         )
         for k, v in defaults.items():
@@ -153,8 +148,9 @@ class CaseNode(Node):
             raise ValueError("grounding_ipc_timeout must be positive.")
         if not np.isfinite(self.param("inference_hz")) or self.param("inference_hz") < 0:
             raise ValueError("inference_hz must be finite and nonnegative; 0 is unlimited.")
-        if not 1 <= self.param("jpeg_quality") <= 100:
-            raise ValueError("jpeg_quality must be 1–100.")
+        self.video_encoder = H264Encoder(
+            self.param("h264_encoder"), self.param("video_fps"), self.param("h264_bitrate")
+        )
         for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
             if not np.isfinite(self.param(name)) or self.param(name) <= 0:
                 raise ValueError(f"{name} must be finite and positive.")
@@ -177,8 +173,6 @@ class CaseNode(Node):
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         self.image_changed = threading.Event()
-        self.preview_changed = threading.Event()
-        self.stream_changed = threading.Condition(self.lock)
         self.depth_changed = threading.Condition(self.lock)
         self.depth_frames = deque(maxlen=30)
         self.depth_infos = deque(maxlen=8)
@@ -187,8 +181,6 @@ class CaseNode(Node):
         self.frame_pool = SharedFramePool(slots=3)
         self.pending_render = None
         self.render_changed = threading.Event()
-        self.stream_viewers = {}
-        self.stream_requested_at = {}
         self.pending_publication = None
         self.publish_changed = threading.Event()
         self.stop = threading.Event()
@@ -197,22 +189,18 @@ class CaseNode(Node):
         self.source = "camera"
         self.frame = None
         self.frame_seq = 0
-        self.jpeg = None
         self.clear_object_debug()
         self.detections = []
-        self.preview_jpeg = None
         self.camera_frame = None
         self.camera_seq = 0
         self.camera_received_at = None
         self.camera_rate = ResultRate(window_seconds=3.0)
         self.camera_fps = None
-        self.preview_error = None
-        self.overlay_at = None
-        self.overlay_has_boxes = False
+        self.video_at = None
+        self.video_error = None
         self.status = "Loading DINOv3 model…"
         self.backend_description = None
         self.reference_stride = None
-        self.pub = self.create_publisher(ImageMsg, "/dinov3/heatmap/overlay", 1)
         self.recognition_pub = self.create_publisher(
             Detection2DArray, "/medicine_recognition/detections", 10
         )
@@ -222,9 +210,11 @@ class CaseNode(Node):
         self.tag_pub = self.create_publisher(
             AprilTagDetectionArray, self.param("tag_topic"), 10
         )
-        self.recognition_debug_pub = self.create_publisher(
-            ImageMsg, "/medicine_recognition/debug_image", 1
+        self.h264_pub = self.create_publisher(
+            CompressedImage, self.param("h264_topic"), 30
         )
+        self.video_hub = PacketHub(wake=self.render_changed.set)
+        self.webrtc = WebRTCVideo(self.video_hub)
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST, depth=1,
             reliability=ReliabilityPolicy.RELIABLE
@@ -238,8 +228,8 @@ class CaseNode(Node):
         self.app = create_app(self)
         self.server = make_server(self.param("host"), self.param("port"), self.app, threaded=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        self.preview_worker = threading.Thread(target=self.run_preview, daemon=True)
-        self.preview_worker.start()
+        self.video_publisher_worker = threading.Thread(target=self.run_video_publications, daemon=True)
+        self.video_publisher_worker.start()
         self.publisher_worker = threading.Thread(target=self.run_publications, daemon=True)
         self.publisher_worker.start()
         self.renderer_worker = threading.Thread(target=self.run_rendering, daemon=True)
@@ -259,7 +249,7 @@ class CaseNode(Node):
             self.camera_seq += 1
             self.camera_received_at = time.monotonic()
             self.camera_fps = self.camera_rate.update(self.camera_received_at, msg.header.frame_id)
-            self.preview_changed.set()
+            self.render_changed.set()
             if self.source != "camera":
                 return
             self.frame = msg
@@ -355,20 +345,6 @@ class CaseNode(Node):
             except Exception as error:
                 self.get_logger().error(f"ROS result publication failed: {error}")
 
-    def wants_stream(self, attribute):
-        with self.lock:
-            direct_reader = (self.stream_viewers.get(attribute, 0) > 0
-                             or time.monotonic() - self.stream_requested_at.get(
-                                 attribute, -float("inf")) < 2)
-            if direct_reader:
-                return True
-            if self.stream_viewers.get("display", 0) > 0:
-                if attribute == "jpeg":
-                    return display_overlay_requested(self)
-                return self.source == "camera" and not display_uses_overlay(self)
-            # Keep the existing initial snapshot for standalone image consumers.
-            return getattr(self, attribute) is None
-
     def acquire_input_frame(self, pixels, *, frame_id, timestamp):
         """Reclaim a queued old overlay before letting rendering exhaust input slots."""
         frame = self.frame_pool.acquire(pixels, frame_id=frame_id, timestamp=timestamp)
@@ -382,81 +358,130 @@ class CaseNode(Node):
         return self.frame_pool.acquire(pixels, frame_id=frame_id, timestamp=timestamp)
 
     def run_rendering(self):
-        """One active and one latest pending job; never block bbox publication."""
-        while not self.stop.is_set():
-            self.render_changed.wait(0.1)
-            self.render_changed.clear()
-            with self.lock:
-                job, self.pending_render = self.pending_render, None
-            if job is None:
-                continue
-            frame, detections, header, gen, seq, info, completed_at = job
-            try:
-                boxes = getattr(self, "bbox3d_worker", None)
-                if boxes is not None:
-                    detections, measured_info = boxes.latest(detections)
-                    info = measured_info or info
+        """Select one view, draw once at 960x540, encode once for every consumer."""
+        cached = None
+        last_key, last_generation = None, None
+        last_encoded, last_keyframe = 0.0, 0.0
+        try:
+            while not self.stop.is_set():
+                self.render_changed.wait(0.2)
+                self.render_changed.clear()
+                delay = last_encoded + 1 / self.param("video_fps") - time.monotonic()
+                if delay > 0 and self.stop.wait(delay):
+                    break
                 with self.lock:
-                    if gen != self.generation:
+                    job, self.pending_render = self.pending_render, None
+                    generation, source = self.generation, self.source
+                    camera, camera_seq = self.camera_frame, self.camera_seq
+                try:
+                    if not self.video_hub.has_readers:
+                        self.video_encoder.reset()
+                        cached, last_key = None, None
                         continue
-                want_jpeg = self.wants_stream("jpeg")
-                publishers = [p for p in (self.pub, self.recognition_debug_pub)
-                              if p.get_subscription_count()]
-                if not (want_jpeg or publishers):
-                    continue
-                start = time.monotonic()
-                jpeg = None
-                if want_jpeg:
-                    display = render_display_overlay(
-                        frame.pixels, detections, info, self.bbox_visualization_mode
-                    )
-                    jpeg = encode_display_jpeg(display, self.param("jpeg_quality"))
-                with self.lock:
-                    if gen != self.generation:
+                    if generation != last_generation:
+                        self.video_encoder.reset()
+                        self.video_hub.reset()
+                        cached, last_key = None, None
+                        last_generation = generation
+                    start = time.monotonic()
+                    if job is not None:
+                        frame, detections, header, gen, seq, info, completed_at = job
+                        if gen == generation:
+                            boxes = getattr(self, "bbox3d_worker", None)
+                            if boxes is not None:
+                                detections, measured_info = boxes.latest(detections)
+                                info = measured_info or info
+                            visible = any(item.get("bbox_visible", True) and
+                                          (self.bbox_visualization_mode == "2d" or "bbox3d" in item)
+                                          for item in detections)
+                            if source == "upload" or (visible and time.monotonic() - completed_at < 3.0):
+                                pixels = render_display_overlay(
+                                    frame.pixels, detections, info, self.bbox_visualization_mode)
+                                cached = (pixels, header, ("result", gen, seq, completed_at),
+                                          completed_at)
+                            else:
+                                cached = None
+                    if cached is not None and (source == "upload" or
+                                               time.monotonic() - cached[3] < 3.0):
+                        pixels, header, key, completed_at = cached
+                    elif source == "camera" and camera is not None:
+                        key, completed_at = ("camera", generation, camera_seq), None
+                        pixels, header = None, camera.header
+                    else:
                         continue
-                    if want_jpeg:
-                        self.jpeg = jpeg
-                        self.overlay_has_boxes = has_display_boxes(
-                            detections, self.bbox_visualization_mode)
-                    self.overlay_at = time.monotonic()
-                    if self.performance.get("completed_at") == completed_at:
-                        self.performance["render_ms"] = (self.overlay_at - start) * 1000
-                        self.performance["result_to_overlay_ms"] = (self.overlay_at - completed_at) * 1000
-                        self.performance["overlay_frame_id"] = seq
-                    self.stream_changed.notify_all()
-                if publishers:
-                    # Full-resolution debug output is rendered only for ROS readers.
-                    bgr = cv2.cvtColor(frame.pixels, cv2.COLOR_RGB2BGR)
-                    overlay = render_bbox_overlay(bgr, detections, info, self.bbox_visualization_mode)
-                    out = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
-                    out.header = header if header is not None else Header(stamp=self.get_clock().now().to_msg())
-                    for publisher in publishers:
-                        publisher.publish(out)
-            except Exception as error:
-                self.get_logger().error(f"Result rendering failed: {error}")
-            finally:
-                frame.release()
+                    force_keyframe = (self.video_hub.keyframe_requested.is_set() or
+                                      time.monotonic() - last_keyframe >= 1.0)
+                    if key == last_key and not force_keyframe:
+                        continue
+                    if pixels is None:
+                        rgb = self.bridge.imgmsg_to_cv2(camera, desired_encoding="rgb8")
+                        pixels = render_display_overlay(rgb, [], mode=self.bbox_visualization_mode)
+                    if header is None:
+                        header = Header(stamp=self.get_clock().now().to_msg())
+                    # Clear before encode so requests arriving during encode survive.
+                    self.video_hub.keyframe_requested.clear()
+                    encode_start = time.monotonic()
+                    unit = self.video_encoder.encode(pixels, header, generation, force_keyframe)
+                    finished = time.monotonic()
+                    with self.lock:
+                        if generation != self.generation:
+                            self.video_encoder.reset()
+                            continue
+                        self.video_hub.publish(unit)
+                        self.video_at, self.video_error = finished, None
+                        self.performance.update(
+                            video_encode_ms=(finished - encode_start) * 1000,
+                            video_render_ms=(encode_start - start) * 1000,
+                            video_encoder=self.video_encoder.codec,
+                            video_packet_bytes=len(unit.data),
+                        )
+                        if completed_at is not None and self.performance.get("completed_at") == completed_at:
+                            self.performance["render_ms"] = (finished - start) * 1000
+                            self.performance["result_to_overlay_ms"] = (finished - completed_at) * 1000
+                    last_encoded, last_key = finished, key
+                    if unit.keyframe:
+                        last_keyframe = finished
+                except Exception as error:
+                    self.video_encoder.reset()
+                    self.video_hub.reset()
+                    with self.lock:
+                        self.video_error = str(error)
+                    self.get_logger().error(f"H.264 rendering failed: {error}")
+                    self.stop.wait(0.5)
+                finally:
+                    if job is not None:
+                        job[0].release()
+        finally:
+            self.video_encoder.reset()
 
-    def run_preview(self):
-        processed = -1
-        while not self.stop.is_set():
-            self.preview_changed.wait(0.1)
-            self.preview_changed.clear()
-            with self.lock:
-                frame, seq = self.camera_frame, self.camera_seq
-            if frame is None or seq == processed or not self.wants_stream("preview_jpeg"):
-                continue
-            try:
-                bgr = self.bridge.imgmsg_to_cv2(frame, desired_encoding="bgr8")
-                jpeg = encode_display_jpeg(bgr, self.param("jpeg_quality"))
+    def run_video_publications(self):
+        """DDS cannot block the encoder or the WebRTC viewers."""
+        reader = None
+        try:
+            while not self.stop.is_set():
+                if not self.h264_pub.get_subscription_count():
+                    if reader is not None:
+                        reader.close()
+                        reader = None
+                    self.stop.wait(0.1)
+                    continue
+                if reader is None:
+                    reader = self.video_hub.subscribe()
+                unit = reader.get(timeout=0.2)
+                if unit is None:
+                    continue
                 with self.lock:
-                    self.preview_jpeg = jpeg
-                    self.preview_error = None
-                    self.stream_changed.notify_all()
-            except Exception as e:
-                with self.lock:
-                    self.preview_error = str(e)
-            processed = seq
+                    if unit.generation != self.generation:
+                        continue
+                message = CompressedImage(header=unit.header, format="h264", data=unit.data)
+                try:
+                    self.h264_pub.publish(message)
+                except Exception as error:
+                    reader.reset()
+                    self.get_logger().error(f"H.264 publication failed: {error}")
+        finally:
+            if reader is not None:
+                reader.close()
 
     def close_grounding_worker(self):
         detector = getattr(self, "grounding_detector", None)
@@ -473,8 +498,11 @@ class CaseNode(Node):
     def destroy_node(self):
         self.stop.set()
         self.close_grounding_worker()
+        self.video_hub.close()
+        self.webrtc.close()
         self.render_changed.set()
         self.renderer_worker.join(timeout=3)
+        self.video_publisher_worker.join(timeout=3)
         with self.lock:
             if self.pending_render is not None:
                 self.pending_render[0].release()
@@ -522,6 +550,8 @@ class CaseNode(Node):
             max_roi_side=self.param("kcf_max_roi_side"),
             max_replay_frames=self.param("kcf_replay_max_frames"),
             replay_budget_ms=self.param("kcf_replay_budget_ms"),
+            max_missed_detections=self.param("kcf_max_missed_detections"),
+            max_unconfirmed_seconds=self.param("kcf_max_unconfirmed_seconds"),
         )
         self.proposal_tracker = proposal_tracker
         last_recognition = None
@@ -710,10 +740,10 @@ class CaseNode(Node):
             except Exception as error:
                 with self.lock:
                     if gen == self.generation:
-                        self.jpeg = None
                         self.clear_object_debug()
                         self.detections = []
-                        self.overlay_at = None
+                        self.video_at = None
+                        self.video_hub.reset()
                         self.status = f"Error: {type(error).__name__}: {error}"
                 self.get_logger().error(str(error))
                 # Retry failed files/model calls at a bounded rate, including static uploads.
@@ -733,17 +763,16 @@ def main(args=None):
     finally:
         node.stop.set()
         node.image_changed.set()
-        node.preview_changed.set()
         node.publish_changed.set()
         node.render_changed.set()
-        with node.stream_changed:
-            node.stream_changed.notify_all()
         node.server.shutdown()
         node.close_grounding_worker()
-        node.preview_worker.join(timeout=2)
         node.worker.join(timeout=10)
         node.publisher_worker.join(timeout=2)
+        node.video_hub.close()
+        node.webrtc.close()
         node.renderer_worker.join(timeout=3)
+        node.video_publisher_worker.join(timeout=3)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

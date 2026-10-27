@@ -179,7 +179,7 @@ def test_web_settings_accept_interval_and_reject_invalid_values(tmp_path):
 
     node = SimpleNamespace(
         root=tmp_path, lock=threading.Lock(), image_changed=threading.Event(),
-        stream_changed=threading.Condition(), generation=0,
+        render_changed=threading.Event(), video_hub=Mock(), generation=0,
         grounding_settings=dict(prompt="box.", box_threshold=0.3,
                                 recognition_threshold=0.75, margin=0.05,
                                 detection_interval=1),

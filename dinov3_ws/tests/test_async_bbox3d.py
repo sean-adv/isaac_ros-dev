@@ -69,6 +69,30 @@ def test_five_unique_frame_cadence_and_nonblocking_full_measurement(worker):
     assert not errors
 
 
+def test_3d_cache_follows_track_id_after_detector_correction(worker):
+    pipeline, entered, release, completed, calls, errors = worker
+    submit(pipeline, items=[dict(detection(), track_id=7)])
+    assert entered.wait(1)
+    release.set()
+    assert completed.wait(1)
+    # Correction has no box overlap, but the object manager retained its ID.
+    corrected, _, _ = submit(pipeline, 2, items=[dict(detection(20), track_id=7)])
+    assert corrected[0]['bbox3d']['position'][0] == 0.
+    assert corrected[0]['track_id'] == 7
+    assert len(calls) == 1 and not errors
+
+
+def test_new_object_at_same_location_cannot_inherit_previous_3d_cache(worker):
+    pipeline, entered, release, completed, calls, errors = worker
+    submit(pipeline, items=[dict(detection(), track_id=7)])
+    assert entered.wait(1)
+    release.set()
+    assert completed.wait(1)
+    fresh, _, _ = submit(pipeline, 2, items=[dict(detection(), track_id=8)])
+    assert 'bbox3d' not in fresh[0]
+    assert fresh[0]['bbox3d_status'] == 'pending_background_measurement'
+
+
 def test_busy_worker_replaces_pending_with_latest_due_frame(worker):
     pipeline, entered, release, completed, calls, _ = worker
     submit(pipeline, 1)
