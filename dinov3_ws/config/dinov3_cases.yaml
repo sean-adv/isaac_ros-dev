@@ -2,8 +2,11 @@ dinov3_cases:
   ros__parameters:
     # SAM3: 1–4 comma-separated class names; text features cached per prompt.
     grounding_prompt: 'medicine box.'
-    grounding_box_threshold: 0.5
-    grounding_nms_iou: 1.0  # SAM3 default: no NMS
+    grounding_box_threshold: 0.3
+    # Intersection / smaller-box area >= threshold: keep the larger box before DINO.
+    # Range 0..1; 0 disables containment filtering. Restart to apply.
+    grounding_containment_threshold: 0.95
+    grounding_nms_iou: 1.0  # IoU NMS disabled; containment filtering still applies.
     grounding_max_detections: 20
     # Submit one background SAM3 + DINO job every N processed frames; KCF continues.
     # One job at a time; seed and each catch-up update use latest admitted RGB.
@@ -15,14 +18,19 @@ dinov3_cases:
     # Resize only each KCF working ROI; SAM3/Cat2Real/depth keep original pixels.
     # 0 restores full-resolution tracking. Keep >=16 target pixels where possible.
     kcf_max_roi_side: 256
-    # Catch-up call/time limits; skip intermediate frames. Excludes SAM3/init time.
-    # Time limit is checked between KCF updates. Restart to apply.
-    kcf_replay_max_frames: 16
-    kcf_replay_budget_ms: 1000.0
-    # All tracks tolerate isolated misses, then retire after N misses.
-    # KCF success does not reset these limits. Config only; restart to apply.
-    kcf_max_missed_detections: 2
-    kcf_max_unconfirmed_seconds: 5.0
+    # Catch-up call limit; skip intermediate frames. No elapsed-time limit.
+    # Restart to apply.
+    kcf_replay_max_frames: 30
+    # Retire after N consecutive committed SAM3 misses; 1 retires on the first miss.
+    # Elapsed time alone does not retire tracks; KCF does not reset the miss count.
+    # Config only; restart to apply.
+    kcf_max_missed_detections: 8
+    # Fixed SAM3-seed Lab reference, checked on each unique KCF frame (48x48 crop).
+    # Similarity 0..1; N consecutive values below threshold drop the track and
+    # request SAM3 early, independently of SAM3 misses. 0 disables the check.
+    # Higher threshold is stricter; calibrate for scene/lighting. Restart to apply.
+    kcf_lab_similarity_threshold: 0.35
+    kcf_lab_change_confirmations: 3
     # OpenCV internal pool in the main process; independent workers remain concurrent.
     # 0 preserves the library default. Restart to apply.
     opencv_num_threads: 1

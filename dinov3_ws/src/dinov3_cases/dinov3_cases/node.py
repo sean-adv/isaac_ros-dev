@@ -47,6 +47,7 @@ from .grounded import (
     ObjectGallery,
     validate_settings,
     validate_bbox_limits,
+    validate_containment_threshold,
     TrackedObjectRecognizer,
     recognition_message,
 )
@@ -63,6 +64,7 @@ class CaseNode(Node):
             grounding_prompt=DEFAULT_PROMPT,
             grounding_box_threshold=0.3,
             grounding_nms_iou=1.0,
+            grounding_containment_threshold=0.95,
             grounding_max_detections=20,
             grounding_detection_interval=1,
             bbox_smoothing_frames=3,
@@ -70,9 +72,9 @@ class CaseNode(Node):
             kcf_max_roi_side=0,
             opencv_num_threads=0,
             kcf_replay_max_frames=8,
-            kcf_replay_budget_ms=150.0,
             kcf_max_missed_detections=3,
-            kcf_max_unconfirmed_seconds=5.0,
+            kcf_lab_similarity_threshold=0.35,
+            kcf_lab_change_confirmations=3,
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
@@ -118,10 +120,11 @@ class CaseNode(Node):
         # Set the global OpenCV pool before starting inference/render workers.
         if opencv_threads > 0:
             cv2.setNumThreads(opencv_threads)
-        validate_replay_limits(self.param("kcf_replay_max_frames"),
-                               self.param("kcf_replay_budget_ms"))
+        validate_replay_limits(self.param("kcf_replay_max_frames"))
         KCFProposals(roi_padding=self.param("kcf_roi_padding"),
-                     max_roi_side=self.param("kcf_max_roi_side"))
+                     max_roi_side=self.param("kcf_max_roi_side"),
+                     lab_similarity_threshold=self.param("kcf_lab_similarity_threshold"),
+                     lab_change_confirmations=self.param("kcf_lab_change_confirmations"))
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
@@ -133,6 +136,7 @@ class CaseNode(Node):
         self.grounding_settings["prompt"] = validate_settings(**self.grounding_settings)
         if self.grounding_settings["detection_interval"] > 1:
             kcf_factory()
+        validate_containment_threshold(self.param("grounding_containment_threshold"))
         if not 0 <= self.param("grounding_nms_iou") <= 1:
             raise ValueError("grounding_nms_iou must be between 0 and 1.")
         if not 1 <= self.param("grounding_max_detections") <= 100:
@@ -598,9 +602,9 @@ class CaseNode(Node):
             roi_padding=self.param("kcf_roi_padding"),
             max_roi_side=self.param("kcf_max_roi_side"),
             max_replay_frames=self.param("kcf_replay_max_frames"),
-            replay_budget_ms=self.param("kcf_replay_budget_ms"),
             max_missed_detections=self.param("kcf_max_missed_detections"),
-            max_unconfirmed_seconds=self.param("kcf_max_unconfirmed_seconds"),
+            lab_similarity_threshold=self.param("kcf_lab_similarity_threshold"),
+            lab_change_confirmations=self.param("kcf_lab_change_confirmations"),
         )
         self.proposal_tracker = proposal_tracker
         last_recognition = None
@@ -657,6 +661,7 @@ class CaseNode(Node):
                     min_width=self.param("grounding_min_bbox_width"),
                     min_height=self.param("grounding_min_bbox_height"),
                     min_area=self.param("grounding_min_bbox_area"),
+                    containment_threshold=self.param("grounding_containment_threshold"),
                 )
 
                 def detect(frame, request=request):

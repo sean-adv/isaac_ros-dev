@@ -419,7 +419,7 @@ def test_disappeared_object_retires_without_affecting_confirmed_neighbor():
         pipeline.close()
 
 
-def test_sam3_timeout_removes_successful_kcf_while_job_is_pending(monkeypatch):
+def test_successful_kcf_survives_long_sam3_wait_and_delayed_result(monkeypatch):
     import dinov3_cases.async_kcf as async_kcf
     clock = [0.0]
     monkeypatch.setattr(async_kcf, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
@@ -436,13 +436,20 @@ def test_sam3_timeout_removes_successful_kcf_while_job_is_pending(monkeypatch):
         pipeline.force_detection = True
         update(pipeline, 1, slow, interval=100)
         assert entered.wait(2)
-        clock[0] = 5.0
-        assert update(pipeline, 2, slow, interval=100)[0] == []
-        assert pipeline.active.trackers == pipeline.active.rois == []
+        clock[0] = 60.0
+        tracked, _ = update(pipeline, 2, slow, interval=100)
+        assert len(tracked) == 1
+        identity = tracked[0]['track_id']
+        assert tracked[0]['sam3_misses'] == 0
+        assert tracked[0]['sam3_age_seconds'] == 60.0
+        assert len(pipeline.active.trackers) == len(pipeline.active.rois) == 1
         release.set()
         finish(pipeline)
-        # A delayed result's seed time, not completion time, bounds its life.
-        assert update(pipeline, 2, slow, interval=100)[0] == []
+        # A delayed SAM3 result can still refresh the matching live track.
+        refreshed, _ = update(pipeline, 2, slow, interval=100)
+        assert len(refreshed) == 1
+        assert refreshed[0]['track_id'] == identity
+        assert refreshed[0]['sam3_misses'] == 0
     finally:
         release.set()
         pipeline.close()
@@ -590,12 +597,6 @@ def test_invalid_replay_frame_limit(value):
         AsyncKCFProposals(max_replay_frames=value)
 
 
-@pytest.mark.parametrize('value', [0, -1, True, float('nan'), float('inf'), '150'])
-def test_invalid_replay_time_budget(value):
-    with pytest.raises(ValueError, match='replay_budget_ms'):
-        AsyncKCFProposals(replay_budget_ms=value)
-
-
 def test_slow_detection_skips_arbitrarily_many_intermediate_frames():
     entered, release = threading.Event(), threading.Event()
     initialized, replay_updates = [], []
@@ -657,7 +658,7 @@ def test_catchup_call_budget_preserves_foreground_and_waits_for_normal_interval(
                 assert release[index].wait(3)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(GatedUpdates, max_replay_frames=2, replay_budget_ms=2000)
+    pipeline = AsyncKCFProposals(GatedUpdates, max_replay_frames=2)
     detector = Mock(side_effect=detect)
     try:
         seed(pipeline, interval=100)
@@ -690,7 +691,7 @@ def test_catchup_call_budget_preserves_foreground_and_waits_for_normal_interval(
         pipeline.close()
 
 
-def test_replay_time_budget_stops_before_next_update(monkeypatch, candidate_init):
+def test_replay_continues_after_one_second(monkeypatch, candidate_init):
     from types import SimpleNamespace
     from dinov3_cases import async_kcf
     clock = [0.0]
@@ -703,10 +704,10 @@ def test_replay_time_budget_stops_before_next_update(monkeypatch, candidate_init
             if threading.current_thread().name == 'sam3-kcf-replay':
                 update_entered.set()
                 assert update_release.wait(3)
-                clock[0] += .060
+                clock[0] += 1.060
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(TimedTracker, replay_budget_ms=50)
+    pipeline = AsyncKCFProposals(TimedTracker)
 
     def slow(image):
         entered.set()
@@ -728,11 +729,11 @@ def test_replay_time_budget_stops_before_next_update(monkeypatch, candidate_init
         update(pipeline, 5, slow)
         update_release.set()
         finish(pipeline)
-        assert pipeline.ready is None
+        assert pipeline.ready is not None
         metrics = pipeline.scheduler_metrics()
-        assert metrics['discard_reason'] == 'time_budget'
-        assert metrics['replay_frames'] == 1
-        assert metrics['replay_ms'] == pytest.approx(60)
+        assert metrics['discard_reason'] is None
+        assert metrics['replay_frames'] == 2
+        assert metrics['replay_ms'] == pytest.approx(2120)
         assert not pipeline.force_detection
         assert pipeline.active.proposals[0]['bbox'][0] == 15
     finally:
@@ -756,7 +757,7 @@ def test_new_arrivals_during_catchup_skip_to_newest_each_time(candidate_init):
                     assert replay_release.wait(3)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(BlockFirstReplay, max_replay_frames=2, replay_budget_ms=2000)
+    pipeline = AsyncKCFProposals(BlockFirstReplay, max_replay_frames=2)
 
     def slow(image):
         entered.set()
@@ -806,7 +807,7 @@ def test_context_change_cancels_remaining_replay_batch(candidate_init):
                 assert replay_release.wait(3)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(BlockFirstReplay, replay_budget_ms=2000)
+    pipeline = AsyncKCFProposals(BlockFirstReplay)
 
     def slow(image):
         detect_entered.set()
@@ -1139,7 +1140,7 @@ def test_first_result_wait_keeps_seed_frame_and_recognition_together(context):
         pipeline.close()
 
 
-def test_initial_replay_timeout_remains_retryable(monkeypatch):
+def test_initial_replay_frame_limit_remains_retryable(monkeypatch):
     from dinov3_cases import async_kcf
     clock = [0.0]
     monkeypatch.setattr(async_kcf, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
@@ -1157,7 +1158,7 @@ def test_initial_replay_timeout_remains_retryable(monkeypatch):
         assert release.wait(3)
         return detect(image)
 
-    pipeline = AsyncKCFProposals(TimedTracker, replay_budget_ms=50)
+    pipeline = AsyncKCFProposals(TimedTracker, max_replay_frames=1)
     try:
         update(pipeline, 0, slow)
         assert entered.wait(2)
@@ -1165,7 +1166,7 @@ def test_initial_replay_timeout_remains_retryable(monkeypatch):
         update(pipeline, 2, slow)
         release.set()
         finish(pipeline)
-        assert pipeline.scheduler_metrics()['discard_reason'] == 'time_budget'
+        assert pipeline.scheduler_metrics()['discard_reason'] == 'frame_budget'
         assert not pipeline.active.initialized
         assert pipeline.has_result()
         assert pipeline.force_detection

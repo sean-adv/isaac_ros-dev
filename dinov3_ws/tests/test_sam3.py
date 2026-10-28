@@ -43,10 +43,13 @@ def fake_detector():
 def test_presence_score_and_original_coordinates():
     detector=fake_detector();image=Image.new('RGB',(200,100))
     result=detector.detect(image,'bottle,box.',.2,1.,20)
-    assert len(result)==2
-    assert [r['detection_label'] for r in result]==['bottle','box']
+    # Identical boxes across prompts are deduplicated before classification.
+    assert len(result)==1
+    assert [r['detection_label'] for r in result]==['bottle']
     assert result[0]['bbox']==[50,25,150,75]
     assert result[0]['detection_score']==.25
+    assert len(detector.detect(image,'bottle,box.',.2,1.,20,
+                               containment_threshold=0.0))==2
     assert detector.detect(image,'bottle,box.',.3,1.,20)==[]
     assert detector.detect(image,'box.',.2,1.,20,min_width=101)==[]
 

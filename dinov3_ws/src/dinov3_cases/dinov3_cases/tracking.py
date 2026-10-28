@@ -92,16 +92,10 @@ class TrackIdentities:
 class TrackLifecycle:
     """Require detector support; KCF success alone never renews a track's life."""
 
-    def __init__(self, max_missed_detections=3,
-                 max_unconfirmed_seconds=5.0):
+    def __init__(self, max_missed_detections=3):
         if type(max_missed_detections) is not int or max_missed_detections < 1:
             raise ValueError("kcf_max_missed_detections must be an integer >= 1")
-        if (isinstance(max_unconfirmed_seconds, bool)
-                or not isinstance(max_unconfirmed_seconds, (int, float))
-                or not math.isfinite(max_unconfirmed_seconds) or max_unconfirmed_seconds <= 0):
-            raise ValueError("kcf_max_unconfirmed_seconds must be finite and > 0")
         self.max_missed_detections = max_missed_detections
-        self.max_unconfirmed_seconds = max_unconfirmed_seconds
         self.clear()
 
     def clear(self):
@@ -110,9 +104,9 @@ class TrackLifecycle:
     def update(self, items, detected_ids=None, detected_at=None, *, now=None):
         """Count one miss per committed SAM3 result, never per KCF/camera frame.
 
-        No detector result (pending/error/discarded) is not a miss. An absolute
-        detector age bound still removes stale boxes if detection stops working.
-        New and established tracks use the same miss and age limits.
+        No detector result (pending/error/discarded) is not a miss. Elapsed time
+        alone never retires a track; age is retained only for diagnostics.
+        New and established tracks use the same miss limit.
         """
         now = time.monotonic() if now is None else now
         detected_at = now if detected_at is None else detected_at
@@ -127,8 +121,7 @@ class TrackLifecycle:
                 else:
                     state["misses"] += 1
             age = max(0.0, now - state["confirmed_at"])
-            if (age >= self.max_unconfirmed_seconds
-                    or state["misses"] >= self.max_missed_detections):
+            if state["misses"] >= self.max_missed_detections:
                 retired.add(identity)
                 continue
             states[identity] = state

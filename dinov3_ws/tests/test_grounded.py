@@ -45,6 +45,38 @@ def test_clip_suppress_duplicates_without_merging_adjacent_objects():
     assert clean_proposals([], [], [], (60, 50)) == []
 
 
+@pytest.mark.parametrize("small,removed", [
+    ([10, 10, 30, 30], True),   # Fully contained, low IoU with outer box.
+    ([81, 10, 101, 30], True),  # Exactly 95% of small box area is covered.
+    ([82, 10, 102, 30], False), # 90% is below the selected threshold.
+    ([100, 10, 120, 30], False), # Adjacent boxes remain separate.
+])
+def test_contained_small_box_removed_before_dino(small, removed):
+    outer = [0, 0, 100, 100]
+    # Higher confidence and a different prompt label do not protect small boxes.
+    result = clean_proposals([small, outer], [.99, .7], ["bottle", "box"],
+                             (200, 150), nms_iou=1.0)
+    expected = [outer] if removed else [small, outer]
+    assert [item["bbox"] for item in result] == expected
+
+
+def test_containment_filter_precedes_detection_limit_and_handles_nested_boxes():
+    boxes = [[20, 20, 30, 30], [10, 10, 40, 40], [0, 0, 100, 100]]
+    result = clean_proposals(boxes, [.99, .9, .7], ["box"] * 3,
+                             (100, 100), nms_iou=1.0, limit=1)
+    assert [item["bbox"] for item in result] == [[0, 0, 100, 100]]
+    assert result[0]["detection_score"] == .7
+
+
+def test_containment_uses_clipped_boxes_and_keeps_best_equal_area_duplicate():
+    result = clean_proposals([[-10, -10, 100, 100], [0, 0, 100, 100]],
+                             [.7, .9], ["box", "bottle"], (100, 100), nms_iou=1.0)
+    assert len(result) == 1
+    assert result[0]["bbox"] == [0, 0, 100, 100]
+    assert result[0]["detection_score"] == .9
+    assert result[0]["detection_label"] == "bottle"
+
+
 def test_object_preprocessing_handles_small_and_thin_crops():
     for size in [(1, 1), (1, 1000), (1000, 1), (77, 151)]:
         result = prepare_object(Image.new("RGB", size, "red"), 224, 16)
@@ -383,3 +415,17 @@ def test_ros_2d_filters_unknown_without_changing_tracking_ids_or_input():
     assert message.detections[0].results[0].hypothesis.class_id == "medicine"
     assert not recognition_message([items[0], items[2]], header).detections
     assert [item["label"] for item in items] == ["unknown", "medicine", "unknown"]
+
+
+@pytest.mark.parametrize("threshold,count", [(0.0, 2), (0.90, 1), (0.95, 2), (1.0, 2)])
+def test_configurable_containment_threshold(threshold, count):
+    result = clean_proposals([[82, 10, 102, 30], [0, 0, 100, 100]],
+                             [.99, .7], ["box"] * 2, (200, 150), nms_iou=1.0,
+                             containment_threshold=threshold)
+    assert len(result) == count
+
+
+@pytest.mark.parametrize("value", [-.1, 1.1, True, float("nan"), float("inf"), "0.95"])
+def test_invalid_containment_threshold(value):
+    with pytest.raises(ValueError, match="containment_threshold"):
+        clean_proposals([], [], [], (100, 100), containment_threshold=value)

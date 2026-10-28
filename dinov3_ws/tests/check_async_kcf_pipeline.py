@@ -24,7 +24,7 @@ def main():
         rclpy.init(args=['--ros-args', '-p', f'cases_dir:={directory}', '-p', 'port:=0',
                         '-p', 'pose_enabled:=false', '-p', 'grounding_prompt:=person',
                         '-p', 'grounding_detection_interval:=3', '-p', 'opencv_num_threads:=1',
-                        '-p', 'kcf_replay_max_frames:=64', '-p', 'kcf_replay_budget_ms:=2000.0'], domain_id=131)
+                        '-p', 'kcf_replay_max_frames:=64'], domain_id=131)
         node = CaseNode()
         client = node.app.test_client()
 

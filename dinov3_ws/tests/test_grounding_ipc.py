@@ -145,3 +145,10 @@ def test_external_pool_uses_same_pixels_without_transport_copy(proxy):
         for frame in frames:
             frame.release()
         pool.close()
+
+
+@pytest.mark.parametrize("threshold", [0.0, 0.9, 0.95, 1.0])
+def test_containment_threshold_reaches_worker(proxy, threshold):
+    result = proxy().detect(Image.new("RGB", (40, 20)), "box.", .3, 1., 20,
+                            containment_threshold=threshold)
+    assert result[0]["containment_threshold"] == threshold

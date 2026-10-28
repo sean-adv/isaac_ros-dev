@@ -15,13 +15,13 @@
 ./dinov3_ws/run.sh --ros-args -p grounding_box_threshold:=0.5
 ```
 
-預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.5、NMS 停用、每幀最多 20 個框。
+預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.5、IoU NMS 停用、每幀最多 20 個框。SAM3 框裁切至原圖並通過尺寸過濾後，先以 `grounding_containment_threshold`（預設 0.95，範圍 0–1；0 停用，修改後重啟）作為「交集面積 ÷ 小框面積」門檻移除被大框包含的小框（跨 prompt 類別，優先保留大框；同面積時保留高信心框），再套用 IoU NMS 與框數上限，最後進行 DINO 分類及 KCF 初始化。
 
 SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。每隔 N 個不同處理影格嘗試提交一次背景 SAM3＋DINO，最多一個進行中的任務，不排隊；設為 1 則停用 KCF，維持每幀同步 SAM3。等待 SAM3／DINO 時，主流程持續用原本 KCF 更新 bbox，分類沿用快取。首次初始化／切換來源或設定時持續接收最新 RGB，不發布暫時的空結果；相同輸入未改變時不重複複製。計數以實際處理的不同影格為準，相機跳過的影格不計入。
 
 SAM3 完成後，同一背景工作先在該次偵測的原始 RGB 影格與 bbox 上執行 DINOv3／Lab，並建立物件診斷快照，再以該偵測影格初始化候選 KCF。每次補追都直接取當下最新的已處理影格，跳過中間影格；若更新完成時又有新影格，就再次取最新影格更新，追上後才一起交接框、分類與診斷快照。偵測影像的獨立副本保留至初始化完成，共享偵測輸入租約在 SAM3 回覆後釋放。排程器只保存一張最新影格，不保存中間影格歷史，因此不再因歷史缺幀而丟棄候選。
 
-補追呼叫次數與時間上限由 `kcf_replay_max_frames`（預設最多 8 次更新，並非跳過影格數或歷史容量）與 `kcf_replay_budget_ms` 控制，不含 SAM3、DINO 與 KCF 初始化耗時。時間在每次更新前檢查，單次不可中斷的更新可能超過預算；若已追上即可交接，否則超限後不再啟動下一次更新。超限時丟棄候選 tracker，保留前景 tracker 與當前有效框，依正常偵測間隔再提交。追蹤失敗或 context 變更仍會丟棄候選；變更來源後清空最新影格，不套用舊結果。跳幀間隔過大仍可能使 KCF 追蹤失敗。`grounding_schedule` 提供 `seed_frame_key`（原始偵測影格）、`seed_skipped_frames`（固定為 0，始終在偵測影格初始化）、`catchup_skipped_frames`（補追跳過的已處理影格總數）、`init_ms`、`replay_frames`（實際補追呼叫次數）、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。策略修改後需重新啟動服務。
+補追呼叫次數由 `kcf_replay_max_frames`（預設最多 8 次更新，並非跳過影格數或歷史容量）控制，沒有經過時間上限；`replay_ms` 仍記錄補追耗時。超限時丟棄候選 tracker，保留前景 tracker 與當前有效框，依正常偵測間隔再提交。追蹤失敗或 context 變更仍會丟棄候選；變更來源後清空最新影格，不套用舊結果。跳幀間隔過大仍可能使 KCF 追蹤失敗。`grounding_schedule` 提供 `seed_frame_key`（原始偵測影格）、`seed_skipped_frames`（固定為 0，始終在偵測影格初始化）、`catchup_skipped_frames`（補追跳過的已處理影格總數）、`init_ms`、`replay_frames`（實際補追呼叫次數）、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。策略修改後需重新啟動服務。
 
 網頁狀態列的 **result FPS** 是完整辨識主迴圈最近 3 秒的結果頻率，包含影像準備、深度等待、候選框更新與每幀 3D 計算（非同步模式的 DINO 已在背景執行）；不是 KCF 單獨 FPS 或 MJPEG 顯示 FPS。相機區塊另外顯示 **input FPS**。`/api/status` 的 `performance` 提供 `image_prepare_ms`（包含共享複製）、`shared_copy_ms`（前者的子項）、`depth_wait_ms`、`proposal_update_ms`（包含非同步排程、最新影格複製與前景 KCF）、`recognize_ms`（交接時記錄背景辨識耗時，其餘影格為 0）、`bbox3d_ms`、`render_ms`。首次交接的深度等待發生在辨識後，會同時包含在 `bbox3d_ms` 中。平常的 `detect_ms` 為影像準備＋深度等待＋候選框更新的合計，不能當成純 KCF 耗時。
 

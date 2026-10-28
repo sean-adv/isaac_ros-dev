@@ -122,17 +122,27 @@ def test_confirmed_track_tolerates_isolated_miss_then_retires_after_three():
     assert lifecycle.update([item], set(), now=6) == ([], {1})
 
 
-def test_detector_timeout_retires_track_even_without_new_detector_results():
+def test_elapsed_time_without_detector_results_does_not_retire_track():
     lifecycle = TrackLifecycle()
     item = dict(box(), track_id=1)
     lifecycle.update([item], {1}, detected_at=0, now=.4)
-    assert lifecycle.update([item], now=4.99)[0]
-    assert lifecycle.update([item], now=5) == ([], {1})
+    for now in (5, 60, 3600):
+        tracked, retired = lifecycle.update([item], now=now)
+        assert not retired
+        assert tracked[0]['sam3_age_seconds'] == now
+        assert tracked[0]['sam3_misses'] == 0
+    # Long gaps do not disable the consecutive committed-miss limit.
+    assert lifecycle.update([item], set(), now=3601)[0]
+    assert lifecycle.update([item], set(), now=7200)[0]
+    assert lifecycle.update([item], set(), now=10800) == ([], {1})
 
 
-def test_stale_detection_result_cannot_start_a_fresh_track_lifetime():
+def test_delayed_detection_retains_original_age_without_time_based_retirement():
     lifecycle = TrackLifecycle()
-    assert lifecycle.update([dict(box(), track_id=1)], {1}, detected_at=0, now=6) == ([], {1})
+    tracked, retired = lifecycle.update([dict(box(), track_id=1)], {1}, detected_at=0, now=6)
+    assert not retired
+    assert tracked[0]['sam3_age_seconds'] == 6
+    assert tracked[0]['sam3_hits'] == 1
 
 
 def test_track_lifetime_is_independent_for_each_object_and_unknown_is_allowed():
@@ -152,8 +162,6 @@ def test_track_lifetime_is_independent_for_each_object_and_unknown_is_allowed():
 @pytest.mark.parametrize('options', [
     {'max_missed_detections': True}, {'max_missed_detections': -1},
     {'max_missed_detections': 0}, {'max_missed_detections': 1.5},
-    {'max_unconfirmed_seconds': False}, {'max_unconfirmed_seconds': 0},
-    {'max_unconfirmed_seconds': float('inf')}, {'max_unconfirmed_seconds': float('nan')},
 ])
 def test_invalid_lifecycle_limits_are_rejected(options):
     with pytest.raises(ValueError, match='kcf_'):

@@ -36,10 +36,11 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
     scheduler.update.return_value = ([dict(bbox=[20, 20, 60, 40], label='medicine', score=.9)], 'kcf')
     params = dict(engine_path='unused', grounding_engine_path='unused',
                   grounding_worker_python='unused', grounding_ipc_timeout=1.,
-                  kcf_roi_padding=.5, kcf_max_roi_side=0, kcf_replay_max_frames=8, kcf_replay_budget_ms=150.,
+                  kcf_roi_padding=.5, kcf_max_roi_side=0, kcf_replay_max_frames=8,
                   kcf_max_missed_detections=3,
-                  kcf_max_unconfirmed_seconds=5.,
+                      kcf_lab_similarity_threshold=.35, kcf_lab_change_confirmations=3,
                   grounding_nms_iou=1., grounding_max_detections=20,
+                      grounding_containment_threshold=.95,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                   grounding_min_bbox_area=0, pose_enabled=True)
     node = SimpleNamespace(

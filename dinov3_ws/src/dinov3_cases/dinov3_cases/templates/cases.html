@@ -73,7 +73,7 @@
 <video id="overlay" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
 <p data-video-status role="status">Connecting video…</p>
 <p>
-<small>det is the last SAM3 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects. Track status: confirmed has SAM3 support; coasting temporarily tolerates missed detections. New and established tracks use the same removal limits. Stale tracks are removed even if KCF continues tracking.</small>
+<small>det is the last SAM3 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects. Track status: confirmed has SAM3 support; coasting temporarily tolerates missed detections. New and established tracks use the same consecutive SAM3 miss limit. Elapsed time alone does not remove tracks; KCF success does not reset the miss count.</small>
 </p>
 <div id="recognition-list">
 </div>

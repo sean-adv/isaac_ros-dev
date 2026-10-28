@@ -4,6 +4,8 @@ import math
 
 import cv2
 
+from .kcf_lab import LabCheckedTracker, validate_lab_settings
+
 
 def validate_detection_interval(value):
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -67,10 +69,15 @@ class KCFProposals:
     Trackers use fixed crops padded per side until the next detection.
     max_roi_side bounds working pixels only; boxes stay in input-image coordinates.
     Small targets limit downsampling to retain at least 16 pixels where possible.
-    refresh_requested signals an approaching crop boundary to the async caller.
+    Optional Lab checks reject consecutive appearance changes against the SAM3 seed.
+    refresh_requested signals a crop boundary or lost/changed track to async callers.
     """
 
-    def __init__(self, factory=None, roi_padding=0.5, max_roi_side=0):
+    def __init__(self, factory=None, roi_padding=0.5, max_roi_side=0,
+                 lab_similarity_threshold=0.0, lab_change_confirmations=3):
+        validate_lab_settings(lab_similarity_threshold, lab_change_confirmations)
+        self.lab_similarity_threshold = lab_similarity_threshold
+        self.lab_change_confirmations = lab_change_confirmations
         if roi_padding is not None and (
             isinstance(roi_padding, bool) or not isinstance(roi_padding, (int, float))
             or not math.isfinite(roi_padding) or roi_padding < 0
@@ -176,7 +183,10 @@ class KCFProposals:
                 surviving_trackers.append(tracker)
                 surviving_rois.append(roi)
                 self.refresh_requested |= self._near_edge(bbox, roi, pixels)
-                proposals.append(dict(previous, bbox=bbox,
+                lab_metrics = (dict(kcf_lab_similarity=tracker.lab_similarity,
+                                    kcf_lab_changed_frames=tracker.lab_changed_frames)
+                               if isinstance(tracker, LabCheckedTracker) else {})
+                proposals.append(dict(previous, **lab_metrics, bbox=bbox,
                                       area=(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]),
                                       bbox_source="kcf"))
             if retain_valid_tracks and lost:
@@ -197,6 +207,9 @@ class KCFProposals:
                     tracker = factory()
                     if self.max_roi_side:
                         tracker = _ResizedTracker(tracker, self.max_roi_side)
+                    if self.lab_similarity_threshold > 0:
+                        tracker = LabCheckedTracker(tracker, self.lab_similarity_threshold,
+                                                    self.lab_change_confirmations)
                     x0, y0, x1, y1 = proposal["bbox"]
                     roi = self._roi(proposal["bbox"], pixels)
                     try:

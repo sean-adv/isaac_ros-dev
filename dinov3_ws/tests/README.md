@@ -25,12 +25,19 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
 KCF 非同步模式（`grounding_detection_interval > 1`）採逐物品交接：背景 SAM3
 結果在偵測影格初始化、補追到目前影格後，以框重疊、中心距離及尺寸配對。
 配對物品沿用固定 `track_id` 並更新自己的 KCF／ROI；SAM3 漏偵測或回傳空集合時，
-舊 KCF 可在有限時間內繼續追蹤。新舊框統一可短暫 coasting，但連續漏掉三次
-SAM3 結果或距最後 SAM3 支持達五秒即淘汰，即使 KCF 仍回報成功也不續命。
-這些限制分別由 `kcf_max_missed_detections` 與
-`kcf_max_unconfirmed_seconds` 設定，修改後重啟。漏偵測次數僅計算完成交接的
-SAM3 結果；相機／KCF 更新不增加次數。偵測過期時間從 SAM3 輸入影格時間起算，
-不從延遲結果完成時重新起算。被淘汰的身分也會從恢復快取移除。網頁物品清單
+舊 KCF 可繼續追蹤，直到達到連續 SAM3 漏偵測次數限制。
+新舊框統一可 coasting，限制由 `kcf_max_missed_detections` 設定，修改後重啟。
+漏偵測次數僅計算完成交接的 SAM3 結果；相機／KCF 更新、等待結果或經過時間
+不增加次數，也不因距離上次 SAM3 確認過久而淘汰。SAM3 age 僅供診斷顯示。
+KCF 成功不重設漏偵測次數；SAM3 再次確認該物品時才重設。
+額外的 Lab 外觀檢查會將目前 KCF 框與 SAM3 seed 框比較（CPU、48×48、固定參考）。
+`kcf_lab_similarity_threshold` 預設 0.35，連續 `kcf_lab_change_confirmations`（預設 3）
+個不同處理影格低於門檻即移除該追蹤並提前要求 SAM3，不必等漏檢次數達上限。
+相似度介於 0–1，越高越相近；門檻設 0 可停用，修改後重啟。
+保留中的框輸出 `kcf_lab_similarity` 與 `kcf_lab_changed_frames` 供診斷。
+這是色彩分布檢查，同色背景／物件可能無法區分，光照／曝光劇變也可能觸發，需實景校準。
+
+被淘汰的身分也會從恢復快取移除。網頁物品清單
 顯示 track 狀態、SAM3 age 及 miss 次數；`unknown` 類別本身不會觸發淘汰。
 失效的 KCF 不顯示舊框，但保留最後身分一秒供鄰近位置
 重新配對；逾時、相機或設定 context 改變後不沿用舊身分。外觀近似物品交叉或

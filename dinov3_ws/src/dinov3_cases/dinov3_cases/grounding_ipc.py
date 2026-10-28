@@ -137,7 +137,7 @@ class SharedMemoryGroundingDetector:
             self._request("validate_prompt", prompt=prompt)
 
     def detect(self, image, prompt, box_threshold, nms_iou, limit,
-               *, min_width=0, min_height=0, min_area=0):
+               *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
         with self.lock:
             prepare_start = time.monotonic_ns()
             owned = not isinstance(image, SharedFrame)
@@ -147,13 +147,13 @@ class SharedMemoryGroundingDetector:
             prepare_ms = (time.monotonic_ns() - prepare_start) / 1e6
             try:
                 return self._detect_frame(frame, prompt, box_threshold, nms_iou, limit,
-                                          min_width, min_height, min_area, prepare_ms)
+                                          min_width, min_height, min_area, prepare_ms, containment_threshold)
             finally:
                 if owned:
                     frame.release()
 
     def _detect_frame(self, frame, prompt, box_threshold, nms_iou, limit,
-                      min_width, min_height, min_area, prepare_ms):
+                      min_width, min_height, min_area, prepare_ms, containment_threshold):
         copy_ms = frame.copy_ms
         reply = self._request(
             "detect",
@@ -170,6 +170,7 @@ class SharedMemoryGroundingDetector:
             min_width=min_width,
             min_height=min_height,
             min_area=min_area,
+            containment_threshold=containment_threshold,
         )
         self.last_metrics["shared_copy_ms"] = copy_ms
         self.last_metrics["image_prepare_ms"] = prepare_ms
@@ -277,6 +278,7 @@ def worker_main(fd, detector_factory=None, version=None):
                         min_width=request.get("min_width", 0),
                         min_height=request.get("min_height", 0),
                         min_area=request.get("min_area", 0),
+                        containment_threshold=request.get("containment_threshold", 0.95),
                     )
                     del image
                     result = dict(

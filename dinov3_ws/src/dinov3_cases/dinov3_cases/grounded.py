@@ -48,9 +48,16 @@ def validate_bbox_limits(min_width=0, min_height=0, min_area=0):
             raise ValueError(f"{name} must be a nonnegative integer.")
 
 
+def validate_containment_threshold(value):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or not 0 <= value <= 1):
+        raise ValueError("containment_threshold must be a finite number between 0 and 1.")
+
+
 def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
-                    *, min_width=0, min_height=0, min_area=0):
-    """Clip original-image XYXY boxes; suppress duplicate prompts, never union boxes."""
+                    *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
+    """Clip XYXY boxes; remove contained boxes before score NMS and limit."""
+    validate_containment_threshold(containment_threshold)
     validate_bbox_limits(min_width, min_height, min_area)
     width, height = size
     candidates = []
@@ -74,8 +81,25 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
                 area=area,
             )
         )
+    # Prefer larger boxes when intersection / smaller area reaches the threshold, even
+    # across prompt labels or when the smaller box has a higher score.
+    # Equal-area duplicates keep the higher score. Filter before the result
+    # limit so discarded small boxes cannot consume detection slots.
+    outer_boxes = []
+    for item in sorted(candidates, key=lambda x: (x["area"], x["detection_score"]),
+                       reverse=True):
+        a = item["bbox"]
+        for other in outer_boxes:
+            b = other["bbox"]
+            intersection = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
+                0, min(a[3], b[3]) - max(a[1], b[1])
+            )
+            if containment_threshold > 0 and intersection / item["area"] >= containment_threshold:
+                break
+        else:
+            outer_boxes.append(item)
     kept = []
-    for item in sorted(candidates, key=lambda x: x["detection_score"], reverse=True):
+    for item in sorted(outer_boxes, key=lambda x: x["detection_score"], reverse=True):
         a = item["bbox"]
         duplicate = False
         for other in kept:

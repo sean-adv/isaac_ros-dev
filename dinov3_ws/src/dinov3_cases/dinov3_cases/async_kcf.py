@@ -1,41 +1,38 @@
 """Background detection, detection-frame KCF seeding, and latest-frame catch-up."""
 
 import threading
-import math
 import time
 
 from .kcf import KCFProposals, validate_detection_interval
 from .tracking import TrackIdentities, TrackLifecycle
 
 
-def validate_replay_limits(max_replay_frames, replay_budget_ms):
+def validate_replay_limits(max_replay_frames):
     if type(max_replay_frames) is not int or max_replay_frames < 1:
         raise ValueError("max_replay_frames must be an integer >= 1")
-    if (isinstance(replay_budget_ms, bool) or not isinstance(replay_budget_ms, (int, float))
-            or not math.isfinite(replay_budget_ms) or replay_budget_ms <= 0):
-        raise ValueError("replay_budget_ms must be finite and > 0")
 
 
 class AsyncKCFProposals:
     """Seed candidates on the detection image and repeatedly track the latest frame.
 
     The main thread keeps active trackers until a candidate catches up. Matched
-    objects switch individually; unmatched valid trackers survive briefly until
-    detector miss/age limits retire them. All tracks use the same limits.
-    Each update skips intermediate arrivals; frame and
-    time budgets bound catch-up work. Interval=1 disables async KCF.
+    objects switch individually; unmatched valid trackers survive until
+    the detector miss limit retires them. All tracks use the same limits.
+    Each update skips intermediate arrivals; the frame budget bounds catch-up work.
+    Interval=1 disables async KCF.
     """
 
     def __init__(self, factory=None, wake=None, roi_padding=0.5,
-                 max_replay_frames=8, replay_budget_ms=150.0, max_roi_side=0,
-                 max_missed_detections=3,
-                 max_unconfirmed_seconds=5.0):
-        validate_replay_limits(max_replay_frames, replay_budget_ms)
+                 max_replay_frames=8, max_roi_side=0,
+                 max_missed_detections=3, lab_similarity_threshold=0.0,
+                 lab_change_confirmations=3):
+        validate_replay_limits(max_replay_frames)
         self.max_replay_frames = max_replay_frames
-        self.replay_budget_ms = replay_budget_ms
         self.factory = factory
         self.roi_padding = roi_padding
         self.max_roi_side = max_roi_side
+        self.lab_settings = dict(lab_similarity_threshold=lab_similarity_threshold,
+                                 lab_change_confirmations=lab_change_confirmations)
         self.wake = wake or (lambda: None)
         self.lock = threading.Lock()
         self.closed = False
@@ -47,14 +44,15 @@ class AsyncKCFProposals:
         self.serial = 0
         self.last_key = None
         self.ready = self.error = None
-        self.active = KCFProposals(factory, roi_padding=roi_padding, max_roi_side=max_roi_side)
+        self.active = KCFProposals(factory, roi_padding=roi_padding,
+                                   max_roi_side=max_roi_side, **self.lab_settings)
         self.frames_since_submit = 0
         self.force_detection = True
         self.last_metrics = {}
         self.last_recognition = None
         self.last_replay = {}
         self.identities = TrackIdentities()
-        self.lifecycle = TrackLifecycle(max_missed_detections, max_unconfirmed_seconds)
+        self.lifecycle = TrackLifecycle(max_missed_detections)
 
     def has_result(self):
         with self.lock:
@@ -102,7 +100,7 @@ class AsyncKCFProposals:
                     return
             init_started = time.monotonic()
             candidate = KCFProposals(self.factory, roi_padding=self.roi_padding,
-                                     max_roi_side=self.max_roi_side)
+                                     max_roi_side=self.max_roi_side, **self.lab_settings)
             candidate.detected_at = detected_at
             candidate.update(pixels, serial, version, 2**63, lambda: proposals,
                              retain_valid_tracks=True)
@@ -110,7 +108,7 @@ class AsyncKCFProposals:
             if candidate.retry_detection:
                 discard_reason = "init_failed"
                 return
-            # Detection and model initialization do not consume replay budget.
+            # Record catch-up time separately from detection and initialization.
             replay_started = time.monotonic()
             while True:
                 with self.lock:
@@ -126,9 +124,6 @@ class AsyncKCFProposals:
                 # Never hold the foreground lock during KCF work.
                 if replay_frames >= self.max_replay_frames:
                     discard_reason = "frame_budget"
-                    return
-                if (time.monotonic() - replay_started)*1000 >= self.replay_budget_ms:
-                    discard_reason = "time_budget"
                     return
                 catchup_skipped_frames += next_serial - serial - 1
                 serial = next_serial
@@ -158,7 +153,7 @@ class AsyncKCFProposals:
                         discard_reason=None if published else discard_reason,
                     )
                     if not published and (not self.active.initialized
-                                          or discard_reason not in ("frame_budget", "time_budget")):
+                                          or discard_reason != "frame_budget"):
                         self.force_detection = True
                     # On overload preserve the active tracker and normal submit
                     # interval, avoiding an immediate detector/replay retry loop.
@@ -184,7 +179,7 @@ class AsyncKCFProposals:
                 self.context = identity
                 self.version += 1
                 self.active = KCFProposals(self.factory, roi_padding=self.roi_padding,
-                                           max_roi_side=self.max_roi_side)
+                                           max_roi_side=self.max_roi_side, **self.lab_settings)
                 self.latest = None
                 self.last_key = None
                 self.ready = self.error = None
