@@ -38,7 +38,11 @@ KCF 成功不重設漏偵測次數；SAM3 再次確認該物品時才重設。
 這是色彩分布檢查，同色背景／物件可能無法區分，光照／曝光劇變也可能觸發，需實景校準。
 
 被淘汰的身分也會從恢復快取移除。網頁物品清單
-顯示 track 狀態、SAM3 age 及 miss 次數；`unknown` 類別本身不會觸發淘汰。
+顯示 track 狀態、SAM3 age 及 miss 次數。首次辨識就是 `unknown` 的物件仍可保留；
+同一 `track_id` 曾有有效分類、後來辨識為 `unknown` 時，在新結果交接後立即淘汰，
+同步清除 KCF、ROI、生命週期與身分恢復快取，不等 SAM3 miss 限制。
+先完成物件配對再淘汰，避免舊的已知 tracker 被當成漏偵測物件保留回來。
+此規則適用同步與非同步模式；判斷依新的辨識結果，不依 KCF 更新影格。
 失效的 KCF 不顯示舊框，但保留最後身分一秒供鄰近位置
 重新配對；逾時、相機或設定 context 改變後不沿用舊身分。外觀近似物品交叉或
 移動過遠仍可能換 ID，這版配對尚未加入外觀特徵。同步模式（間隔為 1）仍逐幀
@@ -163,3 +167,9 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_depth_bbox.py \
 ```
 
 比較時保持相同背景負載；2026-10-18 的量測只有原相機驅動持續運作，無推論與 JPEG 負載。`--rounds` 和 `--repeats` 預設為 3 和 2，使用 12 張輸入時每種方案、每個情境有 72 個計時樣本。
+
+## 多物體 KCF 平行化
+
+`test_kcf_parallel.py` 驗證固定 Worker 所有權、init／update 執行緒一致、READY 凍結、generation 失效、mailbox 背壓、取消回收、快照 replay、同影格交接、失敗保留與 reset／關閉。`benchmark_kcf_parallel.py` 使用真實 OpenCV KCF，比較 1／2／3／5／8 個物體與串行／2／4／6 workers，記錄 batch P50/P95/P99、每物體時間、CPU、執行緒數及輸出一致性；支援 `--image`／`--boxes` 真實影像輸入。
+
+目前架構、重跑指令、Thor KCF 與 ROS2 輸出比較見 [KCF_PERSISTENT_WORKERS_20261029.md](KCF_PERSISTENT_WORKERS_20261029.md)。`profile_kcf_intervals.py --parallel-workers 0/4` 比較串行與固定 Worker，所有輸出 topics 隔離到 `/kcf_benchmark/*`；`--image` 可透過 ROS2 以 30 Hz 重播固定場景。舊 ThreadPool 結果保留於 [歷史報告](KCF_PARALLEL_20261029.md)。預設 `kcf_parallel_enabled: false`，啟用時維持 `opencv_num_threads: 1`。

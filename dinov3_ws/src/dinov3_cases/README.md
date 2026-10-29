@@ -6,8 +6,8 @@
 
 1. `node.py` 接收最新 RGB 影格，先配對深度，再取得 `frame_pool.py` 的共享影像租約。
 2. `async_kcf.py` 決定同步偵測或背景偵測；`grounding_ipc.py` 將影像交給同一份 `.venv` 的 TensorRT 11 子程序中的 `sam3_trt.py`，使用官方 TensorRT vision 與 PyTorch bbox head。主程序使用 Cat2Real FP32 Torch-TensorRT。
-3. 非同步模式每 `grounding_detection_interval` 個已處理影格提交一次背景工作：SAM3 找框後，DINOv3 在同一張偵測影像上辨識；圖庫更新也在此背景工作完成。前景 KCF 持續追蹤舊集合。背景以偵測影像初始化新 tracker，再每次跳到當下最新已處理影格補追，追上後一起交接框、分類及診斷快照；部分追蹤遺失只移除該物件，不在前景重跑 DINO。追蹤遺失或接近 ROI 邊界可提早觸發整組工作；靜態上傳圖片每秒可刷新。間隔為 1 時停用 KCF，由推論 worker 依序執行兩個模型。
-4. `tracking.py` 平滑候選框；可選的 ROI 追蹤另外管理 ID、命中比例及顯示門檻。
+3. 非同步模式每 `grounding_detection_interval` 個已處理影格提交一次背景工作：SAM3 找框後，DINOv3 在同一張偵測影像上辨識；圖庫更新也在此背景工作完成。前景 KCF 持續追蹤舊集合。背景以偵測影像初始化新 tracker。固定 Worker 模式補追一次最新快照後凍結 READY，前景先補追到當前共同影格再交接框、分類及診斷快照；串行模式仍逐次追最新影格。部分追蹤遺失只移除該物件，不在前景重跑 DINO。追蹤遺失或接近 ROI 邊界可提早觸發整組工作；靜態上傳圖片每秒可刷新。間隔為 1 時停用 KCF，由推論 worker 依序執行兩個模型。
+4. `tracking.py` 平滑候選框並管理物件身分。新辨識結果配對後，同一物件若曾有有效分類、這次變為 `unknown`，立即移除框、KCF／ROI 與恢復快取；首次就是 `unknown` 的物件仍保留。同步與非同步模式都套用此規則。
 5. `encoder.py` 將 Cat2Real 裁切圖置中補白至 384，從一次 forward 保留 pooler 描述向量與 patch 熱圖特徵；`grounded.py` 建立圖庫、分類及管理辨識快取。先以 `recognition_threshold` 篩選 DINO cosine 分數，再從候選參考圖中選 Lab Bhattacharyya 分數最高者的分類；無候選時為 unknown。`score` 為所選參考圖的 DINO 分數，不再計算加權分數。
 6. `async_bbox3d.py` 獨立排程背景深度工作，透過 `depth_bbox.py` 計算中心、尺寸與旋轉；預設每 5 個處理影格量測一次。ROS 發布和疊圖各用獨立 worker，待處理輸出只保留最新一份；共享影格池滿時，先釋放尚未開始的舊疊圖工作，讓新推論繼續。
 7. `object_visualization.py` 在網頁要求時才產生物件診斷圖；`visualization.py` 負責 2D／3D 疊圖。
@@ -20,6 +20,7 @@
 | 分類分數、unknown 規則、辨識快取 | `grounded.py` |
 | 模型輸入與推論 | `encoder.py`、`patches.py`、`trt_backend.py`、`sam3_trt.py` |
 | 偵測間隔、背景回放、KCF 遺失處理 | `async_kcf.py`、`kcf.py` |
+| 固定 Worker、ID 所有權、generation 與有界 mailbox | `kcf_workers.py` |
 | 背景 3D 框間隔、快取、深度與旋轉 | `async_bbox3d.py`、`depth_bbox.py` |
 | 圖庫路徑驗證、支援格式、檔案列舉、讀圖 | `gallery_files.py` |
 | HTTP 狀態與辨識操作 | `web.py` |
@@ -194,3 +195,9 @@ ROS `CompressedImage.format` 允許自訂傳輸格式，詳見
 [訊息定義](https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/CompressedImage.msg)。
 WebRTC 使用 aiortc 的已編碼 `Packet` 路徑，詳見
 [API](https://aiortc.readthedocs.io/en/latest/api.html#aiortc.MediaStreamTrack)。
+
+## Persistent KCF Workers
+
+`kcf_parallel_enabled: true` 啟用固定數量的長期執行緒（`kcf_parallel_workers`），每個 Tracking ID 使用 `ID % workers` 固定分派；單物體也走所屬 Worker。原生 tracker 的建立、init、update、ROI 重建和釋放由 Worker 處理，前景只持有 handle。每個 Worker mailbox 容量為 2 個 batch，滿時背壓；相機／replay／ROS 輸出採 latest slot 並記錄跳幀／覆蓋數。不設定 CPU affinity。
+
+開關預設仍為串行，重啟 node 後套用。交接協定、效能比較與重跑方式見 [Persistent Workers 報告](../../tests/KCF_PERSISTENT_WORKERS_20261029.md)。

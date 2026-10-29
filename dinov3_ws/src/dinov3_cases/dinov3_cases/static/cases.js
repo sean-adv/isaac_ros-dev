@@ -139,6 +139,7 @@ async function refresh() {
   const r = await fetch('/api/status');
   const d = await r.json();
   updateGrounding(d);
+  sam3Intervals.update(d.sam3_inference_events);
   el('status').textContent = d.status + ' | source: ' + d.source + (d.overlay_age === null ? '' : ' | result age: ' + d.overlay_age.toFixed(1) + 's');
   el('camera-status').textContent = d.video_error || (d.camera_connected ? 'Live · ' + d.camera_topic : 'No recent camera frames · ' + d.camera_topic + ' · start the Orbbec driver');
   if (d.camera_connected && Number.isFinite(d.camera_fps)) el('camera-status').textContent += ' · ' + d.camera_fps.toFixed(1) + ' input FPS';

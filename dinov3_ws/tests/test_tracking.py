@@ -84,6 +84,38 @@ def box(x=0, label="medicine"):
     return dict(bbox=[x, 0, x + 100, 100], label=label)
 
 
+def test_unknown_retirement_follows_recovered_identity_and_forgets_history():
+    identities = TrackIdentities()
+    first, _ = identities.assign([box()], [])
+    identity = first[0]['track_id']
+    assert identities.retire_unknown(first) == set()
+    # A temporarily lost object still has its classification history.
+    identities.assign([], [])
+    recovered, _ = identities.assign([box(2, 'unknown')], [])
+    assert recovered[0]['track_id'] == identity
+    assert identities.retire_unknown(recovered) == {identity}
+    assert identity not in identities.recent
+    assert identity not in identities.recognized
+    fresh, _ = identities.assign([box(2, 'unknown')], [])
+    assert fresh[0]['track_id'] != identity
+    assert identities.retire_unknown(fresh) == set()
+
+
+def test_missing_classification_is_not_unknown_and_expired_history_is_pruned(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr('dinov3_cases.tracking.time.monotonic', lambda: now[0])
+    identities = TrackIdentities()
+    first, _ = identities.assign([box()], [])
+    identities.retire_unknown(first)
+    unclassified = [dict(bbox=first[0]['bbox'], track_id=first[0]['track_id'])]
+    assert identities.retire_unknown(unclassified) == set()
+    assert identities.recognized == {first[0]['track_id']}
+    now[0] = 2.0
+    identities.observe([])
+    assert identities.recognized == set()
+    assert identities.recent == {}
+
+
 def test_new_track_uses_same_miss_allowance_as_established_tracks():
     lifecycle = TrackLifecycle()
     item = dict(box(), track_id=1)

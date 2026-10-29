@@ -83,7 +83,8 @@ def test_kcf_continues_during_sam3_and_candidate_seeds_detection_frame():
             initialized.append(int(image[0, 0, 0]))
             super().init(image, box)
 
-    pipeline = AsyncKCFProposals(RecordTracker)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(RecordTracker, roi_padding=None)
     entered, release = threading.Event(), threading.Event()
     calls = []
 
@@ -201,7 +202,8 @@ def test_arrivals_during_initialization_skip_to_latest(candidate_init):
                 updated.append(int(image[0, 0, 0]))
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(RecordingTracker)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(RecordingTracker, roi_padding=None)
     try:
         seed(pipeline)
         candidate_init.armed = True
@@ -354,7 +356,8 @@ def test_failed_background_replay_is_discarded(candidate_init):
 
 
 def test_empty_detection_preserves_valid_active_tracks_on_handoff():
-    pipeline = AsyncKCFProposals(MovingTracker)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
     try:
         seed(pipeline)
         refresh(pipeline, 0, interval=2)  # Confirm with a second SAM3 observation.
@@ -508,23 +511,24 @@ def test_reordered_refresh_keeps_ids_and_allocates_new_object_id():
 
 
 @pytest.mark.parametrize('failure', ['init', 'replay'])
-def test_one_bad_candidate_does_not_discard_other_objects(failure):
+@pytest.mark.parametrize('parallel', [False, True])
+def test_one_bad_candidate_does_not_discard_other_objects(failure, parallel):
     entered, release = threading.Event(), threading.Event()
 
     class PartialFailure(MovingTracker):
         def init(self, image, box):
             super().init(image, box)
-            if (failure == 'init' and threading.current_thread().name == 'sam3-kcf-replay'
-                    and self.previous == 1 and box[0] < 40):
+            self.seed_frame = self.previous
+            if (failure == 'init' and self.previous == 1 and box[0] < 40):
                 return False
 
         def update(self, image):
-            if (failure == 'replay' and threading.current_thread().name == 'sam3-kcf-replay'
+            if (failure == 'replay' and self.seed_frame == 1
                     and self.box[0] < 40):
                 return False, (0, 0, 0, 0)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(PartialFailure, roi_padding=None)
+    pipeline = AsyncKCFProposals(PartialFailure, roi_padding=None, parallel_enabled=parallel)
 
     def two(image):
         n = int(image[0, 0, 0])
@@ -658,7 +662,8 @@ def test_catchup_call_budget_preserves_foreground_and_waits_for_normal_interval(
                 assert release[index].wait(3)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(GatedUpdates, max_replay_frames=2)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(GatedUpdates, roi_padding=None, max_replay_frames=2)
     detector = Mock(side_effect=detect)
     try:
         seed(pipeline, interval=100)
@@ -707,7 +712,8 @@ def test_replay_continues_after_one_second(monkeypatch, candidate_init):
                 clock[0] += 1.060
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(TimedTracker)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(TimedTracker, roi_padding=None)
 
     def slow(image):
         entered.set()
@@ -757,7 +763,8 @@ def test_new_arrivals_during_catchup_skip_to_newest_each_time(candidate_init):
                     assert replay_release.wait(3)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(BlockFirstReplay, max_replay_frames=2)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(BlockFirstReplay, roi_padding=None, max_replay_frames=2)
 
     def slow(image):
         entered.set()
@@ -807,7 +814,8 @@ def test_context_change_cancels_remaining_replay_batch(candidate_init):
                 assert replay_release.wait(3)
             return super().update(image)
 
-    pipeline = AsyncKCFProposals(BlockFirstReplay)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(BlockFirstReplay, roi_padding=None)
 
     def slow(image):
         detect_entered.set()
@@ -893,6 +901,32 @@ def test_roi_edge_requests_background_detection_before_interval_without_dropping
         pipeline.close()
 
 
+def test_moving_roi_follows_foreground_replay_and_retained_track():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=.5)
+    try:
+        seed(pipeline, interval=100)
+        track_id = pipeline.active.proposals[0]['track_id']
+        for n in range(1, 7):
+            items, source = update(pipeline, n, interval=100)
+            assert source == 'kcf'
+            assert items[0]['bbox'] == [10+n, 12, 30+n, 32]
+            assert pipeline.active.rois == [(0, 2, 40, 42)]
+            assert not pipeline.force_detection
+        # An empty SAM3 result retains the moving track and its coordinates.
+        items, _ = refresh(pipeline, 6, lambda _: ([], {}), interval=100)
+        assert items[0]['track_id'] == track_id
+        assert pipeline.active.rois == [(0, 2, 40, 42)]
+        items, _ = update(pipeline, 7, interval=100)
+        assert items[0]['bbox'] == [17, 12, 37, 32]
+        assert pipeline.active.rois == [(0, 2, 40, 42)]
+        # A matched detector result also hands off the recentered ROI.
+        items, _ = refresh(pipeline, 7, interval=100)
+        assert items[0]['track_id'] == track_id
+        assert pipeline.active.rois == [(7, 2, 47, 42)]
+    finally:
+        pipeline.close()
+
+
 @pytest.mark.parametrize('lose_all', [False, True])
 def test_tracking_loss_keeps_valid_boxes_and_requests_sam3_before_interval(lose_all):
     pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None)
@@ -970,7 +1004,8 @@ def test_seed_snapshot_survives_input_reuse_and_new_arrivals():
             initialized.append(int(image[0, 0, 0]))
             super().init(image, box)
 
-    pipeline = AsyncKCFProposals(RecordTracker)
+    # Isolate scheduling/state assertions from moving-crop reinitialization.
+    pipeline = AsyncKCFProposals(RecordTracker, roi_padding=None)
     original = pixels(2)
 
     def slow(image):
@@ -1213,5 +1248,170 @@ def test_roi_limit_survives_background_handoff_and_context_reset():
             assert result[0][0]['label'] == 'known'
         assert shapes and all(shape == (200, 200, 3) for shape in shapes)
         assert recognized_shapes == [(800, 1200, 3)] * 2
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize('interval', [1, 100])
+def test_known_to_unknown_retires_only_that_track_after_association(interval):
+    pipeline = AsyncKCFProposals(MovingTracker, max_missed_detections=100)
+    labels = ['medicine', 'unknown']
+    boxes = [dict(bbox=[10, 12, 30, 32]), dict(bbox=[60, 12, 80, 32])]
+
+    def detector(image):
+        return [dict(item) for item in boxes], {}
+
+    def recognize(image, items, key):
+        return [dict(item, label=label) for item, label in zip(items, labels)], {}
+
+    def run(seq, context='camera'):
+        return pipeline.update(pixels(0), seq, context, interval, detector,
+                               recognize=recognize, wait_for_initial_result=True)
+
+    def commit(seq):
+        if interval > 1:
+            pipeline.force_detection = True
+            run(seq)
+            finish(pipeline)
+        return run(seq)
+
+    try:
+        items, _ = run(0)
+        known_id, unknown_id = [item['track_id'] for item in items]
+        labels[:] = ['unknown', 'unknown']
+        # Reorder candidates to ensure the decision follows identity, not index.
+        boxes.reverse()
+        items, _ = commit(1)
+        assert [item['track_id'] for item in items] == [unknown_id]
+        assert known_id not in pipeline.identities.recent
+        assert known_id not in pipeline.identities.recognized
+        assert known_id not in pipeline.lifecycle.states
+        assert pipeline.active.proposals == items
+        assert len(pipeline.active.trackers) == len(pipeline.active.rois) == (interval > 1)
+        # Reading the same frame cannot restore the retired cached proposal.
+        assert [item['track_id'] for item in run(1)[0]] == [unknown_id]
+        # A later successful recognition creates a fresh identity for that box.
+        labels[:] = ['unknown', 'medicine']
+        items, _ = commit(2)
+        new_id = next(item['track_id'] for item in items if item['label'] == 'medicine')
+        assert new_id not in (known_id, unknown_id)
+        # Context changes clear recognition history; initial unknowns remain.
+        labels[:] = ['unknown', 'unknown']
+        assert len(run(3, context='other-camera')[0]) == 2
+    finally:
+        pipeline.close()
+
+
+def test_initial_unknown_can_become_known_then_retire_on_unknown():
+    pipeline = AsyncKCFProposals(MovingTracker)
+    label = ['unknown']
+
+    def recognize(image, items, key):
+        return [dict(item, label=label[0]) for item in items], {}
+
+    def run(seq):
+        return pipeline.update(pixels(0), seq, 'camera', 100, detect,
+                               recognize=recognize, wait_for_initial_result=True)
+
+    try:
+        original_id = run(0)[0][0]['track_id']
+        for seq, value in enumerate(['unknown', 'medicine', 'unknown'], 1):
+            label[0] = value
+            pipeline.force_detection = True
+            run(seq)
+            finish(pipeline)
+            items, _ = run(seq)
+            if seq < 3:
+                assert items[0]['track_id'] == original_id
+            else:
+                assert items == []
+                assert pipeline.active.trackers == pipeline.active.rois == []
+                assert pipeline.lifecycle.states == {}
+                assert pipeline.identities.recent == {}
+                assert pipeline.identities.recognized == set()
+                assert run(seq)[0] == []
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize('old_is_small', [True, False])
+@pytest.mark.parametrize('threshold', [0.0, 0.8])
+def test_containment_after_merge_immediately_forgets_suppressed_track(old_is_small, threshold):
+    small = dict(bbox=[10, 12, 30, 32], area=99999, detection_score=.95, label='medicine')
+    large = dict(bbox=[0, 0, 80, 70], area=1, detection_score=.8, label='medicine')
+    old, new = (small, large) if old_is_small else (large, small)
+    boxes = [old]
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None,
+                                 max_missed_detections=100, containment_threshold=threshold)
+
+    def detector(image):
+        return [dict(item) for item in boxes], {}
+
+    def run(seq):
+        return pipeline.update(pixels(0), seq, 'camera', 100, detector,
+                               wait_for_initial_result=True)
+
+    try:
+        original_id = run(0)[0][0]['track_id']
+        boxes[:] = [new]
+        pipeline.force_detection = True
+        run(1)
+        finish(pipeline)
+        items, source = run(1)
+        assert source == 'sam3'
+        assert len(items) == (2 if threshold == 0 else 1)
+        assert len(pipeline.active.trackers) == len(pipeline.active.rois) == len(items)
+        if threshold:
+            assert items[0]['bbox'] == large['bbox']
+            assert (items[0]['track_id'] != original_id) == old_is_small
+            remaining = {items[0]['track_id']}
+            assert set(pipeline.identities.recent) == remaining
+            assert pipeline.identities.recognized == remaining
+            assert set(pipeline.lifecycle.states) == remaining
+            assert [item['track_id'] for item in run(1)[0]] == list(remaining)
+            assert [item['track_id'] for item in run(2)[0]] == list(remaining)
+    finally:
+        pipeline.close()
+
+
+@pytest.mark.parametrize('interval', [1, 100])
+def test_containment_filters_same_batch_and_preserves_equal_area_score_winner(interval):
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None, containment_threshold=.8)
+    boxes = [dict(bbox=[0, 0, 80, 70], detection_score=.8),
+             dict(bbox=[10, 12, 30, 32], detection_score=.99),
+             dict(bbox=[0, 0, 80, 70], detection_score=.9)]
+    try:
+        items, _ = pipeline.update(pixels(0), 0, 'camera', interval,
+                                   lambda image: ([dict(item) for item in boxes], {}),
+                                   wait_for_initial_result=True)
+        assert len(items) == 1
+        assert items[0]['detection_score'] == .9
+        assert len(pipeline.active.trackers) == len(pipeline.active.rois) == (interval > 1)
+        assert set(pipeline.identities.recent) == {items[0]['track_id']}
+    finally:
+        pipeline.close()
+
+
+def test_foreground_kcf_overlap_removes_track_without_waiting_for_sam3():
+    pipeline = AsyncKCFProposals(MovingTracker, roi_padding=None, containment_threshold=.8)
+    boxes = [dict(bbox=[10, 12, 30, 32], detection_score=.95),
+             dict(bbox=[40, 0, 90, 70], detection_score=.8)]
+    detector = Mock(return_value=(boxes, {}))
+    try:
+        items, _ = pipeline.update(pixels(0), 0, 'camera', 100, detector,
+                                   wait_for_initial_result=True)
+        small_id, large_id = [item['track_id'] for item in items]
+        large_tracker = pipeline.active.trackers[1]
+        large_tracker.box = (0, 0, 80, 70)
+        items, source = pipeline.update(pixels(0), 1, 'camera', 100, detector)
+        assert source == 'kcf'
+        assert [item['track_id'] for item in items] == [large_id]
+        assert pipeline.active.trackers == [large_tracker]
+        assert len(pipeline.active.rois) == 1
+        assert small_id not in pipeline.identities.recent
+        assert small_id not in pipeline.lifecycle.states
+        assert detector.call_count == 1
+        items, _ = pipeline.update(pixels(0), 2, 'camera', 100, detector)
+        assert [item['track_id'] for item in items] == [large_id]
     finally:
         pipeline.close()

@@ -45,6 +45,34 @@ def match_objects(previous, current):
     return matches
 
 
+def contained_track_ids(items, threshold):
+    """Suppress smaller current boxes, using intersection / smaller-box area.
+
+    Recompute areas from tracked coordinates; seed-frame area may be stale.
+    Equal-area duplicates prefer the higher detection score, then input order.
+    """
+    if threshold == 0:
+        return set()
+    def area(item):
+        x0, y0, x1, y1 = item["bbox"]
+        return max(0, x1-x0) * max(0, y1-y0)
+
+    kept, retired = [], set()
+    for item in sorted(items, key=lambda item: (area(item), item.get("detection_score", 0)),
+                       reverse=True):
+        a, size = item["bbox"], area(item)
+        for other in kept:
+            b = other["bbox"]
+            intersection = max(0, min(a[2], b[2])-max(a[0], b[0])) * max(
+                0, min(a[3], b[3])-max(a[1], b[1]))
+            if size > 0 and intersection / size >= threshold:
+                retired.add(item["track_id"])
+                break
+        else:
+            kept.append(item)
+    return retired
+
+
 class TrackIdentities:
     """Keep IDs across refreshes and briefly remember lost, undisplayed items."""
 
@@ -56,10 +84,26 @@ class TrackIdentities:
     def clear(self):
         # IDs must not be recycled when camera/settings context changes.
         self.recent = {}
+        self.recognized = set()
 
     def forget(self, identities):
+        self.recognized.difference_update(identities)
         for identity in identities:
             self.recent.pop(identity, None)
+
+    def retire_unknown(self, items):
+        """Retire known-to-unknown transitions after association, including recovery.
+
+        An initially unknown object is allowed until it has a known label.
+        Missing labels (unclassified proposals) do not count as unknown.
+        """
+        retired = {item["track_id"] for item in items
+                   if item.get("label") == "unknown"
+                   and item["track_id"] in self.recognized}
+        self.recognized.update(item["track_id"] for item in items
+                               if item.get("label") and item["label"] != "unknown")
+        self.forget(retired)
+        return retired
 
     def observe(self, items):
         now = time.monotonic()
@@ -67,6 +111,7 @@ class TrackIdentities:
                        if now - value[1] <= self.recovery_seconds}
         for item in items:
             self.recent[item["track_id"]] = (dict(item, bbox=list(item["bbox"])), now)
+        self.recognized.intersection_update(self.recent)
 
     def assign(self, items, live):
         self.observe(live)

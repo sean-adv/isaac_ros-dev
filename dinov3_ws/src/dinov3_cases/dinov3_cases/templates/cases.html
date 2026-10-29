@@ -81,6 +81,14 @@
 
 <section id="object-section">
 <h2>Per-Object DINOv3 Visualizations</h2>
+<details id="sam3-interval-panel" open>
+<summary>SAM3 inference intervals · latest 100</summary>
+<p><small>Time between consecutive successful SAM3 inference starts, including scheduling and tracking waits. Recorded in browser memory. Oldest → newest, left to right, row by row. Hover or focus a square for milliseconds.</small></p>
+<button id="sam3-interval-clear" type="button">Clear interval history</button>
+<p id="sam3-interval-status" role="status">Waiting for two SAM3 inferences…</p>
+<div id="sam3-interval-grid" class="sam3-interval-grid" role="group" aria-label="Latest 100 SAM3 inference intervals"></div>
+<p class="sam3-interval-legend"><small>Shorter</small><span data-level="1"></span><span data-level="2"></span><span data-level="3"></span><span data-level="4"></span><small>Longer · scale relative to visible intervals</small></p>
+</details>
 <label>
 <input id="object-enabled" type="checkbox" checked>Enable diagnostic images (adds processing load)</label>
 <label>Reference label to compare <select id="object-reference">
@@ -115,6 +123,7 @@
 </div>
 </section>
 <script src="/static/video.js"></script>
+<script src="/static/sam3_intervals.js"></script>
 <script src="/static/cases.js">
 </script>
 </body>

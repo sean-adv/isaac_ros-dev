@@ -257,6 +257,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     parameters = dict(engine_path='unused', grounding_engine_path='unused',
                       grounding_worker_python='unused', grounding_ipc_timeout=1.,
                       kcf_roi_padding=.5, kcf_max_roi_side=0,
+                      kcf_parallel_enabled=False, kcf_parallel_workers=4,
                       kcf_replay_max_frames=8,
                       kcf_max_missed_detections=3,
                       kcf_lab_similarity_threshold=.35, kcf_lab_change_confirmations=3,

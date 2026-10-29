@@ -65,3 +65,39 @@ small {
 .reference-card figcaption {
   margin-top: 10px
 }
+
+#sam3-interval-panel {
+  margin: 16px 0;
+  padding: 16px;
+  background: #101821;
+  border: 1px solid #344454;
+  border-radius: 8px
+}
+
+#sam3-interval-panel summary { cursor: pointer }
+
+.sam3-interval-grid {
+  display: grid;
+  grid-template-columns: repeat(20, minmax(0, 1fr));
+  gap: 5px;
+  max-width: 600px
+}
+
+.sam3-interval-cell, .sam3-interval-legend span {
+  background: #243240;
+  border: 1px solid #526273;
+  border-radius: 3px
+}
+
+.sam3-interval-cell { aspect-ratio: 1 }
+.sam3-interval-cell:focus { outline: 2px solid #e7eef8; outline-offset: 2px }
+#sam3-interval-panel [data-level="1"] { background: #0e4429 }
+#sam3-interval-panel [data-level="2"] { background: #006d32 }
+#sam3-interval-panel [data-level="3"] { background: #26a641 }
+#sam3-interval-panel [data-level="4"] { background: #39d353 }
+
+.sam3-interval-legend { display: flex; align-items: center; gap: 5px; flex-wrap: wrap }
+.sam3-interval-legend span { width: 13px; height: 13px }
+@media (max-width: 480px) {
+  .sam3-interval-grid { grid-template-columns: repeat(10, minmax(0, 1fr)) }
+}

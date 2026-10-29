@@ -95,6 +95,10 @@ def create_app(node):
                 source=node.source,
                 status=node.status,
                 performance=node.performance,
+                sam3_inference_events=dict(
+                    stream=getattr(node, "sam3_event_stream", None),
+                    events=list(getattr(node, "sam3_events", ())),
+                ),
                 overlay_ready=node.video_at is not None,
                 bbox_visualization_mode=node.bbox_visualization_mode,
                 grounding=node.grounding_settings,

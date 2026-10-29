@@ -84,6 +84,38 @@ def test_disabled_check_retains_changed_region():
     assert 'kcf_lab_similarity' not in items[0]
 
 
+def test_roi_motion_preserves_lab_reference_and_change_confirmations():
+    class MovingTracker(StationaryTracker):
+        def init(self, image, box):
+            super().init(image, box)
+            self.first = True
+
+        def update(self, image):
+            # The first update primes the template without adding motion.
+            if not self.first:
+                x, y, w, h = self.box
+                self.box = (x+16, y, w, h)
+            self.first = False
+            return True, self.box
+
+    p = KCFProposals(MovingTracker, roi_padding=.5,
+                     lab_similarity_threshold=.35, lab_change_confirmations=3)
+    p.update(scene(), 0, 'camera', 1000, proposals, retain_valid_tracks=True)
+    wrapper = p.trackers[0]
+    reference = wrapper.reference.copy()
+    original_roi = p.rois[0]
+    for seq in (1, 2):
+        p.update(scene(True), seq, 'camera', 1000, proposals, retain_valid_tracks=True)
+        assert p.trackers[0] is wrapper
+        assert wrapper.lab_changed_frames == seq
+        np.testing.assert_array_equal(wrapper.reference, reference)
+    assert p.rois[0] != original_roi
+    items, _ = p.update(scene(True), 3, 'camera', 1000, proposals,
+                         retain_valid_tracks=True)
+    assert len(items) == 1
+    assert p.refresh_requested
+
+
 def test_lab_survives_async_handoff_and_retires_before_miss_limit():
     p = AsyncKCFProposals(StationaryTracker, max_missed_detections=10,
                           lab_similarity_threshold=.35, lab_change_confirmations=3)

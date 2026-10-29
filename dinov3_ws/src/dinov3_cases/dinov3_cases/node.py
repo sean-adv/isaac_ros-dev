@@ -71,6 +71,8 @@ class CaseNode(Node):
             kcf_roi_padding=0.5,
             kcf_max_roi_side=0,
             opencv_num_threads=0,
+            kcf_parallel_enabled=False,
+            kcf_parallel_workers=4,
             kcf_replay_max_frames=8,
             kcf_max_missed_detections=3,
             kcf_lab_similarity_threshold=0.35,
@@ -124,7 +126,9 @@ class CaseNode(Node):
         KCFProposals(roi_padding=self.param("kcf_roi_padding"),
                      max_roi_side=self.param("kcf_max_roi_side"),
                      lab_similarity_threshold=self.param("kcf_lab_similarity_threshold"),
-                     lab_change_confirmations=self.param("kcf_lab_change_confirmations"))
+                     lab_change_confirmations=self.param("kcf_lab_change_confirmations"),
+                     parallel_enabled=self.param("kcf_parallel_enabled"),
+                     parallel_workers=self.param("kcf_parallel_workers"))
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
@@ -183,6 +187,9 @@ class CaseNode(Node):
         self.depth_infos = deque(maxlen=8)
         self.depth_ray_cache = ProjectionRayCache()
         self.performance = {}
+        self.sam3_event_stream = str(time.time_ns())
+        self.sam3_event_sequence = 0
+        self.sam3_events = deque(maxlen=101)
         self.frame_pool = SharedFramePool(slots=3)
         self.pending_render = None
         self.pending_annotated_image = None
@@ -338,6 +345,8 @@ class CaseNode(Node):
             self.publish_changed.clear()
             with self.lock:
                 pending, self.pending_publication = self.pending_publication, None
+                timing = getattr(self, "pending_publication_timing", None)
+                self.pending_publication_timing = None
                 generation = self.generation
             if pending is None:
                 continue
@@ -348,14 +357,36 @@ class CaseNode(Node):
             if gen != generation:
                 continue
             try:
+                publish_started = time.monotonic()
+                topic_count = 0
                 if header is None:
                     header = Header(stamp=self.get_clock().now().to_msg())
                 if self.recognition_pub.get_subscription_count():
+                    topic_count += 1
                     self.recognition_pub.publish(recognition_message(detections, header))
                 if self.bbox3d_pub.get_subscription_count():
+                    topic_count += 1
                     self.bbox3d_pub.publish(bboxes3d_message(detections, header))
                 if self.tag_pub.get_subscription_count():
+                    topic_count += 1
                     self.tag_pub.publish(apriltag_message(detections, header))
+                published_at = time.monotonic()
+                if timing is not None and topic_count:
+                    received_at = timing["received_at"]
+                    metrics = dict(
+                        frame_id=timing["frame_id"], generation=gen,
+                        published_at=published_at, topic_count=topic_count,
+                        result_to_publish_ms=(published_at-timing["completed_at"])*1000,
+                        dds_submit_ms=(published_at-publish_started)*1000,
+                        callback_to_publish_ms=(None if received_at is None else
+                                                (published_at-received_at)*1000),
+                    )
+                    with self.lock:
+                        if gen == self.generation:
+                            self.last_publication = metrics
+                            if (self.performance.get("frame_id") == timing["frame_id"]
+                                    and self.performance.get("completed_at") == timing["completed_at"]):
+                                self.performance["ros_publication"] = metrics
             except Exception as error:
                 self.get_logger().error(f"ROS result publication failed: {error}")
 
@@ -599,6 +630,9 @@ class CaseNode(Node):
         next_upload_refresh = 0.0
         proposal_tracker = AsyncKCFProposals(
             wake=self.image_changed.set,
+            parallel_enabled=self.param("kcf_parallel_enabled"),
+            parallel_workers=self.param("kcf_parallel_workers"),
+            containment_threshold=self.param("grounding_containment_threshold"),
             roi_padding=self.param("kcf_roi_padding"),
             max_roi_side=self.param("kcf_max_roi_side"),
             max_replay_frames=self.param("kcf_replay_max_frames"),
@@ -661,11 +695,18 @@ class CaseNode(Node):
                     min_width=self.param("grounding_min_bbox_width"),
                     min_height=self.param("grounding_min_bbox_height"),
                     min_area=self.param("grounding_min_bbox_area"),
-                    containment_threshold=self.param("grounding_containment_threshold"),
+                    # Containment runs once on the final merged KCF tracks.
+                    containment_threshold=0.0,
                 )
 
                 def detect(frame, request=request):
+                    started_at = time.monotonic()
                     proposals = detector.detect(frame, **request)
+                    with self.lock:
+                        self.sam3_event_sequence += 1
+                        self.sam3_events.append(dict(
+                            sequence=self.sam3_event_sequence, started_at=started_at,
+                        ))
                     return proposals, dict(getattr(detector, "last_metrics", {}))
 
                 def recognize(seed_pixels, proposals, seed_key, settings=settings):
@@ -745,6 +786,8 @@ class CaseNode(Node):
                     self.detections = detections
                     completed_at = time.monotonic()
                     previous_completed = self.performance.get("completed_at")
+                    self.publication_drops = getattr(self, "publication_drops", 0) + int(
+                        self.pending_publication is not None)
                     self.performance = dict(
                         completed_at=completed_at,
                         result_fps=result_rate.update(completed_at, context),
@@ -757,6 +800,7 @@ class CaseNode(Node):
                         grounding_ipc=(dict(proposal_tracker.last_metrics)
                                        if proposal_source == "sam3" else {}),
                         grounding_schedule=proposal_tracker.scheduler_metrics(),
+                        ros_publication=getattr(self, "last_publication", None),
                         bbox_source=proposal_source,
                         recognition_source=recognition_source,
                         recognition_frame_id=recognition_frame_id,
@@ -772,6 +816,9 @@ class CaseNode(Node):
                         bbox3d_schedule=bbox3d_schedule,
                         render_ms=None,
                         frame_id=seq,
+                        input_skipped_frames=(max(0, seq-processed[1]-1)
+                                              if processed and processed[0] == gen else 0),
+                        publication_drops=self.publication_drops,
                         processing_ms=(completed_at - start) * 1000,
                         callback_to_result_ms=(
                             None if received_at is None else (completed_at - received_at) * 1000
@@ -784,6 +831,8 @@ class CaseNode(Node):
                         f"{time.monotonic()-start:.2f}s inference"
                     )
                     self.pending_publication = (detections, header, gen)
+                    self.pending_publication_timing = dict(
+                        frame_id=seq, received_at=received_at, completed_at=completed_at)
                     if self.pending_render is not None:
                         self.pending_render[0].release()
                     self.pending_render = (shared_frame.retain(), detections, header, gen,

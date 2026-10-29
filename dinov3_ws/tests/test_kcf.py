@@ -202,7 +202,7 @@ def test_invalid_roi_padding(padding):
         KCFProposals(roi_padding=padding)
 
 
-def test_fixed_roi_local_coordinates_and_global_output():
+def test_motion_inside_roi_keeps_tracker_template_and_global_coordinates():
     image = np.full((160, 200, 3), (10, 20, 30), dtype=np.uint8)
     fake = SimpleNamespace(init=Mock(return_value=None),
                            update=Mock(return_value=(True, (12, 11, 20, 20))))
@@ -217,8 +217,49 @@ def test_fixed_roi_local_coordinates_and_global_output():
     assert source == 'kcf' and items[0]['bbox'] == [82, 61, 102, 81]
     assert fake.update.call_args.args[0].shape == (40, 40, 3)
     assert tracker.rois == [(70, 50, 110, 90)]
+    assert fake.init.call_args.args[1] == (10, 10, 20, 20)
     assert not tracker.refresh_requested
+    items, source = tracker.update(image, 2, 'camera', 10, detector)
+    assert source == 'kcf' and items[0]['bbox'] == [82, 61, 102, 81]
+    assert tracker.rois == [(70, 50, 110, 90)]
+    assert tracker.trackers == [fake]
+    assert fake.init.call_count == 1
+    assert fake.update.call_count == 2
     detector.assert_called_once()
+
+
+
+@pytest.mark.parametrize('parallel', [False, True])
+@pytest.mark.parametrize('box', [(2, 10, 20, 20), (18, 10, 20, 20),
+                                 (10, 2, 20, 20), (10, 18, 20, 20)])
+def test_roi_rebases_only_at_edge_and_primes_replacement(parallel, box):
+    image = np.zeros((160, 200, 3), dtype=np.uint8)
+    original = SimpleNamespace(init=Mock(return_value=None),
+                               update=Mock(return_value=(True, box)))
+    replacement = SimpleNamespace(init=Mock(return_value=None),
+                                  update=Mock(return_value=(True, (10, 10, 20, 20))))
+    factory = Mock(side_effect=[original, replacement])
+    tracker = KCFProposals(factory, parallel_enabled=parallel, parallel_workers=1)
+    detector = Mock(return_value=[dict(proposal(), bbox=[80, 60, 100, 80])])
+    try:
+        tracker.update(image, 0, 'camera', 100, detector)
+        items, source = tracker.update(image, 1, 'camera', 100, detector)
+        x, y, w, h = box
+        bbox = [70+x, 50+y, 70+x+w, 50+y+h]
+        assert source == 'kcf' and items[0]['bbox'] == bbox
+        assert tracker.rois == [tracker._roi(bbox, image)]
+        assert factory.call_count == 2
+        assert original.update.call_count == 1
+        assert replacement.init.call_args.args[1] == (10, 10, 20, 20)
+        assert replacement.update.call_count == 1
+        # The next frame stays in the rebased ROI; no further init or warm-up.
+        tracker.update(image, 2, 'camera', 100, detector)
+        assert factory.call_count == 2
+        assert replacement.init.call_count == 1
+        assert replacement.update.call_count == 2
+        detector.assert_called_once()
+    finally:
+        tracker.close()
 
 
 def test_fixed_roi_near_edge_keeps_box_and_requests_refresh():
@@ -258,21 +299,51 @@ def test_fixed_roi_physical_image_edge_clips_without_spurious_refresh():
     assert not tracker.refresh_requested
 
 
-def test_real_opencv_kcf_tracks_motion_in_fixed_roi():
+@pytest.mark.parametrize('padding,max_side', [(.5, 0), (.5, 48), (2.0, 120)])
+def test_real_opencv_kcf_tracks_beyond_initial_roi(padding, max_side):
     texture = np.random.default_rng(123).integers(0, 256, (36, 36, 3), dtype=np.uint8)
-    image = np.zeros((140, 180, 3), dtype=np.uint8)
-    image[40:76, 50:86] = texture
-    tracker = KCFProposals()
-    detector = Mock(return_value=[dict(proposal(), bbox=[50, 40, 86, 76])])
+    image = np.zeros((400, 500, 3), dtype=np.uint8)
+    image[120:156, 120:156] = texture
+    tracker = KCFProposals(roi_padding=padding, max_roi_side=max_side,
+                           lab_similarity_threshold=.35)
+    detector = Mock(return_value=[dict(proposal(), bbox=[120, 120, 156, 156])])
     tracker.update(image, 0, 'camera', 100, detector)
-    for n in range(1, 4):
+    original_roi = tracker.rois[0]
+    reference = tracker.trackers[0].reference.copy()
+    for n in range(1, 51):
         moved = np.zeros_like(image)
-        moved[40+n:76+n, 50+2*n:86+2*n] = texture
+        moved[120+3*n:156+3*n, 120+3*n:156+3*n] = texture
         items, source = tracker.update(moved, n, 'camera', 100, detector)
         assert source == 'kcf'
         x0, y0, x1, y1 = items[0]['bbox']
-        assert abs((x0+x1)/2-(68+2*n)) < 5
-        assert abs((y0+y1)/2-(58+n)) < 5
+        assert abs((x0+x1)/2-(138+3*n)) < 5
+        assert abs((y0+y1)/2-(138+3*n)) < 5
+        rx0, ry0, rx1, ry1 = tracker.rois[0]
+        assert rx0 <= x0 < x1 <= rx1 and ry0 <= y0 < y1 <= ry1
+        np.testing.assert_array_equal(tracker.trackers[0].reference, reference)
+    assert items[0]['bbox'][0] > original_roi[2]
+    detector.assert_called_once()
+
+
+@pytest.mark.parametrize('failure', ['init', 'warmup', 'exception'])
+def test_failed_roi_rebase_keeps_valid_box_and_old_coordinates(failure):
+    image = np.zeros((160, 200, 3), dtype=np.uint8)
+    original = SimpleNamespace(init=Mock(return_value=None),
+                               update=Mock(return_value=(True, (18, 11, 20, 20))))
+    replacement = SimpleNamespace(init=Mock(return_value=failure != 'init'),
+                                  update=Mock(return_value=(failure != 'warmup', (0, 0, 20, 20))))
+    if failure == 'exception':
+        replacement.init.side_effect = cv2.error('failed')
+    factory = Mock(side_effect=[original, replacement])
+    tracker = KCFProposals(factory)
+    detector = Mock(return_value=[dict(proposal(), bbox=[80, 60, 100, 80])])
+    tracker.update(image, 0, 'camera', 100, detector)
+    items, source = tracker.update(image, 1, 'camera', 100, detector,
+                                    retain_valid_tracks=True)
+    assert source == 'kcf' and items[0]['bbox'] == [88, 61, 108, 81]
+    assert tracker.trackers == [original]
+    assert tracker.rois == [(70, 50, 110, 90)]
+    assert tracker.refresh_requested
     detector.assert_called_once()
 
 

@@ -142,3 +142,31 @@ def test_pending_overlay_cannot_exhaust_input_slots_during_sam3_and_rendering():
         rendering.release()
         queued.release()
         pool.close()
+
+
+@pytest.mark.parametrize('current_frame', [4, 5])
+def test_ros_publication_timing_follows_its_frame(current_frame):
+    from std_msgs.msg import Header
+
+    stop = threading.Event()
+    wake = threading.Event()
+    wake.set()
+    node = SimpleNamespace(
+        stop=stop, publish_changed=wake, lock=threading.Lock(), generation=2,
+        pending_publication=([], Header(frame_id='camera'), 2),
+        pending_publication_timing=dict(frame_id=4, received_at=10., completed_at=19.),
+        recognition_pub=Mock(), bbox3d_pub=Mock(), tag_pub=Mock(),
+        performance=dict(frame_id=current_frame, completed_at=19.), get_logger=lambda: Mock(),
+    )
+    node.recognition_pub.get_subscription_count.return_value = 1
+    node.recognition_pub.publish.side_effect = lambda _: stop.set()
+    node.bbox3d_pub.get_subscription_count.return_value = 0
+    node.tag_pub.get_subscription_count.return_value = 0
+    with patch('dinov3_cases.node.time.monotonic', side_effect=[20., 21.]):
+        CaseNode.run_publications(node)
+    assert node.last_publication['callback_to_publish_ms'] == 11000.
+    assert node.last_publication['result_to_publish_ms'] == 2000.
+    assert node.last_publication['dds_submit_ms'] == 1000.
+    assert node.last_publication['frame_id'] == 4
+    assert node.pending_publication_timing is None
+    assert ('ros_publication' in node.performance) == (current_frame == 4)

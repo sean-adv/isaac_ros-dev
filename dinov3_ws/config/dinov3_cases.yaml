@@ -3,9 +3,10 @@ dinov3_cases:
     # SAM3: 1–4 comma-separated class names; text features cached per prompt.
     grounding_prompt: 'medicine box.'
     grounding_box_threshold: 0.3
-    # Intersection / smaller-box area >= threshold: keep the larger box before DINO.
+    # After KCF merging: intersection / smaller-box area >= threshold keeps the
+    # larger box and immediately removes the smaller track. One final pass only.
     # Range 0..1; 0 disables containment filtering. Restart to apply.
-    grounding_containment_threshold: 0.95
+    grounding_containment_threshold: 0.8
     grounding_nms_iou: 1.0  # IoU NMS disabled; containment filtering still applies.
     grounding_max_detections: 20
     # Submit one background SAM3 + DINO job every N processed frames; KCF continues.
@@ -13,18 +14,22 @@ dinov3_cases:
     # DINO classifies SAM3 seed-frame crops before replay; boxes/labels hand off together.
     # 1 disables KCF and uses synchronous SAM3. Lost tracking requests detection early.
     grounding_detection_interval: 30
-    # Fixed KCF crop: expand each side by this fraction; clipped to image bounds.
-    kcf_roi_padding: 0.3
+    # KCF crop: expand each side by this fraction; clip to image bounds.
+    # Recenter/reinitialize only within 10% of box size (min 1px) of an artificial
+    # ROI edge; physical image edges do not trigger it. Restart to apply.
+    kcf_roi_padding: 1.0
     # Resize only each KCF working ROI; SAM3/Cat2Real/depth keep original pixels.
     # 0 restores full-resolution tracking. Keep >=16 target pixels where possible.
-    kcf_max_roi_side: 256
-    # Catch-up call limit; skip intermediate frames. No elapsed-time limit.
+    kcf_max_roi_side: 300
+    # Serial catch-up call limit; skip intermediate frames. No elapsed-time limit.
+    # Persistent workers freeze after one latest-snapshot replay; foreground
+    # reconciles to its current frame before committing the new generation.
     # Restart to apply.
-    kcf_replay_max_frames: 30
+    kcf_replay_max_frames: 100
     # Retire after N consecutive committed SAM3 misses; 1 retires on the first miss.
     # Elapsed time alone does not retire tracks; KCF does not reset the miss count.
     # Config only; restart to apply.
-    kcf_max_missed_detections: 8
+    kcf_max_missed_detections: 1
     # Fixed SAM3-seed Lab reference, checked on each unique KCF frame (48x48 crop).
     # Similarity 0..1; N consecutive values below threshold drop the track and
     # request SAM3 early, independently of SAM3 misses. 0 disables the check.
@@ -34,6 +39,10 @@ dinov3_cases:
     # OpenCV internal pool in the main process; independent workers remain concurrent.
     # 0 preserves the library default. Restart to apply.
     opencv_num_threads: 1
+    # Persistent KCF owners shared by foreground and replay; restart to apply.
+    # Every Tracking ID maps to ID % workers, including one object. No CPU affinity.
+    kcf_parallel_enabled: true
+    kcf_parallel_workers: 4
     # Moving average over raw SAM3/KCF boxes per object; 1 disables smoothing.
     # Counts unique processed frames. Config only; restart after changes.
     bbox_smoothing_frames: 1
