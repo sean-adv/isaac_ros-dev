@@ -17,7 +17,7 @@ from .object_visualization import (
     encode_object_diagnostics, object_debug_views,
 )
 
-from .kcf import validate_detection_interval
+from .nvdcf import validate_detection_interval
 
 
 DEFAULT_PROMPT = "medicine bottle, medicine box."
@@ -311,7 +311,7 @@ def recognize_objects(
 
 
 class TrackedObjectRecognizer:
-    """Reuse classifications in stable KCF list order within one tracker set.
+    """Reuse classifications in stable tracker list order within one tracker set.
 
     A new tracker-set object (or a new synchronous SAM3 frame) is a new token.
     Count changes discard cached classifications and encode the current crops.

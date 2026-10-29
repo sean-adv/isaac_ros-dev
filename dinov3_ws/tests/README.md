@@ -1,3 +1,19 @@
+目前啟用中的追蹤後端為 DeepStream 9.1 NvDCF。以下測試驗證新的排程、原生 GPU 追蹤及完整模型流程：
+
+```bash
+source /opt/ros/jazzy/setup.bash
+export PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:$PYTHONPATH"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests/test_async_nvdcf.py dinov3_ws/tests/test_tracking.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf.py
+# 完整模型檢查亦需 run.sh 使用的 TensorRT library 路徑：
+export LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 dinov3_ws/.venv/bin/python dinov3_ws/tests/check_async_nvdcf_pipeline.py
+```
+
+`test_async_nvdcf.py` 亦以阻塞的舊 context 關閉驗證交接和後續追蹤不等待回收，並檢查停機 drain 與清理例外。`test_h264_stream.py` 驗證繪製／編碼未超時時只等待剩餘幀預算，超時時不再額外延遲。
+
+KCF 測試與效能報告為歷史對照；`profile_kcf_intervals.py` 的 KCF ROS 參數不再適用目前節點。
+
 # 目前部署測試
 
 一般回歸使用 `dinov3_ws/.venv`。`test_qwen_encoder.py` 為舊 Qwen 實驗，其缺少的設定常數早於本次切換；目前部署不執行該測試：
@@ -21,6 +37,10 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
 此目錄只保留目前 SAM3 + DINOv3 流程的回歸測試，以及部署驗證與效能診斷工具。舊 OmDet 的離線 prompt、FP16/FP32 精度比較、IPC GPU 比較與舊版整合腳本已移除；原始量測報告仍保留。
 
 ## 日常回歸測試
+
+`test_async_nvdcf.py` 另驗證失追寬限、同影格不重複累計、隱藏 owner 跨交接保留、原生／SAM3 回配、部分失追提早偵測及逾期清理。`check_nvdcf_occlusion.py` 使用真實 GPU NvDCF、合成遮擋影像及精確的模擬 SAM3 偵測，確認背景 context 在遮擋期間存活、自動重試偵測後恢復同一公開 ID，超過寬限後完整釋放。
+
+目前 NvDCF 的逐物件交接由 `test_async_nvdcf.py` 驗證：部分漏偵測保留原 context、公開 ID 與標籤，重新偵測後配對接手，連續 `nvdcf_max_missed_detections` 次漏偵測才退場（預設 3），並涵蓋跨 context 原生 ID 碰撞、unknown、包含框過濾及資源清理。`check_nvdcf_handoff.py` 使用真正 GPU NvDCF 與合成移動影像，驗證舊原生狀態持續追蹤及漏偵測門檻。下方 KCF 說明保留為歷史流程與回歸參考。
 
 KCF 非同步模式（`grounding_detection_interval > 1`）採逐物品交接：背景 SAM3
 結果在偵測影格初始化、補追到目前影格後，以框重疊、中心距離及尺寸配對。

@@ -1,0 +1,44 @@
+%YAML:1.0
+# DeepStream 9.1 GPU NvDCF, no ReID/TensorRT engine required.
+BaseConfig:
+  minDetectorConfidence: 0.0
+  checkClassMatch: 1
+TargetManagement:
+  enableBboxUnClipping: 1
+  preserveStreamUpdateOrder: 1
+  maxTargetsPerStream: 150
+  minIouDiff4NewTarget: 0.5
+  minTrackerConfidence: 0.2
+  probationAge: 0
+  maxShadowTrackingAge: 30
+  earlyTerminationAge: 1
+TrajectoryManagement:
+  useUniqueID: 0
+DataAssociator:
+  dataAssociatorType: 0
+  associationMatcherType: 1
+  minMatchingScore4Overall: 0.0
+  minMatchingScore4SizeSimilarity: 0.5
+  minMatchingScore4Iou: 0.0
+  minMatchingScore4VisualSimilarity: 0.2
+  matchingScoreWeight4VisualSimilarity: 0.7
+  matchingScoreWeight4SizeSimilarity: 0.2
+  matchingScoreWeight4Iou: 0.1
+  tentativeDetectorConfidence: 0.1
+  minMatchingScore4TentativeIou: 0.3
+StateEstimator:
+  stateEstimatorType: 1
+  processNoiseVar4Loc: 2.0
+  processNoiseVar4Size: 1.0
+  processNoiseVar4Vel: 0.1
+  measurementNoiseVar4Detector: 4.0
+  measurementNoiseVar4Tracker: 16.0
+VisualTracker:
+  visualTrackerType: 2  # DeepStream 9.1 NvDCF VPI implementation
+  useColorNames: 1
+  useHog: 1
+  featureImgSizeLevel: 2
+  featureFocusOffsetFactor_y: 0.0
+  filterLr: 0.075
+  filterChannelWeightsLr: 0.1
+  gaussianSigma: 0.75

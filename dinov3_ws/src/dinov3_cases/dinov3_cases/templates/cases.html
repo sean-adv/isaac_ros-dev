@@ -15,7 +15,7 @@
 <h2>Detection and Recognition Settings</h2>
 <form id="grounding-form">
 <label>SAM3 detection interval <input name="detection_interval" type="number" min="1" step="1" required></label>
-<small>1 = SAM3 on every processed frame. N = SAM3, then N−1 KCF frames. Lost tracking triggers early detection. Camera frames skipped while busy are not counted.</small>
+<small>1 = SAM3 on every processed frame. N = SAM3, then N−1 NvDCF frames. Lost tracking triggers early detection. Camera frames skipped while busy are not counted.</small>
 <br>
 <label>Text prompt <input id="prompt" name="prompt" required maxlength="1000" style="width:min(600px,85%)">
 </label>
@@ -73,7 +73,7 @@
 <video id="overlay" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
 <p data-video-status role="status">Connecting video…</p>
 <p>
-<small>det is the last SAM3 detection score, retained during KCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects. Track status: confirmed has SAM3 support; coasting temporarily tolerates missed detections. New and established tracks use the same consecutive SAM3 miss limit. Elapsed time alone does not remove tracks; KCF success does not reset the miss count.</small>
+<small>det is the last SAM3 detection score, retained during NvDCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects. Track status: confirmed has SAM3 support; coasting indicates visual tracking between detections. Each committed SAM3 result replaces the tracking generation; unmatched objects are removed. NvDCF shadow tracking handles temporary visual loss between detections.</small>
 </p>
 <div id="recognition-list">
 </div>
@@ -116,7 +116,7 @@
 <p id="object-help">
 </p>
 <p>
-<small>Diagnostic images show the latest recognition snapshot and stay unchanged while KCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Recognition filters references by the DINOv3 threshold, then selects the class with the highest Lab similarity. Each card shows the separate DINO and Lab similarities. Selected-label comparisons use that label’s highest Lab reference. Comparison score is its DINO similarity. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
+<small>Diagnostic images show the latest recognition snapshot and stay unchanged while NvDCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Recognition filters references by the DINOv3 threshold, then selects the class with the highest Lab similarity. Each card shows the separate DINO and Lab similarities. Selected-label comparisons use that label’s highest Lab reference. Comparison score is its DINO similarity. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
 </p>
 <p id="object-status" role="status">Waiting for object detections…</p>
 <div id="object-gallery" class="reference-gallery">

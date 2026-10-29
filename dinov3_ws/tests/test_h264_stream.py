@@ -376,3 +376,40 @@ def test_blocked_ros_video_reader_does_not_block_other_readers_and_recovers_at_i
         hub.close()
         worker.join(3)
     assert not worker.is_alive()
+
+
+@pytest.mark.parametrize('work_ms,expected_wait_ms', [(10, 1000/30-10), (50, 0)])
+def test_renderer_paces_frame_starts_and_does_not_add_delay_after_overrun(work_ms, expected_wait_ms):
+    node, frame, readers = render_node(boxes=False)
+    node.stop.is_set.side_effect = [False, False, True]
+    clock = [100.0]
+    waits = []
+
+    def wake(_):
+        node.camera_seq += 1
+
+    node.render_changed = Mock()
+    node.render_changed.wait.side_effect = wake
+
+    def wait(delay):
+        waits.append(delay * 1000)
+        clock[0] += delay
+        return False
+
+    node.stop.wait.side_effect = wait
+
+    def encode(pixels, header, generation, force_keyframe):
+        clock[0] += work_ms / 1000
+        return AccessUnit(b'frame', round(clock[0]*90000), True, header, generation)
+
+    with patch('dinov3_cases.node.time.monotonic', side_effect=lambda: clock[0]), \
+            patch.object(node.video_encoder, 'encode', side_effect=encode), \
+            patch('dinov3_cases.node.render_display_overlay', return_value=np.zeros((540, 960, 3), np.uint8)):
+        CaseNode.run_rendering(node)
+    if expected_wait_ms:
+        assert waits == pytest.approx([expected_wait_ms])
+    else:
+        assert waits == []
+    assert len(readers[0].queue) == 2
+    frame.release.assert_called_once()
+    node.get_logger().error.assert_not_called()

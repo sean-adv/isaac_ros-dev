@@ -22,8 +22,8 @@ from .encoder import Encoder
 from .grounding_ipc import SharedMemoryGroundingDetector
 from .frame_pool import SharedFramePool
 from .tracking import BBoxSmoother
-from .kcf import KCFProposals, kcf_factory
-from .async_kcf import AsyncKCFProposals, validate_replay_limits
+from .nvdcf import check_nvdcf, DEFAULT_CONFIG
+from .async_nvdcf import AsyncNvDCFProposals, validate_missed_frames
 from .async_bbox3d import AsyncBBox3D, validate_bbox3d_schedule
 from .runtime import (
     CASES_DIR,
@@ -68,15 +68,12 @@ class CaseNode(Node):
             grounding_max_detections=20,
             grounding_detection_interval=1,
             bbox_smoothing_frames=3,
-            kcf_roi_padding=0.5,
-            kcf_max_roi_side=0,
             opencv_num_threads=0,
-            kcf_parallel_enabled=False,
-            kcf_parallel_workers=4,
-            kcf_replay_max_frames=8,
-            kcf_max_missed_detections=3,
-            kcf_lab_similarity_threshold=0.35,
-            kcf_lab_change_confirmations=3,
+            nvdcf_config=str(DEFAULT_CONFIG),
+            nvdcf_width=640,
+            nvdcf_height=384,
+            nvdcf_max_missed_detections=3,
+            nvdcf_max_missed_frames=30,
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
@@ -122,13 +119,6 @@ class CaseNode(Node):
         # Set the global OpenCV pool before starting inference/render workers.
         if opencv_threads > 0:
             cv2.setNumThreads(opencv_threads)
-        validate_replay_limits(self.param("kcf_replay_max_frames"))
-        KCFProposals(roi_padding=self.param("kcf_roi_padding"),
-                     max_roi_side=self.param("kcf_max_roi_side"),
-                     lab_similarity_threshold=self.param("kcf_lab_similarity_threshold"),
-                     lab_change_confirmations=self.param("kcf_lab_change_confirmations"),
-                     parallel_enabled=self.param("kcf_parallel_enabled"),
-                     parallel_workers=self.param("kcf_parallel_workers"))
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
         self.grounding_settings = dict(
             prompt=self.param("grounding_prompt"),
@@ -138,8 +128,9 @@ class CaseNode(Node):
             detection_interval=self.param("grounding_detection_interval"),
         )
         self.grounding_settings["prompt"] = validate_settings(**self.grounding_settings)
+        validate_missed_frames(self.param("nvdcf_max_missed_frames"))
         if self.grounding_settings["detection_interval"] > 1:
-            kcf_factory()
+            check_nvdcf(self.param("nvdcf_config"))
         validate_containment_threshold(self.param("grounding_containment_threshold"))
         if not 0 <= self.param("grounding_nms_iou") <= 1:
             raise ValueError("grounding_nms_iou must be between 0 and 1.")
@@ -406,12 +397,14 @@ class CaseNode(Node):
         """Select one view, draw once at 960x540, encode once for every consumer."""
         cached = None
         last_key, last_generation = None, None
-        last_encoded, last_keyframe = 0.0, 0.0
+        last_started, last_keyframe = 0.0, 0.0
         try:
             while not self.stop.is_set():
                 self.render_changed.wait(0.2)
                 self.render_changed.clear()
-                delay = last_encoded + 1 / self.param("video_fps") - time.monotonic()
+                # Pace frame starts: drawing/encoding already consumes the budget.
+                # Overruns take the newest pending frame without a catch-up burst.
+                delay = last_started + 1 / self.param("video_fps") - time.monotonic()
                 if delay > 0 and self.stop.wait(delay):
                     break
                 with self.lock:
@@ -474,7 +467,7 @@ class CaseNode(Node):
                             self.annotated_image_changed.set()
                     if not encoded_readers:
                         self.video_encoder.reset()
-                        last_encoded, last_key = time.monotonic(), key
+                        last_started, last_key = start, key
                         continue
                     # Clear before encode so requests arriving during encode survive.
                     self.video_hub.keyframe_requested.clear()
@@ -496,7 +489,7 @@ class CaseNode(Node):
                         if completed_at is not None and self.performance.get("completed_at") == completed_at:
                             self.performance["render_ms"] = (finished - start) * 1000
                             self.performance["result_to_overlay_ms"] = (finished - completed_at) * 1000
-                    last_encoded, last_key = finished, key
+                    last_started, last_key = start, key
                     if unit.keyframe:
                         last_keyframe = finished
                 except Exception as error:
@@ -628,17 +621,14 @@ class CaseNode(Node):
         gallery = ObjectGallery()
         processed = None
         next_upload_refresh = 0.0
-        proposal_tracker = AsyncKCFProposals(
+        proposal_tracker = AsyncNvDCFProposals(
             wake=self.image_changed.set,
-            parallel_enabled=self.param("kcf_parallel_enabled"),
-            parallel_workers=self.param("kcf_parallel_workers"),
+            config=self.param("nvdcf_config"),
+            width=self.param("nvdcf_width"),
+            height=self.param("nvdcf_height"),
             containment_threshold=self.param("grounding_containment_threshold"),
-            roi_padding=self.param("kcf_roi_padding"),
-            max_roi_side=self.param("kcf_max_roi_side"),
-            max_replay_frames=self.param("kcf_replay_max_frames"),
-            max_missed_detections=self.param("kcf_max_missed_detections"),
-            lab_similarity_threshold=self.param("kcf_lab_similarity_threshold"),
-            lab_change_confirmations=self.param("kcf_lab_change_confirmations"),
+            max_missed_detections=self.param("nvdcf_max_missed_detections"),
+            max_missed_frames=self.param("nvdcf_max_missed_frames"),
         )
         self.proposal_tracker = proposal_tracker
         last_recognition = None
@@ -695,7 +685,7 @@ class CaseNode(Node):
                     min_width=self.param("grounding_min_bbox_width"),
                     min_height=self.param("grounding_min_bbox_height"),
                     min_area=self.param("grounding_min_bbox_area"),
-                    # Containment runs once on the final merged KCF tracks.
+                    # Containment runs once on the final merged NvDCF tracks.
                     containment_threshold=0.0,
                 )
 
@@ -711,7 +701,7 @@ class CaseNode(Node):
 
                 def recognize(seed_pixels, proposals, seed_key, settings=settings):
                     # This callback runs in the same background job as SAM3.
-                    # All gallery GPU work and diagnostics stay off the KCF loop.
+                    # All gallery GPU work and diagnostics stay off the NvDCF loop.
                     started = time.monotonic()
                     gallery.refresh(self.root, encoder, max_side, stride)
                     recognizer = TrackedObjectRecognizer()
@@ -742,7 +732,7 @@ class CaseNode(Node):
                 proposals, proposal_source = result
                 detected_at = time.monotonic()
                 proposals = self.bbox_smoother.update(proposals, (gen, seq), context)
-                # Classification fields follow individual proposals through KCF,
+                # Classification fields follow individual proposals through NvDCF,
                 # including partial loss. Never zip survivors with an old label list.
                 detections = proposals
                 recognition = proposal_tracker.last_recognition
@@ -774,7 +764,7 @@ class CaseNode(Node):
                         item["bbox3d_status"] = "disabled" if not self.param("pose_enabled") else "no_camera_depth"
                 bbox3d_at = time.monotonic()
                 # Diagnostic crops/features stay on their recognition frame;
-                # never relabel an old crop as the current KCF image.
+                # never relabel an old crop as the current NvDCF image.
                 object_snapshot = (recognition["snapshot"]
                                    if recognition_changed and detections else None)
                 with self.lock:
@@ -825,7 +815,7 @@ class CaseNode(Node):
                         ),
                     )
                     self.status = (
-                        f"{('SAM3 Torch-TensorRT' if proposal_source == 'sam3' else 'KCF')} → "
+                        f"{('SAM3 Torch-TensorRT' if proposal_source == 'sam3' else 'NvDCF')} → "
                         f"{encoder.description}{'' if recognition_changed else ' (cached)'} | {len(detections)} objects | "
                         f"{recognition['class_count']} classes / {recognition['reference_count']} references | "
                         f"{time.monotonic()-start:.2f}s inference"

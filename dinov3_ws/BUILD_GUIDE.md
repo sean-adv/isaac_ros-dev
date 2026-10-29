@@ -15,23 +15,31 @@
 ./dinov3_ws/run.sh --ros-args -p grounding_box_threshold:=0.5
 ```
 
-預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱，例如 `medicine bottle, medicine box.`；網頁可直接更新，文字特徵按 prompt 快取，不需重建引擎。目前 confidence threshold 為 0.5、IoU NMS 停用、每幀最多 20 個框。SAM3 框裁切至原圖並通過尺寸過濾後，先以 `grounding_containment_threshold`（預設 0.95，範圍 0–1；0 停用，修改後重啟）作為「交集面積 ÷ 小框面積」門檻移除被大框包含的小框（跨 prompt 類別，優先保留大框；同面積時保留高信心框），再套用 IoU NMS 與框數上限，最後進行 DINO 分類及 KCF 初始化。
+預設設定集中在 [config/dinov3_cases.yaml](config/dinov3_cases.yaml)。SAM3 接受 1–4 個以逗號分隔的類別名稱；文字特徵依 prompt 快取。`grounding_containment_threshold` 在最終追蹤框上，以交集／小框面積移除被包含的框。DINO 分類依 SAM3 原始影格裁切執行。
 
-SAM3 偵測間隔可在網頁的 **SAM3 detection interval** 即時調整，或啟動時指定 `-p grounding_detection_interval:=5`。每隔 N 個不同處理影格嘗試提交一次背景 SAM3＋DINO，最多一個進行中的任務，不排隊；設為 1 則停用 KCF，維持每幀同步 SAM3。等待 SAM3／DINO 時，主流程持續用原本 KCF 更新 bbox，分類沿用快取。首次初始化／切換來源或設定時持續接收最新 RGB，不發布暫時的空結果；相同輸入未改變時不重複複製。計數以實際處理的不同影格為準，相機跳過的影格不計入。
+追蹤已改成 **DeepStream 9.1 NvDCF**，使用 GPU 整批追蹤物件。原生 C++ 子程序與模型 `.venv` 分離；子程序使用系統 CUDA／TensorRT，不繼承 `run.sh` 優先載入的 pip TensorRT 11。Python 不需要 `pyds` 或 PyGObject。容器內初次安裝與編譯：
 
-SAM3 完成後，同一背景工作先在該次偵測的原始 RGB 影格與 bbox 上執行 DINOv3／Lab，並建立物件診斷快照，再以該偵測影格初始化候選 KCF。每次補追都直接取當下最新的已處理影格，跳過中間影格；若更新完成時又有新影格，就再次取最新影格更新，追上後才一起交接框、分類與診斷快照。偵測影像的獨立副本保留至初始化完成，共享偵測輸入租約在 SAM3 回覆後釋放。排程器只保存一張最新影格，不保存中間影格歷史，因此不再因歷史缺幀而丟棄候選。
+```bash
+sudo bash dinov3_ws/native/install_nvdcf.sh
+# SDK 已安裝、只有 C++ 原始碼更新時：
+bash dinov3_ws/native/build_nvdcf.sh
+```
 
-補追呼叫次數由 `kcf_replay_max_frames`（預設最多 8 次更新，並非跳過影格數或歷史容量）控制，沒有經過時間上限；`replay_ms` 仍記錄補追耗時。超限時丟棄候選 tracker，保留前景 tracker 與當前有效框，依正常偵測間隔再提交。追蹤失敗或 context 變更仍會丟棄候選；變更來源後清空最新影格，不套用舊結果。跳幀間隔過大仍可能使 KCF 追蹤失敗。`grounding_schedule` 提供 `seed_frame_key`（原始偵測影格）、`seed_skipped_frames`（固定為 0，始終在偵測影格初始化）、`catchup_skipped_frames`（補追跳過的已處理影格總數）、`init_ms`、`replay_frames`（實際補追呼叫次數）、`replay_ms`、`discard_reason`，以及目前 `busy`、`initializing`。策略修改後需重新啟動服務。
+安裝器使用 NVIDIA 官方 DeepStream 9.1.0 ARM64 SDK。Compose 已改用 `native/Dockerfile` 衍生映像，從 host 執行 `docker compose build isaac-ros` 可將依賴與橋接程式寫入映像。現有容器已安裝，可直接重啟辨識服務；SDK 位於 `/opt/nvidia/deepstream/deepstream-9.1`，橋接執行檔位於 `artifacts/nvdcf/nvdcf_bridge`。模型與 `.venv` 不需重建。
 
-網頁狀態列的 **result FPS** 是完整辨識主迴圈最近 3 秒的結果頻率，包含影像準備、深度等待、候選框更新與每幀 3D 計算（非同步模式的 DINO 已在背景執行）；不是 KCF 單獨 FPS 或 MJPEG 顯示 FPS。相機區塊另外顯示 **input FPS**。`/api/status` 的 `performance` 提供 `image_prepare_ms`（包含共享複製）、`shared_copy_ms`（前者的子項）、`depth_wait_ms`、`proposal_update_ms`（包含非同步排程、最新影格複製與前景 KCF）、`recognize_ms`（交接時記錄背景辨識耗時，其餘影格為 0）、`bbox3d_ms`、`render_ms`。首次交接的深度等待發生在辨識後，會同時包含在 `bbox3d_ms` 中。平常的 `detect_ms` 為影像準備＋深度等待＋候選框更新的合計，不能當成純 KCF 耗時。
+SAM3 偵測間隔可從網頁或 `grounding_detection_interval` 調整。每 N 個不同處理影格提交一次背景 SAM3＋DINO；設為 1 則停用 NvDCF，使用同步偵測。背景工作先在偵測原始影格初始化候選 NvDCF，再補追一張最新已處理影格；主流程交接前會將候選更新至當前影格。等待期間舊 NvDCF 持續追蹤。只保留最新影像，不保存整段歷史，因此快速運動與大幅跳幀仍需實測。
 
-bbox ROS 發布由獨立 worker 發送 Detection2D／Detection3D／AprilTag 資料。即時畫面統一縮放及畫框成 960×540，由單一 H.264 編碼器產生 Annex-B access unit，再分別交給網頁 WebRTC 與 ROS `/medicine_recognition/image_annotated/h264`（`sensor_msgs/CompressedImage`，format=h264）；兩端共用相同編碼資料，不重新編碼。預設 auto 優先 NVENC、不可用則 libx264。無觀看者與 ROS 訂閱者時停止繪圖／編碼。相機模式有有效框且結果未超過 3 秒時顯示疊圖，否則選最新相機預覽；上傳結果不過期。圖庫頁也使用同一條影像，原始相機擷取仍獨立取 RGB。DDS 影像發布與 bbox 發布各有 worker；慢影像訂閱者不阻塞編碼或 bbox。接收端佇列溢位時等待新 IDR，不任意保留缺參考影格的 P-frame。MJPEG 路由與舊原始影像輸出已移除。參數、ROS 解碼方式及 host-only ICE 限制見 `src/dinov3_cases/README.md` 的「共用 H.264 即時影像」。共享影格池滿時仍先回收尚未開始的舊繪圖工作，讓推論繼續。
+每次成功 SAM3 結果逐物件銜接：匹配目標改由新 NvDCF context 接手，未匹配且仍追蹤有效的舊目標保留原 context；連續 `nvdcf_max_missed_detections` 次已提交 SAM3 結果漏偵測才移除（預設 3）。空偵測只增加一次漏偵測，背景等待及一般追蹤影格不計次；不再擁有有效目標的 context 會關閉。兩組追蹤器到達相同影格後，以位置關聯公開 `track_id`；這不是跨長期遮擋的 ReID。原生 `nvdcf_id` 僅在各自的 context 內有意義。辨識標籤、分數與診斷快照隨物件交接。
 
-任一主流程 KCF 追蹤失敗或框無效時會清除失效框並提前要求背景偵測；當下已有任務就等它完成，不同步阻塞補偵測。新 SAM3 結果取代整組追蹤器，空偵測會清除舊框。DINOv3、深度／3D 框與發布使用當幀框。`bbox_source=sam3` 表示套用了新偵測（可能已經過追趕），其餘為 `kcf`；追蹤期間的 `detection_score` 保留最近一次 SAM3 分數。`grounding_ipc.worker_detect_ms` 為背景偵測耗時，主流程的 `detect_ms` 則是取得當幀提案的耗時。bbox 直接顯示當幀結果，不再提供額外的 ROITracker ID 配對或命中門檻。
+`nvdcf_max_missed_frames` 控制 Python 層的失追寬限（預設 30，設 0 停用，重啟生效）：容忍 N 個連續缺失的已處理影格，第 N+1 次缺失才移除，重跑同影格不計次。期間保留 context、分類與 ID，隱藏過期框並暫停該物件的 SAM3 miss 計數。部分或全部物件剛失追皆提前偵測；仍有隱藏物件時，以 `min(grounding_detection_interval, max(1, nvdcf_max_missed_frames // 3))` 幀重試 SAM3（預設 10），增加遮擋解除後的回配機會。新偵測與隱藏物件配對後移除舊 owner，避免同 ID 由兩組 context 重複輸出。
 
-`config/dinov3_cases.yaml` 的 `bbox_smoothing_frames` 控制 bbox 移動平均，預設為 3（設為 1 停用），修改後重新啟動。此設定不顯示在網頁。每個物件取最近 N 個不同處理影格的原始 SAM3／KCF 框平均；不足 N 幀時使用已有樣本。SAM3 更新時依位置配對歷史，物件消失或來源／解析度／設定變更時清除歷史。同一幀重跑不增加樣本。平滑框供辨識裁切、顯示、3D 框與發布使用，KCF 本身仍以原始框運作。
+`nvdcf_width`／`nvdcf_height` 預設 640×384，須為 32 的倍數。只有追蹤影像縮放；輸出框還原至原始 RGB 座標，SAM3、DINO 裁切與深度／3D 計算使用原圖。NvDCF 設定在 [config/nvdcf.yaml](config/nvdcf.yaml)，可透過 ROS `nvdcf_config` 指定另一份檔案。預設使用 HOG＋ColorNames，不啟用 ReID 模型。`maxShadowTrackingAge` 控制偵測間隔內暫時遺失的原生追蹤存活期，與 Python 寬限分開；原生失追後可能需要新的偵測才能恢復輸出。
 
-KCF 前景與背景 replay 都使用隨物件移動的 ROI；`kcf_roi_padding: 0.5` 表示當前追蹤框四邊各擴張 50%，`2.0` 則各擴張兩倍寬／高，超出原圖的部分裁切到圖像邊界。每次成功追蹤後，依當前框重新置中 ROI；區域改變時，在當前影格的新裁切圖重新初始化並暖機 KCF，下一幀使用新 ROI。局部框映射回原圖座標，`kcf_max_roi_side` 仍限制工作解析度。ROI 移動保留 SAM3 的 Lab 外觀參考及連續變化次數，不重跑 SAM3／DINO。重新初始化會增加移動時的 CPU 工作量，縮小 ROI 後的細微移動仍受解析度限制。若追蹤框在更新前接近舊 ROI 人工邊界（框寬／高的 10%，至少 1 pixel），仍提前要求背景偵測；跨出人工邊界時視為追蹤失敗。重新初始化失敗時保留當幀有效框及舊 ROI，並要求背景偵測。真實影像邊界正常裁切，不因此反覆補偵測。更新程式或參數後需重啟辨識服務。
+KCF 的 ROI、Lab 外觀檢查、平行 worker、replay 次數及 SAM3 miss 參數已移出啟用中的設定。舊 KCF 模組與歷史測試保留供回歸對照，執行管線不再使用它們。`opencv_num_threads` 只控制影像前處理的 OpenCV 執行緒池。
+
+`bbox_source=sam3` 表示新偵測交接，其餘追蹤結果為 `nvdcf`。`detection_score` 保留 SAM3 分數；`tracker_confidence` 是 NvDCF 追蹤分數。`bbox_smoothing_frames` 控制原始追蹤框的移動平均，設為 1 停用。平滑結果不回饋追蹤器。
+
+`performance.grounding_schedule` 提供 `backend`、`busy`、`initializing`、`seed_frame_key`、`ready_frame_id`、`catchup_skipped_frames`、`replay_frames`、`job_ms` 與 `handoff`。result FPS 包含完整結果迴圈；`proposal_update_ms` 包含追蹤與交接，不能當成純 SAM3 耗時。既有 3D bbox、ROS Detection2D／Detection3D／AprilTag、960×540 H.264／WebRTC 輸出繼續使用目前影格的框。
 
 相機 RGB、深度與深度 CameraInfo 訂閱在 `node.py` 固定使用 `ReliabilityPolicy.RELIABLE`，搭配 `KEEP_LAST`、depth=1，不提供 YAML 切換參數。此環境的 Orbbec 發布端為 RELIABLE；以獨立訂閱者交替測試，BEST_EFFORT 約 13 FPS、RELIABLE 約 29.7 FPS。這改善 ROS 接收缺幀，不保證辨識模型也能完成 30 FPS。更新程式後需重啟辨識服務，相機不用重啟。
 
@@ -46,13 +54,6 @@ KCF 前景與背景 replay 都使用隨物件移動的 ROI；`kcf_roi_padding: 0
 對照資料與可重現量測腳本位於 `artifacts/camera_delivery_user_comparison_20261018/`。此實驗只驗證相機接收，不保證完整辨識結果也達到 30 FPS。
 
 主程序的 `opencv_num_threads` 預設設定為 `1`，限制 OpenCV 內部執行緒池以控制 CPU 負載；前景、背景 replay、發布及繪圖仍並行。設定為 `0` 保留 OpenCV 函式庫預設值。此設定只作用於主程序，不更改 SAM3 子程序或 PyTorch／BLAS 執行緒數，修改後重新啟動。
-
-KCF 需要主程序環境安裝 `opencv-contrib-python`（包含 [OpenCV KCF](https://docs.opencv.org/4.x/d2/da2/classcv_1_1TrackerKCF.html)）。若原先使用一般 OpenCV wheel，先移除同名 `cv2` 套件再安裝，避免重疊檔案；主程序與 SAM3 worker 共用同一份 `.venv` 套件：
-
-```bash
-dinov3_ws/.venv/bin/python -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python-headless
-dinov3_ws/.venv/bin/python -m pip install 'opencv-contrib-python>=4.8,<4.12'
-```
 
 ## 執行環境與模型
 

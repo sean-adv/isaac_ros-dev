@@ -2,7 +2,10 @@ name: isaac-ros-jazzy
 
 services:
   isaac-ros:
-    image: advigw/isaac-ros-base-jazzy:1.00
+    image: isaac-ros-jazzy-nvdcf:9.1
+    build:
+      context: ./dinov3_ws/native
+      dockerfile: Dockerfile
     runtime: nvidia
     network_mode: host
     ipc: host

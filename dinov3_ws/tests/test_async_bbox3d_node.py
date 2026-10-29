@@ -36,11 +36,10 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
     scheduler.update.return_value = ([dict(bbox=[20, 20, 60, 40], label='medicine', score=.9)], 'kcf')
     params = dict(engine_path='unused', grounding_engine_path='unused',
                   grounding_worker_python='unused', grounding_ipc_timeout=1.,
-                  kcf_roi_padding=.5, kcf_max_roi_side=0,
-                      kcf_parallel_enabled=False, kcf_parallel_workers=4, kcf_replay_max_frames=8,
-                  kcf_max_missed_detections=3,
-                      kcf_lab_similarity_threshold=.35, kcf_lab_change_confirmations=3,
-                  grounding_nms_iou=1., grounding_max_detections=20,
+                  nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
+                  nvdcf_max_missed_detections=3,
+                  nvdcf_max_missed_frames=30,
+                      grounding_nms_iou=1., grounding_max_detections=20,
                       grounding_containment_threshold=.95,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                   grounding_min_bbox_area=0, pose_enabled=True)
@@ -79,7 +78,7 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
                 patch('dinov3_cases.node.feature_stride', return_value=16), \
                 patch('dinov3_cases.node.SharedMemoryGroundingDetector'), \
                 patch('dinov3_cases.node.ObjectGallery'), \
-                patch('dinov3_cases.node.AsyncKCFProposals', return_value=scheduler):
+                patch('dinov3_cases.node.AsyncNvDCFProposals', return_value=scheduler):
             CaseNode.run_grounded_worker(node)
         assert len(observed) == 12
         assert measured == [(1, 'calibration')]

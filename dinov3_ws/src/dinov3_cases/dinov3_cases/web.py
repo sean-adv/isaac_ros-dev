@@ -9,7 +9,7 @@ from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
 from .patches import reference_grid_image
 from .grounded import validate_settings
 from .cat2real import prepare_cat2real_image
-from .kcf import kcf_factory
+from .nvdcf import check_nvdcf
 from .image_manager import register_image_manager
 from .gallery_files import (
     group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
@@ -183,7 +183,7 @@ def create_app(node):
             settings = {**node.grounding_settings, **payload}
             settings["prompt"] = validate_settings(**settings)
             if settings.get("detection_interval", 1) > 1:
-                kcf_factory()
+                check_nvdcf(node.param("nvdcf_config"))
             detector = getattr(node, "grounding_detector", None)
             if detector is None and "prompt" in payload:
                 return jsonify(error="SAM3 is loading. Please try again once it is ready."), 503
