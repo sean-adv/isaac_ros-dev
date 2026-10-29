@@ -6,7 +6,7 @@
 
 1. `node.py` 接收最新 RGB 影格，先配對深度，再取得 `frame_pool.py` 的共享影像租約。
 2. `async_nvdcf.py` 決定同步偵測或背景偵測；`grounding_ipc.py` 將影像交給同一份 `.venv` 的 TensorRT 11 子程序中的 `sam3_trt.py`，使用官方 TensorRT vision 與 PyTorch bbox head。主程序使用 Cat2Real FP32 Torch-TensorRT。
-3. 非同步模式每 `grounding_detection_interval` 個已處理影格提交背景 SAM3＋DINO 工作。前景 NvDCF 持續追蹤；背景在偵測原圖建立候選 NvDCF，再補追最新快照，前景交接前補追至共同影格。交接逐物件配對：配對成功者由新 context 接手，漏偵測但追蹤有效者保留原 context 與標籤；連續 `nvdcf_max_missed_detections` 次已提交 SAM3 結果漏偵測才移除（預設 3），空偵測也只計一次漏偵測。靜態上傳每秒可刷新；間隔 1 停用 NvDCF。
+3. 非同步模式每 `grounding_detection_interval` 個已處理影格提交背景 SAM3＋DINO 工作。前景 NvDCF 持續追蹤；背景 SAM3 出框後，先在偵測原圖建立候選 NvDCF，再補追最新快照，前景補追至共同影格後立即交接框；此時不等待 DINO。DINO 隨後辨識同一張 seed-frame 的裁切，只依不可變的 seed ownership key 更新仍存活物件的分類，不覆寫目前框。未識別物件一律只顯示 SAM3 名稱，包含等待 DINO 與完成後仍為 unknown 的情況，避免每次辨識時文字切換；已配對物件暫時沿用舊類別，不加上待辨識或更新中的字樣。交接逐物件配對：配對成功者由新 context 接手，漏偵測但追蹤有效者保留原 context 與標籤；連續 `nvdcf_max_missed_detections` 次已提交 SAM3 結果漏偵測才移除（預設 3），空偵測也只計一次漏偵測。靜態上傳每秒可刷新；間隔 1 停用 NvDCF。
 4. `tracking.py` 平滑候選框並在共同影格關聯公開身分。已辨識物件變為 `unknown` 時移除該追蹤；初始 unknown 仍可顯示。NvDCF 原生 ID 用於 context 內的標籤綁定，公開 `track_id` 延續跨偵測回合的幾何關聯。
 5. `encoder.py` 將 Cat2Real 裁切圖置中補白至 384，從一次 forward 保留 pooler 描述向量與 patch 熱圖特徵；`grounded.py` 建立圖庫、分類及管理辨識快取。先以 `recognition_threshold` 篩選 DINO cosine 分數，再從候選參考圖中選 Lab Bhattacharyya 分數最高者的分類；無候選時為 unknown。`score` 為所選參考圖的 DINO 分數，不再計算加權分數。
 6. `async_bbox3d.py` 獨立排程背景深度工作，透過 `depth_bbox.py` 計算中心、尺寸與旋轉；預設每 5 個處理影格量測一次。ROS 發布和疊圖各用獨立 worker，待處理輸出只保留最新一份；共享影格池滿時，先釋放尚未開始的舊疊圖工作，讓新推論繼續。
@@ -34,6 +34,7 @@
 
 - SAM3 框屬於較舊的影格；須在偵測原圖初始化，再補追至當前影格，才可交接。大幅跳幀仍可能追錯。
 - 相同影格重算不能增加追蹤命中次數或重複累加平滑樣本。
+- 相機持續送影格時，SAM3／DINO／3D 的背景完成通知合併到下一張 RGB，避免同影格再複製、追蹤、發布及畫圖編碼。若超過 200 ms 沒有新輸入，仍可刷新該影格，讓首次 3D 與延後類別完成；靜態上傳可立即套用背景結果。這類刷新不增加 processed RGB FPS。
 - NvDCF 組更換或物件數改變時重新編碼；圖庫或分類門檻改變時可用既有 descriptor 重新分類。
 - 診斷裁切屬於辨識當時的影格，不可套用後續 NvDCF 框冒充目前影像。
 - 共享影格在所有租約釋放前不可覆寫；舊 generation 的背景結果不可發布。
@@ -41,9 +42,9 @@
 
 測試命令見 `../../tests/README.md`。重構前已存在的限制：`qwen_encoder.py` 引用 `runtime.py` 中不存在的 `QWEN_*` 設定，導致 `test_qwen_encoder.py` 無法收集；目前主節點僅接入 DINOv3。Qwen 程式與既有修改予以保留，未在此次整理中刪除或補上另一套推論流程。
 
-網頁 `result FPS` 是完整辨識主迴圈的結果頻率，相機的 `input FPS` 是輸入回呼頻率。主迴圈只保留可配對的深度快照並提交背景 3D 工作，不等待深度或量測完成；非同步模式的 DINOv3 在背景執行，`recognize_ms` 記錄交接結果的背景辨識耗時；細分計時和影像輸出方式見 `../../BUILD_GUIDE.md`。
+網頁 `processed RGB FPS`（API `result_fps`）只計不同 `(generation, frame_id)` 的已完成 RGB，不把同影格的背景刷新算成新影格；相機的 `input FPS` 是輸入回呼頻率。主迴圈只保留可配對的深度快照並提交背景 3D 工作，不等待深度或量測完成；非同步模式的 DINOv3 在背景執行，`recognize_ms` 記錄交接結果的背景辨識耗時；細分計時和影像輸出方式見 `../../BUILD_GUIDE.md`。
 
-啟動或套用設定後，第一份結果會等待同一張 RGB 影格的 SAM3、DINOv3 與 NvDCF 初始化完成，再恢復持續追蹤；相機擷取與網頁預覽仍獨立運作。同步深度會在等待推論前保留。這可避免首次初始化等待期間持續補追而反覆超限；模型載入完成後，網頁會顯示準備首次偵測的狀態。`/api/status` 的 `grounding_schedule` 可查看目前初始化、背景工作及最近一次補追丟棄原因。
+啟動或套用設定後，非同步模式的第一份框等待 SAM3 與 NvDCF 初始化完成便開始持續追蹤，DINO 類別稍後更新；間隔 1 的同步模式仍等待完整辨識；相機擷取與網頁預覽仍獨立運作。同步深度會在等待推論前保留。這可避免首次初始化等待期間持續補追而反覆超限；模型載入完成後，網頁會顯示準備首次偵測的狀態。`/api/status` 的 `grounding_schedule` 可查看目前初始化、背景工作及最近一次補追丟棄原因。
 
 ### 深度框的旋轉估計
 
@@ -141,6 +142,9 @@ ROS 每筆 `Detection3D.header` 保留該量測的來源時間，陣列 header �
 無網頁或 ROS 訂閱者時不繪圖、不編碼；同一份最新畫面必要時重送為 IDR，供新觀看者加入。
 每秒及新觀看者加入時請求 IDR；各接收端最多緩存 30 個 access unit，溢位後捨棄整組待傳封包，
 等待下一個 IDR，避免任意丟 P-frame 造成花屏。DDS 發布由獨立 worker 處理，不阻塞 WebRTC 編碼。
+相機持續送新影格時，週期性 IDR 合併到下一張 RGB，避免在兩次結果間重編碼快取畫面；新觀看者明確要求 IDR 或相機暫停時仍可立即重送。
+
+3D 模式等待有效的 3D 量測與相機參數後才繪框，不暫時繪製 2D 框。3D 就緒時即使 DINO 尚未完成，也可顯示 3D 框與待辨識標籤；DINO 先完成但 3D 尚未就緒時仍等待。`recognition_pending` 表示該物件類別仍待更新。
 
 相機模式有有效框且結果未超過 3 秒時顯示疊圖，否則顯示最新相機預覽；上傳結果不過期。
 上傳圖片沒有 ROS header，使用編碼當下的節點時間，`frame_id` 為空。
@@ -199,7 +203,7 @@ WebRTC 使用 aiortc 的已編碼 `Packet` 路徑，詳見
 
 ## NvDCF 執行環境
 
-已解除所有權的 NvDCF context 由單一背景 worker 回收，交接不等待舊子程序退出；最多排隊 8 個，滿載時施加背壓，停機時等待全部回收。仍有可見或遮擋保留物件的 context 不會提前回收。候選框仍補追到共同影格後，與 seed-frame 的分類一起交接。`grounding_schedule` 另外提供 `candidate_create_ms`、`candidate_seed_ms`、`candidate_catchup_ms`，用來區分候選準備成本。
+已解除所有權的 NvDCF context 由單一背景 worker 回收，交接不等待舊子程序退出；最多排隊 8 個，滿載時施加背壓，停機時等待全部回收。仍有可見或遮擋保留物件的 context 不會提前回收。候選框補追到共同影格後先交接，seed-frame 的分類完成後再更新；延後分類不能重新建立已移除的物件，也不能貼到新的偵測回合。`grounding_schedule` 另外提供 `candidate_create_ms`、`candidate_seed_ms`、`candidate_catchup_ms`，用來區分候選準備成本；`geometry_ready_ms` 是框就緒時間，`job_ms` 在 DINO 完成後更新為整件背景工作時間。DINO 失敗保留框，錯誤可從 `recognition_error` 查看。
 
 短暫遮擋使 NvDCF 不再輸出物件時，`nvdcf_max_missed_frames` 保留其原 context、公開 ID 與分類 metadata（預設 30，設 0 停用）。以不同的已處理 RGB 影格計數，同影格重跑不累計；容忍 N 次連續缺失，第 N+1 次仍缺失才移除。失追期間不顯示過期框，也不提交舊框做 3D 量測，該物件的 SAM3 miss 計數暫停。原生輸出恢復時沿用原生及公開 ID；若由新 SAM3 結果重新配對，保留公開 ID，但可換用新的原生 context。任何物件剛失追時會提前要求 SAM3；仍有隱藏物件時，以 `min(grounding_detection_interval, max(1, nvdcf_max_missed_frames // 3))` 個處理影格重試，預設最多每 10 幀一次。原生 shadow 存活期另外受 `maxShadowTrackingAge` 限制，跨遮擋重新配對使用幾何位置而非 ReID，無法保證大幅位移後仍配對正確。包含框過濾與已知轉 unknown 的立即退場規則仍適用於可見物件。
 

@@ -1,4 +1,4 @@
-"""Background SAM3/DINO, followed by whole-frame NvDCF catch-up and handoff."""
+"""Whole-frame NvDCF handoff, optionally publishing boxes before DINO labels."""
 import logging
 import queue
 import threading
@@ -52,6 +52,10 @@ class _TrackerReaper:
             self.queue.put(None)
             self.thread.join()
             self.thread = None
+
+
+_CLASSIFICATION_FIELDS = ('label', 'score', 'dino_score', 'lab_score', 'candidate',
+                          'margin', 'reason', 'reference')
 
 
 class _NvDCFTracks:
@@ -132,11 +136,15 @@ class AsyncNvDCFProposals:
     """
     def __init__(self, wake=None, config=DEFAULT_CONFIG, width=640, height=384,
                  containment_threshold=0.0, factory=None, max_missed_detections=3,
-                 max_missed_frames=30):
+                 max_missed_frames=30, defer_recognition=False):
         if not 0 <= containment_threshold <= 1:
             raise ValueError('containment_threshold must be in [0, 1]')
         validate_missed_frames(max_missed_frames)
         self.max_missed_frames = max_missed_frames
+        self.defer_recognition = defer_recognition
+        self.geometry_ready = threading.Event()
+        self.recognized = None
+        self.recognition_error = None
         self.factory = factory or (lambda: NvDCF(config, width, height))
         self.wake = wake or (lambda: None)
         self.containment_threshold = containment_threshold
@@ -166,17 +174,21 @@ class AsyncNvDCFProposals:
 
     def has_result(self):
         with self.lock:
-            return self.ready is not None or self.error is not None or (self.force_detection and not self.busy)
+            return (self.ready is not None or self.recognized is not None
+                    or self.error is not None or (self.force_detection and not self.busy))
 
     def scheduler_metrics(self):
         with self.lock:
             return dict(self.last_replay, backend='nvdcf', busy=self.busy,
                         initializing=self.active is None, handoff=dict(self.last_handoff),
+                        recognition_error=self.recognition_error,
                         **self.last_tracking)
 
     def _job(self, version, serial, pixels, lease, detect, recognize, seed_key):
         candidate = None
         started = time.monotonic()
+        published = False
+        deferred = self.defer_recognition and recognize is not None
         try:
             try:
                 proposals, metrics = detect(lease if lease is not None else pixels)
@@ -184,7 +196,15 @@ class AsyncNvDCFProposals:
                 if lease is not None:
                     lease.release()
             recognition = None
-            if recognize is not None:
+            seed_proposals = proposals
+            if deferred:
+                seed_proposals = [dict(p, bbox=list(p['bbox']),
+                                       _recognition_key=(version, serial, index))
+                                  for index, p in enumerate(proposals)]
+                proposals = [dict(p, label='unknown', score=None,
+                                  reason='recognition_pending', recognition_pending=True)
+                             for p in seed_proposals]
+            elif recognize is not None:
                 proposals, recognition = recognize(pixels, proposals, seed_key)
             with self.lock:
                 if self.closed or self.version != version:
@@ -206,17 +226,37 @@ class AsyncNvDCFProposals:
                     return
                 self.ready = (candidate, metrics, recognition)
                 candidate = None
+                published = True
                 self.last_replay = dict(seed_frame_key=seed_key, ready_frame_id=replay_serial,
                                         catchup_skipped_frames=max(0, replay_serial-serial-1),
                                         replay_frames=int(replay_serial != serial),
                                         candidate_create_ms=(created_at-create_started)*1000,
                                         candidate_seed_ms=(seeded_at-created_at)*1000,
                                         candidate_catchup_ms=(time.monotonic()-seeded_at)*1000,
+                                        geometry_ready_ms=(time.monotonic()-started)*1000,
                                         job_ms=(time.monotonic()-started)*1000)
+            # Transfer geometry ownership before DINO. No native tracker is
+            # touched by the recognition thread after this point.
+            self.geometry_ready.set()
+            self.wake()
+            if deferred:
+                classified, recognition = recognize(pixels, seed_proposals, seed_key)
+                classes = {
+                    p['_recognition_key']: {k: p[k] for k in _CLASSIFICATION_FIELDS if k in p}
+                    for p in classified
+                }
+                with self.lock:
+                    if not self.closed and self.version == version:
+                        self.recognized = (classes, recognition)
+                        self.last_replay["job_ms"] = (time.monotonic()-started)*1000
+
         except Exception as error:
             with self.lock:
                 if not self.closed and self.version == version:
-                    self.error = error
+                    if deferred and published:
+                        self.recognition_error = str(error)
+                    else:
+                        self.error = error
         finally:
             if candidate is not None:
                 self._reaper.retire(candidate)
@@ -224,7 +264,34 @@ class AsyncNvDCFProposals:
                 self.busy = False
                 if self.version != version and not self.closed:
                     self.force_detection = True
+            self.geometry_ready.set()
             self.wake()
+
+    def _apply_recognition(self, classes):
+        """Update surviving seed owners by immutable key, never list position.
+
+        Apply only classification fields: delayed seed boxes cannot rewind live
+        geometry, revive removed objects, or label a newer detector generation.
+        """
+        if self.active is None:
+            return False
+        applied = False
+        for tracker in self.active.contexts:
+            for item in [*tracker.metadata.values(), *tracker.proposals]:
+                classification = classes.get(item.get("_recognition_key"))
+                if classification is not None:
+                    for key in _CLASSIFICATION_FIELDS:
+                        item.pop(key, None)
+                    item.update(classification, recognition_pending=False)
+                    applied = True
+        # Public outputs can be separate dictionaries from native metadata.
+        for item in self.active.proposals:
+            classification = classes.get(item.get("_recognition_key"))
+            if classification is not None:
+                for key in _CLASSIFICATION_FIELDS:
+                    item.pop(key, None)
+                item.update(classification, recognition_pending=False)
+        return applied
 
     def _filter(self, detected_ids=None, detected_at=None):
         hidden = self.active.hidden
@@ -233,7 +300,8 @@ class AsyncNvDCFProposals:
         hidden_states = {p['track_id']: self.lifecycle.states[p['track_id']]
                          for p in hidden if p['track_id'] in self.lifecycle.states}
         retired = contained_track_ids(self.active.proposals, self.containment_threshold)
-        retired |= self.identities.retire_unknown(self.active.proposals)
+        retired |= self.identities.retire_unknown(
+            [p for p in self.active.proposals if not p.get("recognition_pending")])
         proposals, expired = self.lifecycle.update(
             [p for p in self.active.proposals if p['track_id'] not in retired],
             detected_ids, detected_at,
@@ -275,6 +343,8 @@ class AsyncNvDCFProposals:
                 self.frames_since_submit = 0
                 self.force_detection = True
                 self.last_recognition = None
+                self.recognized = None
+                self.recognition_error = None
                 self.last_metrics = {}
                 self.last_replay = {}
                 self.last_handoff = {}
@@ -297,6 +367,7 @@ class AsyncNvDCFProposals:
                     self.frames_since_submit += 1
             serial, version = self.serial, self.version
             ready, self.ready = self.ready, None
+            recognized, self.recognized = self.recognized, None
 
         if interval == 1:
             proposals, self.last_metrics = detect(frame if frame is not None else pixels)
@@ -327,6 +398,12 @@ class AsyncNvDCFProposals:
                 candidate.update(pixels, serial)
                 live = self.active.owned if self.active is not None else []
                 candidate.proposals, matches = self.identities.assign(candidate.proposals, live)
+                if self.defer_recognition:
+                    for index, old in matches.items():
+                        item = candidate.proposals[index]
+                        if item.get('recognition_pending'):
+                            previous = live[old]
+                            item.update({k: previous[k] for k in _CLASSIFICATION_FIELDS if k in previous})
                 detected_ids = {p['track_id'] for p in candidate.proposals}
                 detected_at = candidate.detected_at
                 for item in candidate.proposals:
@@ -344,13 +421,20 @@ class AsyncNvDCFProposals:
                 self.active = _NvDCFTracks(
                     [candidate, *contexts], max_missed_frames=self.max_missed_frames,
                     serial=serial, last_seen=last_seen, retire=self._reaper.retire)
-                self.last_metrics, self.last_recognition = metrics, recognition
+                self.last_metrics = metrics
+                if recognition is not None:
+                    self.last_recognition = recognition
                 self.last_handoff = dict(ready_frame_id=ready_serial, frame_id=serial,
                                          skipped_frames=max(0, serial-ready_serial-1))
                 result = self.active.proposals, 'sam3'
             except BaseException:
                 self._reaper.retire(candidate)
                 raise
+
+        if recognized is not None:
+            classes, recognition = recognized
+            if self._apply_recognition(classes):
+                self.last_recognition = recognition
 
         if result is not None:
             # Apply containment/unknown retirement once after merging, then count
@@ -371,9 +455,12 @@ class AsyncNvDCFProposals:
             due = self.force_detection or self.frames_since_submit >= refresh_interval
             if due and not self.busy:
                 self.busy = True
+                self.recognition_error = None
+                self.geometry_ready.clear()
                 self.force_detection = False
                 self.frames_since_submit = 0
                 lease = frame.retain() if frame is not None else None
+                self.thread_version = version
                 self.thread = threading.Thread(
                     target=self._job,
                     args=(version, serial, self.latest[1], lease, detect, recognize, frame_key),
@@ -381,7 +468,10 @@ class AsyncNvDCFProposals:
                 self.thread.start()
             initial = self.thread if wait_for_initial_result and self.active is None and self.busy else None
         if initial is not None:
-            initial.join()
+            if self.defer_recognition and self.thread_version == version:
+                self.geometry_ready.wait()
+            else:
+                initial.join()
             return self._update(pixels, frame_key, context, interval, detect,
                                 frame=frame, recognize=recognize, wait_for_initial_result=True)
         return result

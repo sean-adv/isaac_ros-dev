@@ -1,8 +1,8 @@
 dinov3_cases:
   ros__parameters:
     # SAM3: 1–4 comma-separated class names; text features cached per prompt.
-    grounding_prompt: 'medicine box.'
-    grounding_box_threshold: 0.5
+    grounding_prompt: 'box.'
+    grounding_box_threshold: 0.8
     # After NvDCF tracking: intersection / smaller-box area >= threshold keeps the
     # larger box and immediately removes the smaller track. One final pass only.
     # Range 0..1; 0 disables containment filtering. Restart to apply.
@@ -11,15 +11,16 @@ dinov3_cases:
     grounding_max_detections: 20
     # Submit one background SAM3 + DINO job every N processed frames; NvDCF continues.
     # One job at a time; seed and each catch-up update use latest admitted RGB.
-    # DINO classifies SAM3 seed-frame crops before replay; boxes/labels hand off together.
+    # Publish caught-up SAM3 boxes first; DINO then updates labels by seed ownership.
+    # Matched tracks keep old labels while pending; new tracks show the SAM3 name.
     # 1 disables NvDCF and uses synchronous SAM3. Lost tracking requests detection early.
-    grounding_detection_interval: 30
+    grounding_detection_interval: 3
     # Whole-frame GPU NvDCF tracking (DeepStream 9.1). Restart to apply.
     # Uses config/nvdcf.yaml; override nvdcf_config with an absolute path if needed.
     nvdcf_width: 640
     nvdcf_height: 384
     # Retire after N consecutive committed SAM3 misses; pending jobs do not count.
-    nvdcf_max_missed_detections: 3
+    nvdcf_max_missed_detections: 5
     # Keep occluded tracks hidden for N unique processed frames before removal.
     # 0 disables grace. Hidden tracks pause SAM3 miss counting. Restart to apply.
     # Native shadow lifetime is also limited by config/nvdcf.yaml.

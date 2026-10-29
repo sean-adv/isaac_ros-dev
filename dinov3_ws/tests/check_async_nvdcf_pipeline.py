@@ -1,22 +1,33 @@
-"""Real SAM3/DINOv3 smoke: results continue while a SAM3 call is stalled."""
+"""Real models: geometry precedes DINO; tracking continues through either stall."""
 
 import json
 from pathlib import Path
 import tempfile
 import threading
 import time
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
 import rclpy
 
-from dinov3_cases.node import CaseNode
+from dinov3_cases.node import CaseNode, TrackedObjectRecognizer
 from dinov3_cases.runtime import ARTIFACTS, WORKSPACE
 
 
 def main():
     image = Image.open(WORKSPACE / 'DART/dartf/data/train2017/000000230971.jpg').convert('RGB')
     entered, release = threading.Event(), threading.Event()
+    dino_entered, dino_release = threading.Event(), threading.Event()
+    real_recognize = TrackedObjectRecognizer.update
+
+    def gated_recognize(self, *args, **kwargs):
+        dino_entered.set()
+        assert dino_release.wait(30), 'Stalled DINO was never released'
+        return real_recognize(self, *args, **kwargs)
+
+    patcher = patch.object(TrackedObjectRecognizer, 'update', gated_recognize)
+    patcher.start()
     with tempfile.TemporaryDirectory() as directory:
         folder = Path(directory) / 'sample'
         folder.mkdir()
@@ -80,6 +91,11 @@ def main():
             assert schedule['backend'] == 'nvdcf', schedule
             assert status['performance']['grounding_schedule']['initializing'] is False
             assert client.get('/api/detections').json['detections']
+            assert status['performance']['recognition_source'] == 'pending', status
+            assert dino_entered.wait(5)
+            pending_initial = client.get('/api/detections').json['detections']
+            assert all(p['recognition_pending'] for p in pending_initial)
+            assert not dino_release.is_set()
             bootstrap = dict(input_frames=bootstrap_frames, input_target_fps=30,
                              elapsed_ms=(time.monotonic()-bootstrap_start)*1000,
                              performance=status['performance'])
@@ -91,6 +107,10 @@ def main():
                 return real_detect(*args, **kwargs)
 
             node.grounding_detector.detect = stalled_detect
+            dino_release.set()
+            wait_for(lambda s: s['performance'].get('recognition_source') == 'dino')
+            initial_ids = {p['track_id'] for p in client.get('/api/detections').json['detections']}
+            assert initial_ids == {p['track_id'] for p in pending_initial}
             rows = []
             # At least one next job must start while NvDCF keeps producing results.
             for _ in range(3):
@@ -106,6 +126,8 @@ def main():
                 assert client.get('/api/detections').json['detections']
                 rows.append(status['performance'])
             previous_revision = node.object_debug_revision
+            dino_entered.clear()
+            dino_release.clear()
             release.set()
             status = wait_for(lambda s: s['performance'].get('bbox_source') == 'sam3')
             assert status['performance']['frame_id'] == seq
@@ -114,20 +136,36 @@ def main():
             assert schedule['seed_frame_key'][-1] == status['performance']['grounding_ipc']['source_frame_id'], schedule
             assert schedule['backend'] == 'nvdcf', schedule
             assert schedule['replay_frames'] > 0, schedule
-            assert status['performance']['recognition_source'] == 'dino', status
-            assert (status['performance']['recognition_frame_id']
-                    == status['performance']['grounding_ipc']['source_frame_id']), status
+            assert status['performance']['recognition_source'] == 'pending', status
+            assert dino_entered.wait(5)
+            geometry = status['performance']
+            pending = client.get('/api/detections').json['detections']
+            assert pending and all(p['recognition_pending'] for p in pending)
+            assert not dino_release.is_set()
+            # Advance another RGB while classification is explicitly blocked.
+            seq = send_frame()
+            wait_for(lambda s: s['performance'].get('frame_id') == seq)
+            assert client.get('/api/detections').json['detections']
+            dino_release.set()
+            status = wait_for(lambda s: s['performance'].get('recognition_source') == 'dino')
+            assert status['performance']['recognition_frame_id'] == geometry['grounding_ipc']['source_frame_id']
+            classified = client.get('/api/detections').json['detections']
+            assert {p['track_id'] for p in classified} == {p['track_id'] for p in pending}
+            assert all(not p['recognition_pending'] for p in classified)
             visualizations = client.get('/api/object_visualizations').json
             assert visualizations['ready'] and visualizations['objects'], visualizations
             assert visualizations['revision'] > previous_revision, visualizations
             report = dict(passed=True, bootstrap=bootstrap, nvdcf_results_during_stalled_sam3=True,
-                          rows=rows, handoff=status['performance'])
+                          geometry_before_dino=True, tracking_during_dino=True,
+                          rows=rows, geometry=geometry, handoff=status['performance'])
             output = ARTIFACTS / 'sam3/async_nvdcf_validation.json'
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(json.dumps(report, indent=2)+'\n')
             print(json.dumps(dict(passed=True, bootstrap_frames=bootstrap_frames, nvdcf_results_during_stalled_sam3=True, handoff_frame=seq, report=str(output)), indent=2))
         finally:
             release.set()
+            dino_release.set()
+            patcher.stop()
             node.stop.set()
             for event in (node.image_changed,
                           node.publish_changed, node.render_changed):

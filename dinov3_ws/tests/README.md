@@ -12,6 +12,10 @@ OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 dinov3_ws/.venv/bin/python dinov3_ws/te
 
 `test_async_nvdcf.py` 亦以阻塞的舊 context 關閉驗證交接和後續追蹤不等待回收，並檢查停機 drain 與清理例外。`test_h264_stream.py` 驗證繪製／編碼未超時時只等待剩餘幀預算，超時時不再額外延遲。
 
+`test_async_bbox3d_node.py` 驗證新鮮 RGB 的背景通知不重跑影像轉換、追蹤或排入渲染，下一張 RGB 套用最新結果；相機暫停與靜態上傳仍能刷新，且不增加不同 RGB 的 FPS 計數。`test_h264_stream.py` 另檢查週期性 IDR 等待下一張 RGB，同時保留新觀看者與暫停輸入的快取 IDR。
+
+兩階段交接由 `test_async_nvdcf.py` 驗證：DINO 阻塞時先輸出框並追蹤下一張影像，完成後只更新原物件類別，不回退框、不復活已移除物件、不跨設定回合貼標籤；DINO 失敗仍保留框。`check_async_nvdcf_pipeline.py` 使用真實模型，刻意阻塞第一次與刷新回合的 DINO，驗證 API 已輸出框及持續追蹤，再放行確認同一 ID 更新類別。`test_h264_stream.py` 檢查 3D 模式在資料未就緒時不繪框，資料就緒後才顯示 3D 框，並涵蓋 DINO 待辨識與已完成兩種狀態。
+
 KCF 測試與效能報告為歷史對照；`profile_kcf_intervals.py` 的 KCF ROS 參數不再適用目前節點。
 
 # 目前部署測試

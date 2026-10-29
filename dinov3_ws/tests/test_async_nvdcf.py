@@ -529,3 +529,130 @@ def test_shutdown_drains_cleanup_even_when_a_retired_close_fails(pixels, caplog)
     assert tracker.closed and done.is_set()
     assert reaper.thread is None
     assert 'cleanup failure' in caplog.text
+
+
+def test_deferred_geometry_tracks_before_dino_and_labels_never_rewind_boxes(pixels):
+    entered, release = threading.Event(), threading.Event()
+    scheduler = AsyncNvDCFProposals(factory=SpatialNvDCF, defer_recognition=True)
+
+    def recognize(image, proposals, key):
+        entered.set()
+        assert release.wait(5)
+        return [dict(p, label='classified', score=.95) for p in proposals], {'frame_id': key}
+
+    try:
+        first, source = scheduler.update(pixels, 1, 'camera', 100,
+                                        lambda _: ([box(0)], {}), recognize=recognize,
+                                        wait_for_initial_result=True)
+        assert entered.wait(2) and scheduler.busy
+        assert source == 'sam3' and first[0]['recognition_pending']
+        identity = first[0]['track_id']
+        tracked, source = scheduler.update(pixels, 2, 'camera', 100, detect)
+        assert source == 'nvdcf' and tracked[0]['bbox'] == [1, 0, 11, 10]
+        release.set()
+        scheduler.thread.join(3)
+        assert scheduler.has_result()
+        result, _ = scheduler.update(pixels, 3, 'camera', 100, detect)
+        assert (result[0]['track_id'], result[0]['label'], result[0]['bbox']) == (
+            identity, 'classified', [2, 0, 12, 10])
+        assert result[0]['recognition_pending'] is False
+        result, _ = scheduler.update(pixels, 4, 'camera', 100, detect)
+        assert result[0]['label'] == 'classified'  # Native metadata also changed.
+    finally:
+        release.set()
+        scheduler.close()
+
+
+def test_deferred_refresh_keeps_old_label_then_updates_same_identity(pixels):
+    scheduler = AsyncNvDCFProposals(factory=SpatialNvDCF, defer_recognition=True)
+    entered, release = threading.Event(), threading.Event()
+    try:
+        scheduler.update(pixels, 1, 'camera', 100, lambda _: ([box(0)], {}),
+                         recognize=lambda image, p, key: ([dict(x, label='old') for x in p], {}),
+                         wait_for_initial_result=True)
+        scheduler.thread.join(3)
+        first, _ = scheduler.update(pixels, 1, 'camera', 100, detect)
+        identity = first[0]['track_id']
+
+        def recognize(image, p, key):
+            entered.set()
+            assert release.wait(5)
+            return [dict(x, label='new') for x in p], {}
+
+        scheduler.force_detection = True
+        scheduler.update(pixels, 2, 'camera', 100, lambda _: ([box(1)], {}), recognize=recognize)
+        assert entered.wait(2)
+        pending, _ = scheduler.update(pixels, 3, 'camera', 100, detect)
+        assert (pending[0]['track_id'], pending[0]['label']) == (identity, 'old')
+        assert pending[0]['recognition_pending']
+        release.set()
+        scheduler.thread.join(3)
+        result, _ = scheduler.update(pixels, 4, 'camera', 100, detect)
+        assert (result[0]['track_id'], result[0]['label']) == (identity, 'new')
+    finally:
+        release.set()
+        scheduler.close()
+
+
+def test_deferred_labels_ignore_removed_objects_and_survivor_list_positions(pixels):
+    scheduler = AsyncNvDCFProposals(factory=SpatialNvDCF, defer_recognition=True)
+    entered, release = threading.Event(), threading.Event()
+    try:
+        def recognize(image, p, key):
+            entered.set()
+            assert release.wait(5)
+            return [dict(p[0], label='A'), dict(p[1], label='B')], {}
+
+        first, _ = scheduler.update(pixels, 1, 'camera', 100,
+                                    lambda _: ([box(0), box(100)], {}), recognize=recognize,
+                                    wait_for_initial_result=True)
+        assert entered.wait(2)
+        b_id = first[1]['track_id']
+        scheduler.active.keep([first[1]])
+        release.set()
+        scheduler.thread.join(3)
+        result, _ = scheduler.update(pixels, 2, 'camera', 100, detect)
+        assert [(p['track_id'], p['label']) for p in result] == [(b_id, 'B')]
+    finally:
+        release.set()
+        scheduler.close()
+
+
+def test_deferred_context_reset_discards_stale_classification(pixels):
+    scheduler = AsyncNvDCFProposals(factory=SpatialNvDCF, defer_recognition=True)
+    entered, release = threading.Event(), threading.Event()
+    try:
+        def recognize(image, p, key):
+            entered.set()
+            assert release.wait(5)
+            return [dict(x, label='stale') for x in p], {}
+
+        scheduler.update(pixels, 1, 'old', 100, lambda _: ([box(0)], {}),
+                         recognize=recognize, wait_for_initial_result=True)
+        assert entered.wait(2)
+        assert scheduler.update(pixels, 2, 'new', 100, detect) is None
+        release.set()
+        scheduler.thread.join(3)
+        assert scheduler.recognized is None
+        result, _ = scheduler.update(pixels, 3, 'new', 100,
+                                     lambda _: ([box(0, 'fresh')], {}), wait_for_initial_result=True)
+        assert result[0]['label'] == 'fresh'
+    finally:
+        release.set()
+        scheduler.close()
+
+
+def test_deferred_dino_error_keeps_geometry_and_allows_retry(pixels):
+    scheduler = AsyncNvDCFProposals(factory=SpatialNvDCF, defer_recognition=True)
+    try:
+        def broken(*args):
+            raise RuntimeError('classification failed')
+        scheduler.update(pixels, 1, 'camera', 100, lambda _: ([box(0)], {}),
+                         recognize=broken, wait_for_initial_result=True)
+        scheduler.thread.join(3)
+        result, source = scheduler.update(pixels, 2, 'camera', 100, detect)
+        assert result and source == 'nvdcf'
+        assert scheduler.scheduler_metrics()['recognition_error'] == 'classification failed'
+        assert scheduler.error is None
+    finally:
+        scheduler.close()

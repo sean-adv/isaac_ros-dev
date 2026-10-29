@@ -1,4 +1,4 @@
-"""Publish recognized RGB-D objects using the Isaac ROS AprilTag contract."""
+"""Publish RGB-D objects using the Isaac ROS AprilTag contract."""
 
 from geometry_msgs.msg import Point
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetection, AprilTagDetectionArray
@@ -7,7 +7,7 @@ from isaac_ros_apriltag_interfaces.msg import AprilTagDetection, AprilTagDetecti
 def apriltag_message(items, header):
     """Encode pixel bounds and camera-relative XYZ for valid objects.
 
-    family is the recognized class; id is the track ID, or 0 without tracking.
+    family is the recognized class or unknown; id is the track ID, or 0 without tracking.
     Pose XYZ retain camera optical-frame coordinates in meters;
     pose Z is depth along the camera optical axis.
     corners are top-left, top-right, bottom-right, bottom-left in image pixels.
@@ -16,7 +16,7 @@ def apriltag_message(items, header):
     """
     message = AprilTagDetectionArray(header=header)
     for item in items:
-        if item["label"] == "unknown" or "bbox3d" not in item:
+        if "bbox3d" not in item:
             continue
         detection = AprilTagDetection()
         detection.family = item["label"]

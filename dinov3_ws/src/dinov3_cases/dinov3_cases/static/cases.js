@@ -152,7 +152,7 @@ async function refresh() {
     s.dataset.list = JSON.stringify(d.cases);
   }
   refreshReferences(s.value || d.selected, d.reference_revision, d.reference_stride);
-  if (d.performance && d.performance.result_fps) el('status').textContent += ' | ' + d.performance.result_fps.toFixed(1) + ' result FPS (3s avg) | callback→result ' + (d.performance.callback_to_result_ms === null ? '—' : d.performance.callback_to_result_ms.toFixed(0) + ' ms');
+  if (d.performance && d.performance.result_fps) el('status').textContent += ' | ' + d.performance.result_fps.toFixed(1) + ' processed RGB FPS (3s avg) | callback→result ' + (d.performance.callback_to_result_ms === null ? '—' : d.performance.callback_to_result_ms.toFixed(0) + ' ms');
 }
 
 const objectHelp = {

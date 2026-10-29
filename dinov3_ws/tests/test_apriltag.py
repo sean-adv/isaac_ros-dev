@@ -20,15 +20,16 @@ def object_detection(**changes):
     return item
 
 
-def test_serialized_pixel_bounds_and_metric_pose_preserve_headers():
+@pytest.mark.parametrize("label", ["medicine", "unknown"])
+def test_serialized_pixel_bounds_and_metric_pose_preserve_headers(label):
     header = Header(frame_id="camera_color_optical_frame")
     header.stamp.sec, header.stamp.nanosec = 123, 456
-    message = apriltag_message([object_detection(track_id=7)], header)
+    message = apriltag_message([object_detection(track_id=7, label=label, score=None if label == "unknown" else .9)], header)
     received = deserialize_message(serialize_message(message), AprilTagDetectionArray)
     assert received == message
     assert received.header == header
     detection, = received.detections
-    assert detection.family == "medicine" and detection.id == 7
+    assert detection.family == label and detection.id == 7
     assert (detection.center.x, detection.center.y, detection.center.z) == (30., 50., 0.)
     assert [(p.x, p.y, p.z) for p in detection.corners] == [
         (10., 20., 0.), (50., 20., 0.), (50., 80., 0.), (10., 80., 0.)]
@@ -52,10 +53,11 @@ def test_topic_z_is_camera_depth_without_modifying_source(position):
     assert item["bbox3d"]["position"] == position
 
 
-def test_missing_depth_unknown_and_empty_frames_do_not_invent_positions():
-    no_depth = object_detection()
+@pytest.mark.parametrize("label", ["medicine", "unknown"])
+def test_missing_depth_and_empty_frames_do_not_invent_positions(label):
+    no_depth = object_detection(label=label)
     del no_depth["bbox3d"]
-    assert not apriltag_message([no_depth, object_detection(label="unknown")], Header()).detections
+    assert not apriltag_message([no_depth], Header()).detections
     assert not apriltag_message([], Header()).detections
     detection, = apriltag_message([object_detection()], Header()).detections
     assert detection.id == 0

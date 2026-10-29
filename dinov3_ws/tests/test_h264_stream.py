@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import av
+import cv2
 import numpy as np
 import pytest
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
@@ -411,5 +412,66 @@ def test_renderer_paces_frame_starts_and_does_not_add_delay_after_overrun(work_m
     else:
         assert waits == []
     assert len(readers[0].queue) == 2
+    frame.release.assert_called_once()
+    node.get_logger().error.assert_not_called()
+
+
+@pytest.mark.parametrize('pending_dino,name', [(True, 'unknown'), (False, 'unknown'), (False, 'known')])
+@pytest.mark.parametrize('depth_ready', [True, False])
+def test_3d_renderer_waits_for_depth_and_never_draws_2d_fallback(pending_dino, name, depth_ready):
+    node, frame, readers = render_node()
+    node.bbox_visualization_mode = '3d'
+    item = node.pending_render[1][0]
+    item.update(label=name,
+                recognition_pending=pending_dino,
+                bbox3d_status='pending_background_measurement')
+    if depth_ready:
+        item['bbox3d'] = dict(position=[0., 0., 1.], size=[.1, .1, .1])
+        job = list(node.pending_render)
+        job[5] = SimpleNamespace(k=[100., 0., 80., 0., 100., 60., 0., 0., 1.],
+                                 d=[], distortion_model='plumb_bob')
+        node.pending_render = tuple(job)
+    with patch('dinov3_cases.visualization.cv2.rectangle', wraps=cv2.rectangle) as rectangle, \
+            patch('dinov3_cases.visualization.cv2.putText', wraps=cv2.putText) as text:
+        CaseNode.run_rendering(node)
+    rectangle.assert_not_called()
+    if depth_ready:
+        assert text.call_args.args[1] == ('box' if name == 'unknown' else 'known | box')
+    else:
+        text.assert_not_called()
+    assert readers[0].get(timeout=0) is not None
+    frame.release.assert_called_once()
+
+
+@pytest.mark.parametrize('fresh_input,viewer_request,encodes', [
+    (True, False, 1), (True, True, 2), (False, False, 2),
+])
+def test_periodic_idr_waits_for_next_rgb_but_viewers_and_paused_inputs_get_cached_frame(
+        fresh_input, viewer_request, encodes):
+    node, frame, readers = render_node()
+    node.stop.is_set.side_effect = [False, False, True]
+    clock = [100.]
+    calls = [0]
+    job = list(node.pending_render)
+    job[-1] = clock[0]
+    node.pending_render = tuple(job)
+
+    def wake(_):
+        if calls[0]:
+            clock[0] += 1.01
+            node.camera_seq += 1
+            if viewer_request:
+                node.video_hub.keyframe_requested.set()
+        node.camera_received_at = clock[0] - (0 if fresh_input else 1.)
+        calls[0] += 1
+
+    node.render_changed = Mock()
+    node.render_changed.wait.side_effect = wake
+    with patch('dinov3_cases.node.time.monotonic', side_effect=lambda: clock[0]), \
+            patch.object(node.video_encoder, 'encode', wraps=node.video_encoder.encode) as encode:
+        CaseNode.run_rendering(node)
+    assert encode.call_count == encodes
+    assert len(readers[0].queue) == encodes
+    assert all(packet.keyframe for packet in readers[0].queue)
     frame.release.assert_called_once()
     node.get_logger().error.assert_not_called()

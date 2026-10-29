@@ -411,6 +411,7 @@ class CaseNode(Node):
                     job, self.pending_render = self.pending_render, None
                     generation, source = self.generation, self.source
                     camera, camera_seq = self.camera_frame, self.camera_seq
+                    camera_received_at = getattr(self, "camera_received_at", None)
                 try:
                     encoded_readers = self.video_hub.has_readers
                     image_readers = self.annotated_image_pub.get_subscription_count() > 0
@@ -432,7 +433,8 @@ class CaseNode(Node):
                                 detections, measured_info = boxes.latest(detections)
                                 info = measured_info or info
                             visible = any(item.get("bbox_visible", True) and
-                                          (self.bbox_visualization_mode == "2d" or "bbox3d" in item)
+                                          (self.bbox_visualization_mode == "2d" or
+                                           ("bbox3d" in item and info is not None))
                                           for item in detections)
                             if source == "upload" or (visible and time.monotonic() - completed_at < 3.0):
                                 pixels = render_display_overlay(
@@ -449,10 +451,19 @@ class CaseNode(Node):
                         pixels, header = None, camera.header
                     else:
                         continue
-                    force_keyframe = (self.video_hub.keyframe_requested.is_set() or
+                    requested_keyframe = self.video_hub.keyframe_requested.is_set()
+                    force_keyframe = (requested_keyframe or
                                       time.monotonic() - last_keyframe >= 1.0)
-                    if key == last_key and not force_keyframe:
-                        continue
+                    if key == last_key:
+                        if not force_keyframe:
+                            continue
+                        # A periodic IDR can use the next live RGB instead of
+                        # re-encoding cached pixels between two result arrivals.
+                        # Explicit viewer requests and paused inputs still resend.
+                        if (source == "camera" and not requested_keyframe
+                                and camera_received_at is not None
+                                and time.monotonic() - camera_received_at < 0.2):
+                            continue
                     if pixels is None:
                         rgb = self.bridge.imgmsg_to_cv2(camera, desired_encoding="rgb8")
                         pixels = render_display_overlay(rgb, [], mode=self.bbox_visualization_mode)
@@ -620,6 +631,9 @@ class CaseNode(Node):
             return
         gallery = ObjectGallery()
         processed = None
+        completed_frame = None
+        last_rgb_completed_at = None
+        last_rgb_context = None
         next_upload_refresh = 0.0
         proposal_tracker = AsyncNvDCFProposals(
             wake=self.image_changed.set,
@@ -629,6 +643,7 @@ class CaseNode(Node):
             containment_threshold=self.param("grounding_containment_threshold"),
             max_missed_detections=self.param("nvdcf_max_missed_detections"),
             max_missed_frames=self.param("nvdcf_max_missed_frames"),
+            defer_recognition=True,
         )
         self.proposal_tracker = proposal_tracker
         last_recognition = None
@@ -656,11 +671,18 @@ class CaseNode(Node):
                         if gen == self.generation:
                             self.status = "Ready: Waiting for target image…"
                     continue
-                if (processed == (gen, seq)
-                        and not proposal_tracker.has_result()
-                        and not (self.param("pose_enabled") and isinstance(frame, ImageMsg)
-                                 and self.bbox3d_worker.has_result())):
-                    continue
+                if processed == (gen, seq):
+                    # Fold background completions into the next live RGB. Do not
+                    # recopy, retrack, publish or encode an already processed frame.
+                    # Flush after 200 ms without input so paused cameras still get
+                    # their first 3D boxes and completed labels; uploads flush now.
+                    if (self.source == "camera" and received_at is not None
+                            and time.monotonic() - received_at < 0.2):
+                        continue
+                    if (not proposal_tracker.has_result()
+                            and not (self.param("pose_enabled") and isinstance(frame, ImageMsg)
+                                     and self.bbox3d_worker.has_result())):
+                        continue
                 start = time.monotonic()
                 header = frame.header if isinstance(frame, ImageMsg) else None
                 image_size = (frame.width, frame.height) if header is not None else frame.size
@@ -700,7 +722,7 @@ class CaseNode(Node):
                     return proposals, dict(getattr(detector, "last_metrics", {}))
 
                 def recognize(seed_pixels, proposals, seed_key, settings=settings):
-                    # This callback runs in the same background job as SAM3.
+                    # Geometry is published before this background callback finishes.
                     # All gallery GPU work and diagnostics stay off the NvDCF loop.
                     started = time.monotonic()
                     gallery.refresh(self.root, encoder, max_side, stride)
@@ -736,13 +758,18 @@ class CaseNode(Node):
                 # including partial loss. Never zip survivors with an old label list.
                 detections = proposals
                 recognition = proposal_tracker.last_recognition
+                recognition_info = recognition or dict(
+                    frame_id=None, snapshot=None, class_count=len(set(gallery.labels)),
+                    reference_count=len(gallery.labels), recognize_ms=0.0)
                 recognition_changed = (recognition is not last_recognition
                                        or (had_detections and not detections))
                 had_detections = bool(detections)
                 last_recognition = recognition
-                recognition_frame_id = recognition["frame_id"] if detections else None
+                recognition_frame_id = recognition_info["frame_id"] if detections else None
                 recognition_source = ("none" if not detections else
                                       "dino" if recognition_changed else "cached")
+                if any(item.get("recognition_pending") for item in detections):
+                    recognition_source = "pending"
                 recognized_at = time.monotonic()
                 with self.lock:
                     if gen != self.generation:
@@ -765,7 +792,7 @@ class CaseNode(Node):
                 bbox3d_at = time.monotonic()
                 # Diagnostic crops/features stay on their recognition frame;
                 # never relabel an old crop as the current NvDCF image.
-                object_snapshot = (recognition["snapshot"]
+                object_snapshot = (recognition_info["snapshot"]
                                    if recognition_changed and detections else None)
                 with self.lock:
                     if gen != self.generation:
@@ -775,18 +802,23 @@ class CaseNode(Node):
                         self.object_debug_snapshot = object_snapshot
                     self.detections = detections
                     completed_at = time.monotonic()
-                    previous_completed = self.performance.get("completed_at")
+                    new_rgb_result = completed_frame != (gen, seq)
+                    result_fps = self.performance.get("result_fps")
+                    result_fps_instant = None
+                    if new_rgb_result:
+                        if last_rgb_context == context and last_rgb_completed_at is not None:
+                            result_fps_instant = 1 / max(1e-9, completed_at - last_rgb_completed_at)
+                        result_fps = result_rate.update(completed_at, context)
+                        completed_frame = (gen, seq)
+                        last_rgb_completed_at, last_rgb_context = completed_at, context
                     self.publication_drops = getattr(self, "publication_drops", 0) + int(
                         self.pending_publication is not None)
                     self.performance = dict(
                         completed_at=completed_at,
-                        result_fps=result_rate.update(completed_at, context),
+                        result_fps=result_fps,
                         result_fps_window_seconds=result_rate.window_seconds,
-                        result_fps_instant=(
-                            None
-                            if previous_completed is None
-                            else 1 / max(1e-9, completed_at - previous_completed)
-                        ),
+                        result_fps_instant=result_fps_instant,
+                        new_rgb_result=new_rgb_result,
                         grounding_ipc=(dict(proposal_tracker.last_metrics)
                                        if proposal_source == "sam3" else {}),
                         grounding_schedule=proposal_tracker.scheduler_metrics(),
@@ -800,7 +832,7 @@ class CaseNode(Node):
                         depth_wait_ms=depth_wait_ms,
                         proposal_update_ms=(detected_at - depth_ready_at) * 1000,
                         detect_ms=(detected_at - start) * 1000,
-                        recognize_ms=(recognition["recognize_ms"] if recognition_changed else 0.0),
+                        recognize_ms=(recognition_info["recognize_ms"] if recognition_changed else 0.0),
                         bbox3d_ms=(bbox3d_at - recognized_at) * 1000,
                         bbox3d_count=sum("bbox3d" in item for item in detections),
                         bbox3d_schedule=bbox3d_schedule,
@@ -817,7 +849,7 @@ class CaseNode(Node):
                     self.status = (
                         f"{('SAM3 Torch-TensorRT' if proposal_source == 'sam3' else 'NvDCF')} → "
                         f"{encoder.description}{'' if recognition_changed else ' (cached)'} | {len(detections)} objects | "
-                        f"{recognition['class_count']} classes / {recognition['reference_count']} references | "
+                        f"{recognition_info['class_count']} classes / {recognition_info['reference_count']} references | "
                         f"{time.monotonic()-start:.2f}s inference"
                     )
                     self.pending_publication = (detections, header, gen)

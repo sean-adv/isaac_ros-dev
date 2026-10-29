@@ -46,7 +46,9 @@ def render_bbox_overlay(image, detections, info=None, mode="2d"):
                 continue
         else:
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), color, 2)
-        label = f"{item['label']} | {item['detection_label']}"
+        name = item['label']
+        label = (item['detection_label'] if name == 'unknown'
+                 else f"{name} | {item['detection_label']}")
         font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
         (text_width, text_height), baseline = cv2.getTextSize(
             label, font, font_scale, thickness
