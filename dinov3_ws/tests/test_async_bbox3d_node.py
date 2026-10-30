@@ -43,7 +43,8 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
                       grounding_containment_threshold=.95,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                   grounding_min_bbox_area=0, pose_enabled=True)
-    node = SimpleNamespace(
+    from dinov3_cases.timing import ModelTimings
+    node = SimpleNamespace(model_timings=ModelTimings(),
         lock=threading.Lock(), generation=0, source='camera', root=tmp_path,
         frame=Image(width=100, height=80, header=Header(frame_id='camera')), frame_seq=1,
         camera_received_at=time.monotonic(), stop=threading.Event(), image_changed=threading.Event(),
@@ -124,7 +125,8 @@ def coalescing_node(tmp_path):
                   grounding_containment_threshold=.8, grounding_max_detections=20,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0, grounding_min_bbox_area=0,
                   pose_enabled=True)
-    node = SimpleNamespace(
+    from dinov3_cases.timing import ModelTimings
+    node = SimpleNamespace(model_timings=ModelTimings(),
         lock=threading.Lock(), generation=0, source='camera', root=tmp_path,
         frame=Image(width=100, height=80, header=Header(frame_id='camera')), frame_seq=1,
         camera_received_at=time.monotonic(), frame_pool=SharedFramePool(),
@@ -191,6 +193,47 @@ def test_live_rgb_coalesces_background_updates_without_copy_tracking_or_render(c
         assert node.performance['result_fps'] is None
 
     run(ticks)
+
+
+@pytest.mark.parametrize('camera_mode', [True, False])
+def test_roi_filters_sam3_and_moving_tracks_while_outputs_keep_original_image(coalescing_node, camera_mode):
+    node, scheduler, boxes, flags, label, run = coalescing_node
+    from PIL import Image as PILImage
+    node.sam3_roi = (40, 30, 40, 30)  # Native [20, 15, 60, 45].
+    node.sam3_event_sequence, node.sam3_events = 0, []
+    if not camera_mode:
+        node.source = 'upload'
+        node.frame = PILImage.new('RGB', (100, 80))
+    inside = dict(bbox=[20, 20, 60, 40], label='medicine', score=.9, detection_label='box')
+    outside = dict(bbox=[55, 20, 70, 40], label='medicine', score=.9, detection_label='box')
+    raw = [inside, outside]
+    seeds = []
+
+    def update(pixels, token, context, interval, detect, **kwargs):
+        assert pixels.shape == (80, 100, 3)
+        proposals, _ = detect(pixels)
+        seeds.append(proposals)
+        return ([inside, outside] if token[1] == 1 else [outside]), 'nvdcf'
+
+    scheduler.update.side_effect = update
+
+    def ticks():
+        node.grounding_detector.detect.return_value = raw
+        node.grounding_detector.last_metrics = {'worker_detect_ms': 1.0}
+        yield
+        assert seeds[0] == ([inside] if camera_mode else raw)
+        assert [item['bbox'] for item in node.detections] == (
+            [inside['bbox']] if camera_mode else [inside['bbox'], outside['bbox']])
+        assert node.pending_render[0].pixels.shape == (80, 100, 3)
+        assert node.pending_publication[0] == node.detections
+        if camera_mode:
+            assert boxes.update.call_args.args[0][0]['bbox'] == [20, 20, 60, 40]
+        node.frame_seq = 2
+        yield
+        assert [item['bbox'] for item in node.detections] == ([] if camera_mode else [outside['bbox']])
+
+    run(ticks)
+    assert raw == [inside, outside]  # Filtering must not rewrite SAM3 geometry.
 
 
 def test_paused_camera_flushes_background_once_without_counting_an_extra_rgb(coalescing_node):

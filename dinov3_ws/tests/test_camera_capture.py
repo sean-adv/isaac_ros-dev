@@ -73,6 +73,21 @@ def test_no_detections_saves_nothing(camera):
     assert node.generation == 0
 
 
+def test_roi_filters_boxes_without_cropping_input_or_changing_output_coordinates(camera):
+    from io import BytesIO
+    client, node, calls, proposals, pixels = camera
+    node.sam3_roi = (8, 8, 5, 6)  # [1, 2, 9, 10] contains only the first full bbox.
+    result = client.post('/api/images/camera-preview', json={'prompt': 'Detect box.'})
+    assert result.headers['X-Detection-Count'] == '1'
+    assert Image.open(BytesIO(result.data)).size == (16, 12)
+    np.testing.assert_array_equal(calls[0][0], pixels)
+    client.post('/api/images/labels', json={'case': 'medicine'})
+    result = client.post('/api/images/capture', json={'case': 'medicine', 'prompt': 'Detect box.'})
+    assert result.json['detections'] == [proposals[0]]
+    saved = Image.open(node.root / 'medicine' / result.json['names'][0])
+    np.testing.assert_array_equal(np.array(saved), pixels[3:10, 2:9])
+
+
 @pytest.mark.parametrize('data', [None, [], {}, {'case': '../escape'}, {'case': 'missing', 'prompt': 'Detect box.'},
                                        {'case': 'valid'}, {'case': 'valid', 'prompt': 5},
                                        {'case': 'valid', 'prompt': 'unknown'}])

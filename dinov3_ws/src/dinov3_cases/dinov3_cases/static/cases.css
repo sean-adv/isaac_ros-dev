@@ -1,81 +1,90 @@
+* { box-sizing: border-box }
 body {
-  font: 16px system-ui;
+  font: 14px/1.5 system-ui, sans-serif;
   background: #101821;
   color: #e7eef8;
-  max-width: 1150px;
-  margin: 32px auto;
-  padding: 0 20px
-}
-
-section {
-  background: #1b2836;
-  padding: 20px;
-  border-radius: 12px;
-  margin: 16px 0
-}
-
-button,
-input,
-select {
-  padding: 10px;
-  margin: 6px;
-  border-radius: 6px
-}
-
-button {
-  background: #8ddcc4;
-  cursor: pointer
-}
-
-img, video {
-  max-width: 100%;
-  border-radius: 10px
-}
-
-small {
-  color: #b0becd
-}
-
-.reference-gallery {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
-  gap: 16px
-}
-
-.reference-card {
   margin: 0;
-  padding: 12px;
-  background: #101821;
-  border-radius: 8px;
-  overflow-wrap: anywhere
+  padding: 20px 24px;
 }
-
-.reference-card img {
-  display: block;
-  width: 100%;
-  image-rendering: pixelated
+main { max-width: 1440px; margin: 0 auto }
+a { color: #8ddcc4; text-underline-offset: 3px }
+h1, h2, h3, p { margin: 0 }
+h1 { font-size: 22px; letter-spacing: -.4px }
+h2 { font-size: 17px }
+h3 { font-size: 14px }
+small, .muted, .summary-note, .live-status, .help { color: #b0becd }
+small { font-size: 12px }
+.page-header, .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px }
+.page-header { margin-bottom: 18px }
+.page-header p { color: #b0becd; margin-top: 2px }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; align-items: start }
+section { background: #1b2836; border: 1px solid #304151; border-radius: 12px; min-width: 0 }
+.live-panel, .settings-panel { padding: 16px }
+.live-panel { position: sticky; top: 16px }
+.panel-heading { margin-bottom: 10px; flex-wrap: wrap }
+.legend { color: #b0becd; font-size: 12px }
+.recognized { color: #8ddcc4 }
+.unknown { color: #f2cb67; margin-left: 8px }
+img, video { max-width: 100%; border-radius: 8px }
+#overlay { display: block; width: 100%; height: clamp(220px, 48vh, 580px); object-fit: contain; background: #080f17 }
+.live-video { position: relative }
+#roi-preview { position: absolute; pointer-events: none; border: 2px solid #8ddcc4; background: rgb(141 220 196 / 20%) }
+.live-status { font-size: 12px; overflow-wrap: anywhere; margin: 10px 0 }
+#error { color: #ffafa7; overflow-wrap: anywhere; margin-bottom: 10px }
+#error:empty { display: none }
+#recognition-list { max-height: 160px; overflow-y: auto; scrollbar-gutter: stable }
+#recognition-list:empty::before { content: 'No recognized objects yet.'; color: #b0becd; font-size: 13px }
+#recognition-list p { padding: 8px 0; border-top: 1px solid #304151; overflow-wrap: anywhere; font-size: 13px }
+.settings-form, #target { display: grid; gap: 10px }
+.settings-form { margin-top: 12px }
+label { display: grid; gap: 5px; font-size: 13px; min-width: 0 }
+button, input, select { font: inherit; border-radius: 6px; min-width: 0; max-width: 100% }
+input, select { padding: 8px 10px; background: #101821; border: 1px solid #526273; color: #e7eef8; width: 100% }
+input[type="file"] { padding: 6px; font-size: 12px }
+input[type="checkbox"] { width: auto; accent-color: #8ddcc4 }
+button { padding: 8px 12px; border: 1px solid #8ddcc4; background: #8ddcc4; color: #101821; font-weight: 600; cursor: pointer }
+button:hover { filter: brightness(1.08) }
+button.secondary { background: #253c45; color: #a8ead6; border-color: #486c70 }
+:focus-visible { outline: 2px solid #8ddcc4; outline-offset: 3px }
+.thresholds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px }
+.source-controls { border-top: 1px solid #304151; margin-top: 16px; padding-top: 12px; display: grid; gap: 10px }
+.help { border-top: 1px solid #304151; padding-top: 10px; margin-top: 12px; font-size: 12px }
+summary { cursor: pointer; overflow-wrap: anywhere }
+summary:hover { color: #8ddcc4 }
+.help p { margin-top: 8px }
+.disclosure-section { margin-top: 16px }
+.disclosure-section > details > summary { padding: 14px 16px; font-size: 15px; font-weight: 600 }
+.summary-note { font-size: 12px; font-weight: 400; margin-left: 10px }
+.section-content { padding: 0 16px 16px }
+.section-content > p { margin: 10px 0 }
+.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0 }
+.toolbar input, .toolbar select { flex: 1 1 220px; width: auto }
+.diagnostic-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px }
+.diagnostic-controls > label { flex: 1 1 240px }
+.checkbox-label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px }
+#object-scale { max-width: 320px; margin-top: 12px }
+.scale-gradient { height: 12px; background: linear-gradient(to right,#30123b,#466be3,#1ae4b6,#a4fc3b,#f9ba38,#e3440a,#7a0403); border-radius: 4px }
+.scale-labels { display: flex; justify-content: space-between }
+.reference-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; margin-top: 12px }
+.reference-card { margin: 0; padding: 12px; background: #101821; border-radius: 8px; overflow-wrap: anywhere }
+.reference-card img { display: block; width: 100%; image-rendering: pixelated }
+.reference-card p, .reference-card figcaption { margin: 8px 0; font-size: 12px }
+#object-gallery img { width: auto; height: auto; max-width: 100% }
+#sam3-interval-panel { margin-top: 16px; padding: 12px; background: #101821; border: 1px solid #344454; border-radius: 8px }
+#sam3-interval-panel p { margin: 10px 0 }
+@media (max-width: 900px) {
+  body { padding: 16px }
+  .workspace { grid-template-columns: minmax(0, 1fr) 300px; gap: 12px }
+  .live-panel, .settings-panel { padding: 12px }
 }
-
-#object-gallery img {
-  width: auto;
-  height: auto;
-  max-width: 100%
+@media (max-width: 700px) {
+  body { padding: 12px }
+  .page-header { align-items: start; flex-direction: column; gap: 8px }
+  .workspace { grid-template-columns: minmax(0, 1fr) }
+  .live-panel { position: static }
+  #overlay { height: auto; aspect-ratio: 16 / 9 }
+  .summary-note { display: block; margin: 4px 0 0 }
 }
-
-.reference-card figcaption {
-  margin-top: 10px
-}
-
-#sam3-interval-panel {
-  margin: 16px 0;
-  padding: 16px;
-  background: #101821;
-  border: 1px solid #344454;
-  border-radius: 8px
-}
-
-#sam3-interval-panel summary { cursor: pointer }
-
 .sam3-interval-grid {
   display: grid;
   grid-template-columns: repeat(20, minmax(0, 1fr));
@@ -101,3 +110,7 @@ small {
 @media (max-width: 480px) {
   .sam3-interval-grid { grid-template-columns: repeat(10, minmax(0, 1fr)) }
 }
+
+#roi-form .roi-actions { display: flex; justify-content: flex-end }
+
+#roi-reset { background: #b42332; border-color: #e05a67; color: #fff }

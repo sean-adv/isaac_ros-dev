@@ -37,6 +37,24 @@ def detect(_):
     return [dict(bbox=[0, 0, 10, 10], detection_score=.9, label='medicine')], {'test': True}
 
 
+def test_live_timing_ignores_seed_and_duplicate_rgb(pixels):
+    from dinov3_cases.timing import ModelTimings
+
+    timings = ModelTimings()
+    scheduler = AsyncNvDCFProposals(factory=FakeNvDCF, model_timings=timings)
+    try:
+        scheduler.update(pixels, (0, 1), 'camera', 100, detect, wait_for_initial_result=True)
+        assert not timings.snapshot()['nvdcf']['valid']
+        scheduler.update(pixels, (0, 2), 'camera', 100, detect)
+        sample = timings.snapshot()['nvdcf']
+        assert sample['valid'] and sample['source_frame_id'] == 2
+        scheduler.update(pixels, (0, 2), 'camera', 100, detect)
+        assert timings.snapshot()['nvdcf']['last_ms'] == sample['last_ms']
+        assert not timings.snapshot()['nvdcf']['busy']
+    finally:
+        scheduler.close()
+
+
 def test_seed_recognition_and_catchup_handoff_use_current_frame(pixels):
     started, release = threading.Event(), threading.Event()
     trackers = []

@@ -7,6 +7,7 @@ import torch
 from PIL import Image
 
 from dinov3_cases.grounded import ObjectGallery, TrackedObjectRecognizer
+from dinov3_cases.timing import ModelTimings
 
 
 class CountingEncoder:
@@ -224,7 +225,8 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
         grounding_settings=dict(prompt='box.', box_threshold=.1, detection_interval=10,
                                 recognition_threshold=.75, margin=.05),
         bbox_smoother=BBoxSmoother(1), depth_inputs_for=lambda _: None,
-        performance={}, pending_render=None, pending_publication=None,
+        performance={}, model_timings=ModelTimings(),
+        pending_render=None, pending_publication=None,
         object_debug_revision=0, object_debug_snapshot=None,
         render_changed=threading.Event(), publish_changed=threading.Event(),
         param=parameters.__getitem__, get_logger=lambda: logger,

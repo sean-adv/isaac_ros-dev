@@ -11,6 +11,7 @@ from .grounded import validate_settings
 from .cat2real import prepare_cat2real_image
 from .nvdcf import check_nvdcf
 from .image_manager import register_image_manager
+from .sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
 from .gallery_files import (
     group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
 )
@@ -50,6 +51,7 @@ def create_app(node):
             frame = node.camera_frame
             received_at = node.camera_received_at
             settings = dict(node.grounding_settings)
+            region = getattr(node, "sam3_roi", DEFAULT_ROI)
         if detector is None:
             raise ServiceUnavailable("SAM3 is loading. Please try again shortly.")
         if frame is None or received_at is None or time.monotonic() - received_at >= 3:
@@ -64,7 +66,8 @@ def create_app(node):
             min_area=node.param("grounding_min_bbox_area"),
             containment_threshold=node.param("grounding_containment_threshold"),
         )
-        return image, proposals
+        bounds = roi_bounds(*image.size, region) if region[:2] != (0, 0) else None
+        return image, filter_roi(proposals, bounds)
 
     @app.errorhandler(503)
     def unavailable(error):
@@ -96,6 +99,8 @@ def create_app(node):
                 source=node.source,
                 status=node.status,
                 performance=node.performance,
+                model_timings=(node.model_timings.milliseconds()
+                               if getattr(node, "model_timings", None) is not None else {}),
                 sam3_inference_events=dict(
                     stream=getattr(node, "sam3_event_stream", None),
                     events=list(getattr(node, "sam3_events", ())),
@@ -123,6 +128,7 @@ def create_app(node):
                 camera_topic=node.param("image_topic"),
                 camera_age=age,
                 camera_fps=getattr(node, "camera_fps", None),
+                sam3_roi=region_state(),
                 camera_connected=age is not None and age < 3,
                 video_error=node.video_error,
                 overlay_age=(
@@ -194,6 +200,37 @@ def create_app(node):
             invalidate_results()
             node.status = "Settings applied: Preparing first detection and recognition…"
         return jsonify(ok=True, grounding=settings)
+
+    def region_state():
+        region = getattr(node, "sam3_roi", DEFAULT_ROI)
+        frame = getattr(node, "camera_frame", None)
+        native_size = ([frame.width, frame.height]
+                       if frame is not None and hasattr(frame, "width") else None)
+        bounds = list(roi_bounds(*native_size, region)) if native_size else None
+        return dict(zip(("width", "height", "center_x", "center_y"), region),
+                    native_size=native_size, bounds=bounds,
+                    enabled=region[:2] != (0, 0))
+
+    @app.get("/api/sam3-roi")
+    def get_region():
+        with node.lock:
+            return jsonify(region_state())
+
+    @app.post("/api/sam3-roi")
+    def set_region():
+        payload = request.get_json(silent=True)
+        keys = ("width", "height", "center_x", "center_y")
+        if not isinstance(payload, dict) or not payload or set(payload) - set(keys):
+            raise ValueError("Expected region width, height, center_x and/or center_y.")
+        with node.lock:
+            previous = getattr(node, "sam3_roi", DEFAULT_ROI)
+            region = validate_roi(*(payload.get(key, old) for key, old in zip(keys, previous)))
+            if region != previous:
+                node.sam3_roi = region
+                invalidate_results()
+                node.status = "SAM3 region applied: Preparing first detection and recognition…"
+            state = region_state()
+        return jsonify(state)
 
     @app.post("/api/cases")
     def upload():

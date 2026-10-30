@@ -1,5 +1,6 @@
 """ROS input, inference scheduling and result publication with official Torch-TensorRT models."""
 
+import json
 import threading
 import time
 from collections import deque
@@ -13,10 +14,10 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import Image as ImageMsg, CameraInfo, CompressedImage
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from werkzeug.serving import make_server
 
-from .timing import ResultRate
+from .timing import ResultRate, ModelTimings
 from .patches import feature_stride
 from .encoder import Encoder
 from .grounding_ipc import SharedMemoryGroundingDetector
@@ -36,6 +37,7 @@ from vision_msgs.msg import Detection2DArray, Detection3DArray
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
 from .apriltag import apriltag_message
 from .depth_sync import matched_inputs
+from .sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
 from .h264_stream import H264Encoder, PacketHub, WebRTCVideo
 from .cloud_filter import CloudFilter
 from .depth_bbox import ProjectionRayCache, attach_bboxes3d, bboxes3d_message
@@ -76,6 +78,10 @@ class CaseNode(Node):
             grounding_min_bbox_width=0,
             grounding_min_bbox_height=0,
             grounding_min_bbox_area=0,
+            sam3_roi_width=0,
+            sam3_roi_height=0,
+            sam3_roi_center_x=-1,
+            sam3_roi_center_y=-1,
             recognition_threshold=0.75,
             recognition_margin=0.05,
             image_topic="/camera/color/image_raw",
@@ -109,6 +115,8 @@ class CaseNode(Node):
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
+        self.sam3_roi = validate_roi(*(self.param("sam3_roi_" + key)
+                                     for key in ("width", "height", "center_x", "center_y")))
         self.bbox_visualization_mode = self.param("bbox_visualization_mode")
         if self.bbox_visualization_mode not in ("2d", "3d"):
             raise ValueError("bbox_visualization_mode must be 2d or 3d.")
@@ -175,6 +183,7 @@ class CaseNode(Node):
         self.depth_infos = deque(maxlen=8)
         self.depth_ray_cache = ProjectionRayCache()
         self.performance = {}
+        self.model_timings = ModelTimings()
         self.sam3_event_stream = str(time.time_ns())
         self.sam3_event_sequence = 0
         self.sam3_events = deque(maxlen=101)
@@ -206,6 +215,12 @@ class CaseNode(Node):
         self.recognition_pub = self.create_publisher(
             Detection2DArray, "/medicine_recognition/detections", 10
         )
+        self.model_timings_pub = self.create_publisher(
+            String, "/medicine_recognition/model_timings",
+            QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
+                       reliability=ReliabilityPolicy.RELIABLE),
+        )
+        self.model_timings_timer = self.create_timer(0.2, self.publish_model_timings)
         self.bbox3d_pub = self.create_publisher(
             Detection3DArray, "/medicine_recognition/detections_3d", 10
         )
@@ -251,6 +266,10 @@ class CaseNode(Node):
         self.worker = threading.Thread(target=self.run_grounded_worker, daemon=True)
         self.worker.start()
         self.get_logger().info(f"Browser: http://{self.param('host')}:{self.param('port')}")
+
+    def publish_model_timings(self):
+        payload = self.model_timings.milliseconds()
+        self.model_timings_pub.publish(String(data=json.dumps(payload, allow_nan=False)))
 
     def on_image(self, msg):
         with self.lock:
@@ -641,6 +660,7 @@ class CaseNode(Node):
             max_missed_detections=self.param("nvdcf_max_missed_detections"),
             max_missed_frames=self.param("nvdcf_max_missed_frames"),
             defer_recognition=True,
+            model_timings=self.model_timings,
         )
         self.proposal_tracker = proposal_tracker
         last_recognition = None
@@ -663,6 +683,7 @@ class CaseNode(Node):
                     gen, frame, seq = self.generation, self.frame, self.frame_seq
                     settings = dict(self.grounding_settings)
                     received_at = self.camera_received_at if self.source == "camera" else None
+                    region = getattr(self, "sam3_roi", DEFAULT_ROI)
                 if frame is None:
                     with self.lock:
                         if gen == self.generation:
@@ -683,7 +704,10 @@ class CaseNode(Node):
                 start = time.monotonic()
                 header = frame.header if isinstance(frame, ImageMsg) else None
                 image_size = (frame.width, frame.height) if header is not None else frame.size
+                bounds = (roi_bounds(*image_size, region)
+                          if header is not None and region[:2] != (0, 0) else None)
                 context = (gen, image_size, header.frame_id if header is not None else None)
+                timing_revision = self.model_timings.set_context((context, tuple(settings.items())))
                 if isinstance(frame, ImageMsg):
                     pixels = self.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")
                 else:
@@ -707,17 +731,20 @@ class CaseNode(Node):
                     containment_threshold=0.0,
                 )
 
-                def detect(frame, request=request):
+                def detect(frame, request=request, frame_key=(gen, seq), revision=timing_revision,
+                           bounds=bounds):
                     started_at = time.monotonic()
-                    proposals = detector.detect(frame, **request)
+                    with self.model_timings.measure("sam3", frame_key, revision) as timing:
+                        proposals = detector.detect(frame, **request)
+                        timing["duration_ms"] = detector.last_metrics["worker_detect_ms"]
                     with self.lock:
                         self.sam3_event_sequence += 1
                         self.sam3_events.append(dict(
                             sequence=self.sam3_event_sequence, started_at=started_at,
                         ))
-                    return proposals, dict(getattr(detector, "last_metrics", {}))
+                    return filter_roi(proposals, bounds), dict(getattr(detector, "last_metrics", {}))
 
-                def recognize(seed_pixels, proposals, seed_key, settings=settings):
+                def recognize_impl(seed_pixels, proposals, seed_key, settings=settings):
                     # Geometry is published before this background callback finishes.
                     # All gallery GPU work and diagnostics stay off the NvDCF loop.
                     started = time.monotonic()
@@ -739,6 +766,11 @@ class CaseNode(Node):
                         recognize_ms=(time.monotonic() - started) * 1000,
                     )
 
+                def recognize(seed_pixels, proposals, seed_key, revision=timing_revision,
+                              implementation=recognize_impl):
+                    with self.model_timings.measure("dinov3", seed_key, revision):
+                        return implementation(seed_pixels, proposals, seed_key)
+
                 result = proposal_tracker.update(
                     shared_frame.pixels, (gen, seq), context,
                     settings["detection_interval"], detect, frame=shared_frame, recognize=recognize,
@@ -750,6 +782,8 @@ class CaseNode(Node):
                 proposals, proposal_source = result
                 detected_at = time.monotonic()
                 proposals = self.bbox_smoother.update(proposals, (gen, seq), context)
+                # A track may leave the region between SAM3 refreshes.
+                proposals = filter_roi(proposals, bounds)
                 # Classification fields follow individual proposals through NvDCF,
                 # including partial loss. Never zip survivors with an old label list.
                 detections = proposals

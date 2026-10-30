@@ -2,129 +2,144 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DINOv3 Cases</title>
 <link rel="stylesheet" href="/static/cases.css">
 </head>
 <body>
-<h1>SAM3 → Cat2Real Object Recognition</h1>
-<p>
-<a href="/images" style="color:#8ddcc4">Image Manager / HSV Background Removal / Labels</a>
-</p>
-<p id="pipeline-help">Detect objects using a text prompt, then compare them with all product reference images. Each case represents one product identity.</p>
-<section id="grounding-section">
-<h2>Detection and Recognition Settings</h2>
-<form id="grounding-form">
-<label>SAM3 detection interval <input name="detection_interval" type="number" min="1" step="1" required></label>
-<small>1 = SAM3 on every processed frame. N = SAM3, then N−1 NvDCF frames. Lost tracking triggers early detection. Camera frames skipped while busy are not counted.</small>
-<br>
-<label>Text prompt <input id="prompt" name="prompt" required maxlength="1000" style="width:min(600px,85%)">
-</label>
-<br>
-<label>Detection threshold <input name="box_threshold" type="number" min="0" max="1" step="0.01" required>
-</label>
-<br>
-<label>DINOv3 similarity threshold <input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required>
-</label>
-<input name="margin" type="hidden">
-<button>Apply Settings</button>
-</form>
-<small>SAM3 accepts 1–4 comma-separated class names (for example: medicine bottle, medicine box). Text features are computed when the prompt changes. References must pass the DINOv3 threshold. The class of the eligible reference with the highest Lab similarity wins; no eligible references means unknown.</small>
-</section>
-<section>
-<h2>1. Reference groups</h2>
-<form id="upload">
-<input name="case" placeholder="Case name, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}">
-<input name="images" type="file" accept="image/*" multiple required>
-<button>Add pictures to case</button>
-</form>
-<select id="cases">
-<option value="">Select case</option>
-</select>
-<button id="select">View Gallery</button>
-<p>
-<small>Add close-up photos of the same product from multiple angles to each case. The two-stage pipeline compares all galleries. This selection changes the reference preview.</small>
-</p>
-</section>
-<section>
-<h2>Reference Images · Patch Grids</h2>
-<p id="reference-status" role="status">Select a case to view its reference images.</p>
-<p>
-<small>Yellow lines show the model input patch grid. Images are resized proportionally to fit {{ input_size }} pixels, then edge-padded on the right and bottom to {{ input_size }}×{{ input_size }}.</small>
-</p>
-<div id="reference-gallery" class="reference-gallery">
+<main>
+<header class="page-header">
+<div>
+<h1>Object Recognition</h1>
+<p id="pipeline-help">SAM3 detection · DINOv3 + Lab reference matching</p>
 </div>
-</section>
-<section>
-<h2>2. Target image</h2>
-<button id="camera">Use ROS camera</button>
-<form id="target">
-<input name="image" type="file" accept="image/*" required>
-<button>Use uploaded target</button>
-</form>
-</section>
-<section>
-<h2>Live Camera and Recognition Results</h2>
+<a href="/images">Manage reference images ↗</a>
+</header>
+<div class="workspace">
+<section class="live-panel" aria-labelledby="live-title">
+<div class="panel-heading"><h2 id="live-title">Live view</h2><span class="legend"><span class="recognized">●</span> Recognized <span class="unknown">●</span> Unknown</span></div>
+<div class="live-video">
+<video id="overlay" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
+<div id="roi-preview" hidden aria-hidden="true"></div>
+</div>
+<div class="live-status">
 <p id="camera-status">Waiting for camera…</p>
 <p id="status">Connecting…</p>
-<p id="error" role="alert">
-</p>
-<p id="bbox-help" role="status">{% if bbox_mode == '3d' %}Showing projected 3D bounding box wireframes. Boxes require valid synchronized depth; objects without valid 3D data have no box.{% else %}Showing original 2D bounding boxes.{% endif %}</p>
-<p><small>Shows bounding boxes when available; otherwise shows the live camera.</small></p>
-<video id="overlay" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
+<p id="model-timings" aria-live="off" title="Wall time: NvDCF live tracker update; DINOv3 gallery refresh, batch recognition and diagnostics; SAM3 worker detection. Stages run asynchronously.">NvDCF — · DINOv3 — · SAM3 —</p>
 <p data-video-status role="status">Connecting video…</p>
-<p>
-<small>det is the last SAM3 detection score, retained during NvDCF tracking. sim is DINOv3 gallery similarity, not a product recognition probability. Green boxes indicate recognized products; yellow boxes indicate unknown objects. Track status: confirmed has SAM3 support; coasting indicates visual tracking between detections. Each committed SAM3 result replaces the tracking generation; unmatched objects are removed. NvDCF shadow tracking handles temporary visual loss between detections.</small>
-</p>
-<div id="recognition-list">
+</div>
+<p id="error" role="alert"></p>
+<div class="panel-heading"><h3>Recognition results</h3></div>
+<div id="recognition-list"></div>
+<details class="help">
+<summary>Scores and bounding boxes</summary>
+<p id="bbox-help" role="status">{% if bbox_mode == '3d' %}Showing projected 3D bounding box wireframes. Valid synchronized depth is required.{% else %}Showing original 2D bounding boxes.{% endif %}</p>
+<p>det: last SAM3 detection score. DINO: reference similarity, not recognition probability. Eligible references pass the DINO threshold; the highest Lab similarity determines the product. No eligible reference means unknown.</p>
+<p>Confirmed tracks have SAM3 support; coasting tracks use NvDCF between detections. Each SAM3 update replaces the tracking generation and removes unmatched objects.</p>
+</details>
+</section>
+<section id="grounding-section" class="settings-panel" aria-labelledby="settings-title">
+<h2 id="settings-title">Recognition settings</h2>
+<form id="grounding-form" class="settings-form">
+<label>Text prompt<input id="prompt" name="prompt" required maxlength="1000" aria-describedby="prompt-help" placeholder="medicine bottle, medicine box"></label>
+<small id="prompt-help">1–4 class names, separated by commas.</small>
+<label>SAM3 detection interval<input name="detection_interval" type="number" min="1" step="1" required aria-describedby="interval-help"></label>
+<small id="interval-help">1 = every processed frame; N = detect, then track N−1 frames.</small>
+<div class="thresholds">
+<label>Detection threshold<input name="box_threshold" type="number" min="0" max="1" step="0.01" required></label>
+<label>DINO threshold<input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required></label>
+</div>
+<input name="margin" type="hidden">
+<button>Apply settings</button>
+</form>
+<details class="help" id="roi-panel"><summary>SAM3 region</summary>
+<form id="roi-form" class="settings-form">
+<div class="roi-actions"><button id="roi-reset" type="button" class="secondary">Reset region</button></div>
+<div class="thresholds">
+<label>Width (camera px)<input name="width" type="number" min="0" step="1" value="0" required></label>
+<label>Height (camera px)<input name="height" type="number" min="0" step="1" value="0" required></label>
+<label>Center X (camera px)<input name="center_x" type="number" min="-1" step="1" value="-1" required></label>
+<label>Center Y (camera px)<input name="center_y" type="number" min="-1" step="1" value="-1" required></label>
+</div>
+<small>Original camera pixels. 0 width/height keeps that full axis; both 0 disables filtering. Center −1 uses the image midpoint. Boxes must be entirely inside the region.</small>
+<button type="submit" class="secondary">Apply region</button>
+</form>
+<label class="checkbox-label"><input id="roi-preview-enabled" type="checkbox">Preview crop area</label>
+<p id="roi-status" role="status"></p>
+<small>The translucent frame previews these fields; Apply region updates filtering. Reset region restores the full camera area and applies immediately. Full camera image and bbox coordinates are preserved. Live changes reset on restart.</small>
+</details>
+<div class="source-controls">
+<h3>Image source</h3>
+<button id="camera" type="button" class="secondary">Use ROS camera</button>
+<form id="target">
+<label>Or upload a target<input name="image" type="file" accept="image/*" required></label>
+<button class="secondary">Use uploaded target</button>
+</form>
 </div>
 </section>
-
-<section id="object-section">
-<h2>Per-Object DINOv3 Visualizations</h2>
-<details id="sam3-interval-panel" open>
-<summary>SAM3 inference intervals · latest 100</summary>
-<p><small>Time between consecutive successful SAM3 inference starts, including scheduling and tracking waits. Recorded in browser memory. Oldest → newest, left to right, row by row. Hover or focus a square for milliseconds.</small></p>
-<button id="sam3-interval-clear" type="button">Clear interval history</button>
-<p id="sam3-interval-status" role="status">Waiting for two SAM3 inferences…</p>
-<div id="sam3-interval-grid" class="sam3-interval-grid" role="group" aria-label="Latest 100 SAM3 inference intervals"></div>
-<p class="sam3-interval-legend"><small>Shorter</small><span data-level="1"></span><span data-level="2"></span><span data-level="3"></span><span data-level="4"></span><small>Longer · scale relative to visible intervals</small></p>
+</div>
+<section class="disclosure-section">
+<details id="reference-panel">
+<summary>Reference library <span class="summary-note">Upload and preview product images</span></summary>
+<div class="section-content">
+<p class="muted">One case per product. Add close-up photos from multiple angles; recognition uses all cases.</p>
+<form id="upload" class="toolbar">
+<input name="case" aria-label="Case name" placeholder="Case name, e.g. medicine_01" required pattern="[A-Za-z0-9_-]{1,80}">
+<input name="images" aria-label="Reference images" type="file" accept="image/*" multiple required>
+<button>Add images</button>
+</form>
+<div class="toolbar">
+<select id="cases" aria-label="Reference case"><option value="">Select case</option></select>
+<button id="select" class="secondary" type="button">View gallery</button>
+</div>
+<p id="reference-status" role="status">Select a case to view its reference images.</p>
+<details class="help"><summary>Patch grid</summary><p>Yellow lines show the model input patches. Images fit within {{ input_size }} pixels and are edge-padded on the right and bottom to {{ input_size }}×{{ input_size }}. Selecting a case changes only the reference preview.</p></details>
+<div id="reference-gallery" class="reference-gallery"></div>
+</div>
 </details>
-<label>
-<input id="object-enabled" type="checkbox" checked>Enable diagnostic images (adds processing load)</label>
-<label>Reference label to compare <select id="object-reference">
-<option value="">Automatic best reference</option>
-</select>
-</label>
-<label>View <select id="object-view">
+</section>
+<section id="object-section" class="disclosure-section">
+<details id="diagnostics-panel">
+<summary>Object diagnostics <span class="summary-note">Heatmaps, crops and inference timing</span></summary>
+<div class="section-content">
+<div class="diagnostic-controls">
+<label class="checkbox-label"><input id="object-enabled" type="checkbox">Enable diagnostic images <small>(adds processing load)</small></label>
+<label>Compare reference<select id="object-reference"><option value="">Automatic best reference</option></select></label>
+<label>View<select id="object-view">
 <option value="heatmap">ROI Similarity Heatmap Overlay</option>
 <option value="crop">Original SAM3 Bounding Box Crop</option>
 <option value="grid">Model Input and Patch Grid</option>
 <option value="patches">Per-Patch Similarity</option>
 <option value="similarity">Similarity Heatmap</option>
 <option value="reference">Best Reference Image</option>
-</select>
-</label>
-<div id="object-scale" style="max-width:320px">
-<div style="height:12px;background:linear-gradient(to right,#30123b,#466be3,#1ae4b6,#a4fc3b,#f9ba38,#e3440a,#7a0403);border-radius:4px">
+</select></label>
 </div>
-<small style="display:flex;justify-content:space-between">
-<span>0</span>
-<span>0.5</span>
-<span>1</span>
-</small>
+<div id="object-scale">
+<div class="scale-gradient"></div>
+<small class="scale-labels"><span>0</span><span>0.5</span><span>1</span></small>
 </div>
-<p id="object-help">
-</p>
-<p>
-<small>Diagnostic images show the latest recognition snapshot and stay unchanged while NvDCF updates the live boxes. Automatic mode uses the best reference for each object. Selecting a label compares every SAM3 object with the patches of all images under that label. The best reference view shows the closest image within that label for each object. Recognition filters references by the DINOv3 threshold, then selects the class with the highest Lab similarity. Each card shows the separate DINO and Lab similarities. Selected-label comparisons use that label’s highest Lab reference. Comparison score is its DINO similarity. Local patch similarity differs from the overall product recognition score. Blue boxes mark the resized ROI; the surrounding area is padding.</small>
-</p>
+<p id="object-help"></p>
+<details class="help"><summary>Reading diagnostics</summary>
+<p>Images show the latest recognition snapshot while NvDCF updates live boxes. Automatic mode uses each object's best reference. Selecting a label compares all images under that label; the highest Lab reference supplies the comparison DINO score.</p>
+<p>Local patch similarity differs from overall recognition similarity. Cards show DINO and Lab scores separately. Blue boxes mark the resized ROI; surrounding pixels are padding.</p>
+</details>
 <p id="object-status" role="status">Waiting for object detections…</p>
-<div id="object-gallery" class="reference-gallery">
+<div id="object-gallery" class="reference-gallery"></div>
+<details id="sam3-interval-panel">
+<summary>SAM3 inference intervals · latest 100</summary>
+<p><small>Time between successful inference starts, including waits. Oldest → newest. Hover or focus a square for milliseconds. History is stored in this browser session.</small></p>
+<button id="sam3-interval-clear" type="button" class="secondary">Clear history</button>
+<p id="sam3-interval-status" role="status">Waiting for two SAM3 inferences…</p>
+<div id="sam3-interval-grid" class="sam3-interval-grid" role="group" aria-label="Latest 100 SAM3 inference intervals"></div>
+<p class="sam3-interval-legend"><small>Shorter</small><span data-level="1"></span><span data-level="2"></span><span data-level="3"></span><span data-level="4"></span><small>Longer · relative scale</small></p>
+</details>
 </div>
+</details>
 </section>
+</main>
 <script src="/static/video.js"></script>
 <script src="/static/sam3_intervals.js"></script>
-<script src="/static/cases.js">
-</script>
+<script src="/static/sam3_roi.js"></script>
+<script src="/static/cases.js"></script>
 </body>
 </html>

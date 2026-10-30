@@ -11,6 +11,23 @@ from dinov3_cases.node import CaseNode
 from dinov3_cases.web import create_app
 
 
+def test_model_timings_topic_contains_only_latest_milliseconds():
+    import json
+    from dinov3_cases.timing import ModelTimings
+
+    timings = ModelTimings()
+    with timings.measure('sam3', (3, 27)) as result:
+        result['duration_ms'] = 145.6
+    node = SimpleNamespace(model_timings=timings, model_timings_pub=Mock())
+    CaseNode.publish_model_timings(node)
+    message = node.model_timings_pub.publish.call_args.args[0]
+    payload = json.loads(message.data)
+    assert payload == {'nvdcf_ms': None, 'dinov3_ms': None, 'sam3_ms': 145.6}
+    with timings.measure('sam3', (3, 28)):
+        CaseNode.publish_model_timings(node)
+        assert json.loads(node.model_timings_pub.publish.call_args.args[0].data) == payload
+
+
 def test_rate_limit_subtracts_processing_time():
     node = SimpleNamespace(image_changed=Mock(), stop=Mock(), param=lambda _: 20.0)
     node.stop.is_set.return_value = False

@@ -34,7 +34,15 @@ dinov3_cases:
     grounding_min_bbox_width: 0
     grounding_min_bbox_height: 0
     grounding_min_bbox_area: 0
-    recognition_threshold: 0.8
+    # Camera ROI in ORIGINAL image pixels: keep only fully contained SAM3 boxes.
+    # 0 keeps the full axis; width=height=0 disables filtering. No image crop.
+    # Center -1 follows the image midpoint; 0 is a valid coordinate at the top/left.
+    # Startup values; live controls are under Recognition settings > SAM3 region.
+    sam3_roi_width: 458
+    sam3_roi_height: 420
+    sam3_roi_center_x: 370
+    sam3_roi_center_y: 200
+    recognition_threshold: 0.75
     # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
     # One 960x540 overlay + H.264 encode shared by WebRTC and ROS. Restart to apply.
@@ -52,8 +60,8 @@ dinov3_cases:
     depth_topic: /camera/camera/depth/image_raw
     depth_camera_info_topic: /camera/camera/depth/camera_info
     pose_sync_tolerance: 0.2
-    pose_min_depth: 0.15
-    pose_max_depth: 2.0
+    pose_min_depth: 0.2
+    pose_max_depth: 1.0
     # Foreground depth tolerance around the central patch median (meters).
     # Full 3D center/size/rotation in background; independent of SAM3 interval.
     # Measure first processed RGB frame, then every bbox3d_interval unique processed frames.

@@ -143,7 +143,15 @@ async function refresh() {
   const r = await fetch('/api/status');
   const d = await r.json();
   updateGrounding(d);
+  sam3Region.update(d.sam3_roi, d.source);
   sam3Intervals.update(d.sam3_inference_events);
+  el('model-timings').textContent = [
+    ['nvdcf_ms', 'NvDCF tracking'], ['dinov3_ms', 'DINOv3 recognition'], ['sam3_ms', 'SAM3 detection']
+  ].map(([key, label]) => {
+    const timing = d.model_timings?.[key];
+    const duration = Number.isFinite(timing) ? timing.toFixed(1) + ' ms' : '—';
+    return label + ': ' + duration;
+  }).join(' | ');
   el('status').textContent = d.status + ' | source: ' + d.source + (d.overlay_age === null ? '' : ' | result age: ' + d.overlay_age.toFixed(1) + 's');
   el('camera-status').textContent = d.video_error || (d.camera_connected ? 'Live · ' + d.camera_topic : 'No recent camera frames · ' + d.camera_topic + ' · start the Orbbec driver');
   if (d.camera_connected && Number.isFinite(d.camera_fps)) el('camera-status').textContent += ' · ' + d.camera_fps.toFixed(1) + ' input FPS';

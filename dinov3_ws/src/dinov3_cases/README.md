@@ -14,6 +14,21 @@
 
 ## 修改位置
 
+### SAM3 區域過濾
+
+`config/dinov3_cases.yaml` 的 `sam3_roi_width`、`sam3_roi_height`、
+`sam3_roi_center_x`、`sam3_roi_center_y` 指定相機原圖像素範圍。
+寬／高 `0` 代表該軸不限，兩者皆 `0` 停用過濾；中心 `-1` 跟隨畫面中點，
+中心 `0` 為有效的左／上邊座標。超出畫面的區域取與原圖的交集。
+SAM3 bbox 必須完整位於區域內才交給後續辨識；NvDCF 追蹤框移出區域後也不輸出。
+完整影像、2D bbox 原圖座標、3D 深度與影像輸出皆維持原樣，上傳目標圖片不套用相機區域。
+
+網頁 **Recognition settings → SAM3 region** 可即時調整四個參數，
+按 **Apply region** 生效並清除舊結果；重啟後使用 YAML 初始值。
+**Preview crop area** 只在目前瀏覽器的完整相機辨識畫面上疊半透明框，保留 bbox。
+輸入時可先預覽尚未套用的值。預覽依原始相機尺寸、編碼影片尺寸和
+`object-fit: contain` 留白換算位置，視窗改變大小時同步更新；不修改 ROS 影像或其他觀看者的畫面。
+
 | 要修改的功能 | 主要檔案 |
 | --- | --- |
 | ROS 參數、排程、發布 | `node.py` |
@@ -30,6 +45,31 @@
 
 
 測試命令見 [測試說明](../../tests/README.md)。
+
+## 模型耗時 topic 與網頁
+
+網頁 Live view 顯示各階段最近一次成功完成的毫秒數。
+`/api/status` 的 `model_timings` 與 ROS topic `/medicine_recognition/model_timings`
+共用量測資料。topic 使用 `std_msgs/msg/String` JSON，5 Hz、Reliable、KeepLast(1)、Volatile。
+
+```bash
+ros2 topic echo /medicine_recognition/model_timings std_msgs/msg/String
+```
+
+topic 的 JSON 只有三個數值欄位，單位固定為 ms：
+
+```json
+{"nvdcf_ms": 23.3, "dinov3_ms": 205.7, "sam3_ms": 219.8}
+```
+
+`/api/status` 的 `model_timings` 使用相同格式。尚無成功樣本時數值為 `null`，
+網頁顯示 `—`；快取結果與執行中保留最近成功值。
+來源或設定改變時清空，忽略舊工作的遲到結果。
+
+計時均為 wall time：NvDCF 是目前 live contexts 整體追蹤更新（含前處理與 IPC，
+不含背景 candidate 初始化／補追）；DINOv3 是整批圖庫刷新、辨識及診斷資料建立；
+SAM3 是 `worker_detect_ms`（不含主程序 IPC）。這些不是純 GPU kernel 時間，
+非同步階段不可直接相加作為總延遲。間隔 1 不執行 NvDCF，該階段顯示 `—`。
 
 ## 必須維持的生命週期
 

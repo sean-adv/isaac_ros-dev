@@ -136,12 +136,13 @@ class AsyncNvDCFProposals:
     """
     def __init__(self, wake=None, config=DEFAULT_CONFIG, width=640, height=384,
                  containment_threshold=0.0, factory=None, max_missed_detections=3,
-                 max_missed_frames=30, defer_recognition=False):
+                 max_missed_frames=30, defer_recognition=False, model_timings=None):
         if not 0 <= containment_threshold <= 1:
             raise ValueError('containment_threshold must be in [0, 1]')
         validate_missed_frames(max_missed_frames)
         self.max_missed_frames = max_missed_frames
         self.defer_recognition = defer_recognition
+        self.model_timings = model_timings
         self.geometry_ready = threading.Event()
         self.recognized = None
         self.recognition_error = None
@@ -384,7 +385,11 @@ class AsyncNvDCFProposals:
         detected_at = None
         lost = False
         if self.active is not None:
-            self.active.update(pixels, serial)
+            if self.model_timings is not None and changed and self.active.contexts:
+                with self.model_timings.measure("nvdcf", frame_key):
+                    self.active.update(pixels, serial)
+            else:
+                self.active.update(pixels, serial)
             self.identities.forget(self.active.expired)
             for identity in self.active.expired:
                 self.lifecycle.states.pop(identity, None)
