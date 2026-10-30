@@ -25,9 +25,13 @@ bash dinov3_ws/run.sh --ros-args -p port:=8091
 需由系統提供 Python 3.12、ROS 2 Jazzy、CUDA driver/runtime、cv_bridge、vision_msgs、isaac_ros_apriltag_interfaces 與相機驅動。Python 相依套件與模型均位於 `dinov3_ws`，不需要相鄰模型專案。
 
 ```bash
-bash dinov3_ws/setup_env.sh
-sudo bash dinov3_ws/native/install_nvdcf.sh
+# 在 Isaac ROS 容器內，以工作區使用者執行；不要對整支入口加 sudo
+bash dinov3_ws/setup_all.sh
 ```
+
+`setup_all.sh` 先呼叫 `setup_env.sh`，再檢查 NvDCF。如果工作區或容器映像已有 bridge 執行檔及 DeepStream 9.1 追蹤函式庫，就沿用；否則使用 `sudo` 呼叫 `native/install_nvdcf.sh` 安裝並編譯。檔案檢查不代表 GPU 相容性驗證，主機與容器仍須符合 [部署要求](../DOCKER_HOST.md)。入口不下載或建置模型。
+
+個別維護時仍可執行 `bash dinov3_ws/setup_env.sh` 或 `sudo bash dinov3_ws/native/install_nvdcf.sh`。
 
 `setup_env.sh` 先安裝 CUDA 13.0 Torch／torchvision，再使用 [constraints-thor.txt](constraints-thor.txt) 安裝 [requirements-build.txt](requirements-build.txt)。可透過 `PYTHON_BIN`、`DINOV3_VENV` 指定 Python 與環境位置。
 
