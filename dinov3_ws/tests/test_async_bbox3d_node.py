@@ -33,13 +33,13 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
     scheduler = Mock(last_recognition=recognition, last_metrics={}, lock=threading.Lock())
     scheduler.has_result.return_value = True
     scheduler.scheduler_metrics.return_value = {}
-    scheduler.update.return_value = ([dict(bbox=[20, 20, 60, 40], label='medicine', score=.9)], 'kcf')
+    scheduler.update.return_value = ([dict(bbox=[20, 20, 60, 40], label='medicine', score=.9)], 'nvdcf')
     params = dict(engine_path='unused', grounding_engine_path='unused',
                   grounding_worker_python='unused', grounding_ipc_timeout=1.,
                   nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
                   nvdcf_max_missed_detections=3,
                   nvdcf_max_missed_frames=30,
-                      grounding_nms_iou=1., grounding_max_detections=20,
+                      grounding_max_detections=20,
                       grounding_containment_threshold=.95,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                   grounding_min_bbox_area=0, pose_enabled=True)
@@ -121,7 +121,7 @@ def coalescing_node(tmp_path):
     params = dict(engine_path='unused', grounding_engine_path='unused', grounding_worker_python='unused',
                   grounding_ipc_timeout=1., nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
                   nvdcf_max_missed_detections=3, nvdcf_max_missed_frames=30,
-                  grounding_containment_threshold=.8, grounding_nms_iou=1., grounding_max_detections=20,
+                  grounding_containment_threshold=.8, grounding_max_detections=20,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0, grounding_min_bbox_area=0,
                   pose_enabled=True)
     node = SimpleNamespace(

@@ -3,7 +3,6 @@ from pathlib import Path
 import sys
 
 PROJECT = Path(__file__).resolve().parents[3]
-WORKSPACE = PROJECT.parent  # Retained for workspace-level ROS/camera diagnostics.
 ARTIFACTS = PROJECT / 'artifacts'
 CASES_DIR = PROJECT / 'data/gallery'
 MODEL_ID = 'zhanganyi88/Cat2Real-DINOv3-384'

@@ -24,4 +24,4 @@ bash setup_env.sh
 
 套件清單：[requirements.txt](requirements.txt)、[requirements-build.txt](requirements-build.txt)、[Thor pins](constraints-thor.txt)。完整操作與排程說明見 [BUILD_GUIDE.md](BUILD_GUIDE.md)。
 
-歷史 KCF 管線的 FPS 診斷與數值執行緒／DDS 改善，見 [FPS 診斷](FPS_DIAGNOSIS.zh-TW.md)。歷史 MJPEG 設定在 4 個物件、3D bbox 與雙影像串流啟用下，實測約 28.5 個不同 RGB 結果／秒；此數值不是新版 H.264 管線的效能量測。
+程式責任與資料流程見 [程式導覽](src/dinov3_cases/README.md)，檢查指令見 [測試說明](tests/README.md)。模型建置統一使用 `build_models.py`。

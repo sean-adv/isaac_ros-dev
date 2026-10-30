@@ -6,8 +6,7 @@ dinov3_cases:
     # After NvDCF tracking: intersection / smaller-box area >= threshold keeps the
     # larger box and immediately removes the smaller track. One final pass only.
     # Range 0..1; 0 disables containment filtering. Restart to apply.
-    grounding_containment_threshold: 0.8
-    grounding_nms_iou: 1.0  # IoU NMS disabled; containment filtering still applies.
+    grounding_containment_threshold: 0.5
     grounding_max_detections: 20
     # Submit one background SAM3 + DINO job every N processed frames; NvDCF continues.
     # One job at a time; seed and each catch-up update use latest admitted RGB.
@@ -36,7 +35,6 @@ dinov3_cases:
     grounding_min_bbox_height: 0
     grounding_min_bbox_area: 0
     recognition_threshold: 0.8
-    recognition_margin: 0.05
     # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
     inference_hz: 0.0
     # One 960x540 overlay + H.264 encode shared by WebRTC and ROS. Restart to apply.
@@ -58,7 +56,7 @@ dinov3_cases:
     pose_max_depth: 2.0
     # Foreground depth tolerance around the central patch median (meters).
     # Full 3D center/size/rotation in background; independent of SAM3 interval.
-    # Measure first processed RGB frame, then every 5 unique processed frames.
+    # Measure first processed RGB frame, then every bbox3d_interval unique processed frames.
     bbox3d_interval: 1
     bbox3d_max_age: 1.5
     bbox3d_depth_band: 0.08

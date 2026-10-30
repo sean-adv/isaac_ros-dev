@@ -15,7 +15,7 @@ class Detector:
         if prompt == "invalid":
             raise ValueError("invalid test prompt")
 
-    def detect(self, image, prompt, box_threshold, nms_iou, limit,
+    def detect(self, image, prompt, box_threshold, limit,
                *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
         if prompt == "hang":
             time.sleep(5)

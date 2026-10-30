@@ -13,9 +13,9 @@ cd /home/ubuntu/workspaces/isaac_ros-dev
 ```
 
 需要 Docker Engine、Docker Compose v2（支援 `up --wait`）及已設定的 NVIDIA Container Toolkit / `nvidia` runtime。
-使用映像 `advigw/isaac-ros-base-jazzy:1.0.0`，沿用目前環境的
+使用 `dinov3_ws/native/Dockerfile` 建置映像 `isaac-ros-jazzy-nvdcf:9.1`，沿用基底映像的
 `/usr/local/bin/scripts/workspace-entrypoint.sh`，以 host UID/GID 建立 `admin` 使用者。
-映像必須包含此 entrypoint；目前環境可確認此檔案存在，但尚未在 host 驗證指定 tag。
+映像必須包含此 entrypoint。
 
 ```bash
 ./start.sh --detach  # 背景啟動
@@ -67,7 +67,7 @@ Host 必須先正確設定 NVIDIA runtime；若映像內的 nvgpu／compatibilit
 
 ```bash
 cd /workspaces/isaac_ros-dev
-dinov3_trt11_venv/bin/python dinov3_ws/tests/check_gpu_environment.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_gpu_environment.py
 ```
 
 診斷會列出實際載入的 `libcuda` 路徑、`cuInit` 狀態，並測試 PyTorch CUDA allocation

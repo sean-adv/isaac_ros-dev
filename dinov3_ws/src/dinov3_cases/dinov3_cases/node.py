@@ -63,7 +63,6 @@ class CaseNode(Node):
             grounding_engine_path=str(GROUNDING_ENGINE),
             grounding_prompt=DEFAULT_PROMPT,
             grounding_box_threshold=0.3,
-            grounding_nms_iou=1.0,
             grounding_containment_threshold=0.95,
             grounding_max_detections=20,
             grounding_detection_interval=1,
@@ -132,8 +131,6 @@ class CaseNode(Node):
         if self.grounding_settings["detection_interval"] > 1:
             check_nvdcf(self.param("nvdcf_config"))
         validate_containment_threshold(self.param("grounding_containment_threshold"))
-        if not 0 <= self.param("grounding_nms_iou") <= 1:
-            raise ValueError("grounding_nms_iou must be between 0 and 1.")
         if not 1 <= self.param("grounding_max_detections") <= 100:
             raise ValueError("grounding_max_detections must be between 1 and 100.")
         validate_bbox_limits(
@@ -702,7 +699,6 @@ class CaseNode(Node):
                 # Capture settings by value: the job may outlive this loop iteration.
                 request = dict(
                     prompt=settings["prompt"], box_threshold=settings["box_threshold"],
-                    nms_iou=self.param("grounding_nms_iou"),
                     limit=self.param("grounding_max_detections"),
                     min_width=self.param("grounding_min_bbox_width"),
                     min_height=self.param("grounding_min_bbox_height"),

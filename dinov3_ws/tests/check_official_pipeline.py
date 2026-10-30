@@ -32,16 +32,16 @@ def main():
     assert Path(sys.prefix).resolve().is_relative_to(PROJECT),sys.prefix
     image=Image.open(ROOT/'artifacts/validation/person.jpg').convert('RGB')
     detector=Sam3Detector(GROUNDING_ENGINE,'cuda:0')
-    single=detector.detect(image,'person',.5,1.,20)
+    single=detector.detect(image,'person',.5,20)
     assert len(single)==1,single
     reference=np.array([.4564275444,.4020643234,.5659345388,.7773836851])*[*image.size,*image.size]
     overlap=iou(single[0]['bbox'],reference)
     assert overlap>.98,(overlap,single)
     labels=['person','car','bicycle','dog']
-    multiple=detector.detect(image,','.join(labels),.3,1.,20)
+    multiple=detector.detect(image,','.join(labels),.3,20)
     multi_checks=[]
     for label in labels:
-        solo=detector.detect(image,label,.3,1.,20)
+        solo=detector.detect(image,label,.3,20)
         actual=[p for p in multiple if p['detection_label']==label]
         assert len(solo)==len(actual),(label,solo,actual)
         for expected in solo:
@@ -59,16 +59,16 @@ def main():
         assert worker.worker_info['tensorrt'].startswith('11.')
         assert Path(worker.worker_info['python']).parent.parent==Path(sys.prefix)
         worker.validate_prompt('person')
-        remote=worker.detect(image,'person',.5,1.,20)
+        remote=worker.detect(image,'person',.5,20)
         assert len(remote)==len(single)
         assert remote[0]['bbox']==single[0]['bbox']
         assert abs(remote[0]['detection_score']-single[0]['detection_score'])<1e-5
         info=worker.worker_info
     finally:worker.close()
-    for _ in range(3):detector.detect(image,'person',.5,1.,20)
+    for _ in range(3):detector.detect(image,'person',.5,20)
     timings=[]
     for _ in range(10):
-        start=time.perf_counter();detector.detect(image,'person',.5,1.,20)
+        start=time.perf_counter();detector.detect(image,'person',.5,20)
         timings.append((time.perf_counter()-start)*1000)
     forbidden=('/DART/','/dinov3_tensorrt/','/TensorRT-Model-Connect/','/detectron2/')
     external=[getattr(m,'__file__','') for m in sys.modules.values()

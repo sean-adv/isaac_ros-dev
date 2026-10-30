@@ -1,1 +1,0 @@
-/workspaces/isaac_ros-dev/build/rgbd_object_proposals/launch/proposals.launch.py

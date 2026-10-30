@@ -10,15 +10,11 @@ log/
 /CutLER
 /detectron2
 __pycache__/
-
 /dinov3_ws/artifacts/huggingface/
-
-
 /dinov3_ws/artifacts/grounding_dino_wingdzero_processor/
 /dinov3_ws/artifacts/tensorrt/*wingdzero*
 /GroundingDINO-TensorRT-and-ONNX-Inference
 /dinov3_trt11_venv/
-
 /dinov3_ws/artifacts/tensorrt11/
 /trtmc_venv
 /TensorRT-Model-Connect
@@ -30,14 +26,18 @@ __pycache__/
 /dinov3_ws/artifacts/omdet/
 /dinov3_ws/requirements-thor-wheels.local.txt
 trash/
-
 dinov3_trt_venv/
 sam2_trt_inference/
 DART/
 /dinov3_ws/artifacts/sam3/
 copy/
 dinov3_tensorrt/
-sam2_trt_inference/
 /dinov3_ws/.venv/
 /dinov3_ws/data/
 /dinov3_ort_gpu_venv/
+
+# Generated ROS install trees and Python/runtime caches
+/install/
+*.py[cod]
+/core
+/core.*

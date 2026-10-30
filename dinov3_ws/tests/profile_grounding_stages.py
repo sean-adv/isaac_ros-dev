@@ -24,7 +24,7 @@ def main():
     try:
         for i in range(10+args.samples):
             start = time.monotonic()
-            proposals = detector.detect(image,DEFAULT_PROMPT,.3,.5,20)
+            proposals = detector.detect(image,DEFAULT_PROMPT,.3,20)
             elapsed = (time.monotonic()-start)*1000
             if i>=10:
                 rows.append(dict(getattr(detector,'last_metrics',{}),total_ms=elapsed,objects=len(proposals)))
@@ -34,7 +34,7 @@ def main():
     summary = {key:dict(median=float(np.median([r[key] for r in rows])),p95=float(np.percentile([r[key] for r in rows],95)))
                for key in rows[0] if key.endswith('_ms')}
     args.output.parent.mkdir(parents=True,exist_ok=True)
-    args.output.write_text(json.dumps(dict(model='SAM3 W8A8',samples=args.samples,summary=summary,rows=rows),indent=2)+'\n')
+    args.output.write_text(json.dumps(dict(model='SAM3 Torch-TensorRT FP16 vision + PyTorch head',samples=args.samples,summary=summary,rows=rows),indent=2)+'\n')
     print(json.dumps(summary,indent=2))
 
 

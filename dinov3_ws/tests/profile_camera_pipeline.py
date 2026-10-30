@@ -6,7 +6,7 @@ import time
 import numpy as np
 import rclpy
 from dinov3_cases import node as pipeline
-from dinov3_cases.runtime import GROUNDING_ENGINE, DINO_ENGINE, GROUNDING_PYTHON, WORKSPACE
+from dinov3_cases.runtime import GROUNDING_ENGINE, DINO_ENGINE, GROUNDING_PYTHON, PROJECT
 from dinov3_cases.trt_backend import TRTBackbone
 
 
@@ -56,7 +56,7 @@ def main():
             result = super().depth_inputs_for(frame)
             extras['depth_wait_ms'] = (time.monotonic() - start) * 1000
             return result
-    ros_args = ['--ros-args', '--params-file', str(WORKSPACE / 'dinov3_ws/config/dinov3_cases.yaml')]
+    ros_args = ['--ros-args', '--params-file', str(PROJECT / 'config/dinov3_cases.yaml')]
     for key, value in dict(port=0, engine_path=DINO_ENGINE, grounding_engine_path=GROUNDING_ENGINE,
                            grounding_worker_python=GROUNDING_PYTHON,
                            pose_enabled=str(not args.no_pose).lower(), grounding_max_detections=args.max_detections).items():

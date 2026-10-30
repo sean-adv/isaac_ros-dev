@@ -1,5 +1,7 @@
 """Object identity, rejection, duplicate proposals, and gallery lifecycle contracts."""
 
+from dinov3_cases.object_visualization import object_debug_views, ObjectVisualizationSnapshot
+
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,8 +18,6 @@ from dinov3_cases.grounded import (
     validate_settings,
     validate_bbox_limits,
     recognition_message,
-    object_debug_views,
-    ObjectVisualizationSnapshot,
 )
 
 
@@ -55,7 +55,7 @@ def test_contained_small_box_removed_before_dino(small, removed):
     outer = [0, 0, 100, 100]
     # Higher confidence and a different prompt label do not protect small boxes.
     result = clean_proposals([small, outer], [.99, .7], ["bottle", "box"],
-                             (200, 150), nms_iou=1.0)
+                             (200, 150))
     expected = [outer] if removed else [small, outer]
     assert [item["bbox"] for item in result] == expected
 
@@ -63,14 +63,14 @@ def test_contained_small_box_removed_before_dino(small, removed):
 def test_containment_filter_precedes_detection_limit_and_handles_nested_boxes():
     boxes = [[20, 20, 30, 30], [10, 10, 40, 40], [0, 0, 100, 100]]
     result = clean_proposals(boxes, [.99, .9, .7], ["box"] * 3,
-                             (100, 100), nms_iou=1.0, limit=1)
+                             (100, 100), limit=1)
     assert [item["bbox"] for item in result] == [[0, 0, 100, 100]]
     assert result[0]["detection_score"] == .7
 
 
 def test_containment_uses_clipped_boxes_and_keeps_best_equal_area_duplicate():
     result = clean_proposals([[-10, -10, 100, 100], [0, 0, 100, 100]],
-                             [.7, .9], ["box", "bottle"], (100, 100), nms_iou=1.0)
+                             [.7, .9], ["box", "bottle"], (100, 100))
     assert len(result) == 1
     assert result[0]["bbox"] == [0, 0, 100, 100]
     assert result[0]["detection_score"] == .9
@@ -420,7 +420,7 @@ def test_ros_2d_filters_unknown_without_changing_tracking_ids_or_input():
 @pytest.mark.parametrize("threshold,count", [(0.0, 2), (0.90, 1), (0.95, 2), (1.0, 2)])
 def test_configurable_containment_threshold(threshold, count):
     result = clean_proposals([[82, 10, 102, 30], [0, 0, 100, 100]],
-                             [.99, .7], ["box"] * 2, (200, 150), nms_iou=1.0,
+                             [.99, .7], ["box"] * 2, (200, 150),
                              containment_threshold=threshold)
     assert len(result) == count
 
@@ -429,3 +429,39 @@ def test_configurable_containment_threshold(threshold, count):
 def test_invalid_containment_threshold(value):
     with pytest.raises(ValueError, match="containment_threshold"):
         clean_proposals([], [], [], (100, 100), containment_threshold=value)
+
+
+def test_web_settings_accept_interval_and_reject_invalid_values(tmp_path, monkeypatch):
+    import threading
+    from unittest.mock import Mock
+    from dinov3_cases.web import create_app
+
+    check_nvdcf = Mock()
+    monkeypatch.setattr("dinov3_cases.web.check_nvdcf", check_nvdcf)
+
+    node = SimpleNamespace(
+        root=tmp_path, lock=threading.Lock(), image_changed=threading.Event(),
+        render_changed=threading.Event(), video_hub=Mock(), generation=0,
+        grounding_settings=dict(prompt="box.", box_threshold=0.3,
+                                recognition_threshold=0.75, margin=0.05,
+                                detection_interval=1),
+        grounding_detector=SimpleNamespace(validate_prompt=Mock()),
+        clear_object_debug=Mock(), param=lambda name: "nvdcf.yaml",
+    )
+    client = create_app(node).test_client()
+    response = client.post("/api/grounding", json={"detection_interval": 5})
+    assert response.status_code == 200
+    check_nvdcf.assert_called_once_with("nvdcf.yaml")
+    assert response.json["grounding"]["detection_interval"] == 5
+    assert node.generation == 1
+    for value in (0, -1, True, 1.5, "5"):
+        assert client.post("/api/grounding", json={"detection_interval": value}).status_code == 400
+    assert node.generation == 1
+
+
+def test_overlapping_boxes_below_containment_threshold_are_kept():
+    boxes = [[0, 0, 100, 100], [10, 10, 110, 110]]
+    # IoU is about .68, but only .81 of either box is covered.
+    result = clean_proposals(boxes, [.9, .8], ["box"] * 2, (120, 120),
+                             containment_threshold=.95)
+    assert [item["bbox"] for item in result] == boxes

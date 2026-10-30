@@ -10,12 +10,8 @@ import torch
 import torch.nn.functional as F
 
 from .runtime import INPUT_SIZE
-from .gallery_files import EXTENSIONS, gallery_groups, gallery_images
-# Preserve existing imports used by integrations and diagnostic tools.
-from .object_visualization import (
-    ObjectVisualizationSnapshot, build_object_diagnostic,
-    encode_object_diagnostics, object_debug_views,
-)
+from .gallery_files import gallery_groups, gallery_images
+from .object_visualization import build_object_diagnostic
 
 from .nvdcf import validate_detection_interval
 
@@ -54,9 +50,9 @@ def validate_containment_threshold(value):
         raise ValueError("containment_threshold must be a finite number between 0 and 1.")
 
 
-def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
+def clean_proposals(boxes, scores, labels, size, limit=20,
                     *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
-    """Clip XYXY boxes; remove contained boxes before score NMS and limit."""
+    """Clip XYXY boxes; remove contained boxes, then rank by score and limit."""
     validate_containment_threshold(containment_threshold)
     validate_bbox_limits(min_width, min_height, min_area)
     width, height = size
@@ -98,23 +94,7 @@ def clean_proposals(boxes, scores, labels, size, nms_iou=0.5, limit=20,
                 break
         else:
             outer_boxes.append(item)
-    kept = []
-    for item in sorted(outer_boxes, key=lambda x: x["detection_score"], reverse=True):
-        a = item["bbox"]
-        duplicate = False
-        for other in kept:
-            b = other["bbox"]
-            intersection = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(
-                0, min(a[3], b[3]) - max(a[1], b[1])
-            )
-            if intersection / (item["area"] + other["area"] - intersection) > nms_iou:
-                duplicate = True
-                break
-        if not duplicate:
-            kept.append(item)
-            if len(kept) >= limit:
-                break
-    return kept
+    return sorted(outer_boxes, key=lambda item: item["detection_score"], reverse=True)[:limit]
 
 
 def prepare_object(image, max_side=INPUT_SIZE, stride=16, minimum=32):

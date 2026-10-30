@@ -1,4 +1,4 @@
-"""Classification lifetime follows KCF sets, not numeric IDs or moving boxes."""
+"""Classification lifetime follows NvDCF sets, not numeric IDs or moving boxes."""
 from unittest.mock import Mock
 
 import numpy as np
@@ -44,18 +44,18 @@ def run(setup, proposals, token, revision=1, threshold=.75):
                         threshold, .05, token=token, gallery_revision=revision)
 
 
-def test_kcf_frames_reuse_identity_but_keep_current_bbox_and_fresh_depth_inputs(setup):
+def test_nvdcf_frames_reuse_identity_but_keep_current_bbox_and_fresh_depth_inputs(setup):
     cache, encoder, _, _ = setup
     token = object()
     first, diagnostics, changed = run(setup, [proposal()], token)
     assert changed and cache.encoded and first[0]['label'] == 'red'
     first[0].update(bbox3d={'position': [1, 2, 3]}, track_id=99, bbox_visible=False)
     # Deliberately move onto a blue region: no DINO rerun within this set.
-    moved = dict(proposal(45), bbox_source='kcf')
+    moved = dict(proposal(45), bbox_source='nvdcf')
     current, reused, changed = run(setup, [moved], token)
     assert encoder.calls == 1 and not changed and not cache.encoded
     assert current[0]['label'] == 'red' and current[0]['bbox'] == moved['bbox']
-    assert current[0]['bbox_source'] == 'kcf'
+    assert current[0]['bbox_source'] == 'nvdcf'
     assert not {'track_id', 'bbox3d', 'bbox_visible'} & current[0].keys()
     assert reused is diagnostics
     assert cache.diagnostic_detections[0]['bbox'] == proposal()['bbox']
@@ -156,53 +156,6 @@ def test_failed_count_change_discards_invalid_cache_before_retry(setup):
     assert changed and result[0]['label'] == 'blue'
 
 
-def test_async_handoff_triggers_dino_but_background_submission_does_not(setup):
-    from dinov3_cases.async_kcf import AsyncKCFProposals
-
-    class Tracker:
-        def init(self, image, box):
-            self.box = box
-
-        def update(self, image):
-            return True, self.box
-
-    pipeline = AsyncKCFProposals(Tracker)
-    detected = []
-
-    def detect(pixels):
-        detected.append(True)
-        return [proposal(0 if len(detected) == 1 else 45)], {}
-
-    def step(seq):
-        result = pipeline.update(setup[3], seq, 'camera', 3, detect)
-        if result is None:
-            return None
-        proposals, source = result
-        # Exercise legacy cache consumers bound to the merged tracker set.
-        detections, _, _ = run(setup, proposals, (pipeline.active, 'camera', None))
-        return detections, source
-
-    try:
-        assert step(0) is None
-        pipeline.thread.join(3)
-        assert not pipeline.thread.is_alive()
-        assert step(0)[0][0]['label'] == 'red'
-        assert setup[1].calls == 1
-        assert step(1)[1] == step(2)[1] == 'kcf'
-        assert step(3)[1] == 'kcf'  # Submitting SAM3 must not rerun DINO.
-        assert setup[1].calls == 1
-        pipeline.thread.join(3)
-        assert not pipeline.thread.is_alive()
-        detections, source = step(3)
-        assert source == 'sam3' and [item['label'] for item in detections] == ['blue', 'red']
-        # The new detection is a separate object; the valid red KCF survives.
-        assert setup[1].calls == 3
-        step(4)
-        assert setup[1].calls == 3
-    finally:
-        pipeline.close()
-
-
 @pytest.mark.parametrize('scenario', ['handoff', 'same_frame', 'partial_loss', 'total_loss'])
 def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_frame(setup, tmp_path, scenario):
     import threading
@@ -251,7 +204,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
             classified.clear()
             classified.update(zip(positions, items))
         return [dict(classified[x], bbox=proposal(x)['bbox']) for x in positions], (
-            'sam3' if new_set or index == 0 else 'kcf')
+            'sam3' if new_set or index == 0 else 'nvdcf')
 
     scheduler.update.side_effect = proposal_update
     parameters = dict(engine_path='unused', grounding_engine_path='unused',
@@ -259,7 +212,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
                       nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
                       nvdcf_max_missed_detections=3,
                       nvdcf_max_missed_frames=30,
-                      grounding_nms_iou=1., grounding_max_detections=20,
+                      grounding_max_detections=20,
                       grounding_containment_threshold=.95,
                       grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                       grounding_min_bbox_area=0, pose_enabled=False)

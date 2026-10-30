@@ -28,19 +28,19 @@
 | 診斷圖與比較參考圖 | `object_visualization.py` |
 | 網頁互動與外觀 | `static/`、`templates/` |
 
-`grounded.py` 保留原有診斷函式的匯入入口，既有整合工具仍可使用；新程式可直接從 `object_visualization.py` 匯入。
+
+測試命令見 [測試說明](../../tests/README.md)。
 
 ## 必須維持的生命週期
 
 - SAM3 框屬於較舊的影格；須在偵測原圖初始化，再補追至當前影格，才可交接。大幅跳幀仍可能追錯。
 - 相同影格重算不能增加追蹤命中次數或重複累加平滑樣本。
 - 相機持續送影格時，SAM3／DINO／3D 的背景完成通知合併到下一張 RGB，避免同影格再複製、追蹤、發布及畫圖編碼。若超過 200 ms 沒有新輸入，仍可刷新該影格，讓首次 3D 與延後類別完成；靜態上傳可立即套用背景結果。這類刷新不增加 processed RGB FPS。
-- NvDCF 組更換或物件數改變時重新編碼；圖庫或分類門檻改變時可用既有 descriptor 重新分類。
+- 同步辨識的 tracker token 更換或物件數改變時重新編碼；圖庫或分類門檻改變時可用既有 descriptor 重新分類。
 - 診斷裁切屬於辨識當時的影格，不可套用後續 NvDCF 框冒充目前影像。
 - 共享影格在所有租約釋放前不可覆寫；舊 generation 的背景結果不可發布。
 - 診斷快照保留完整舊圖庫版本，避免更新圖庫時混用特徵與標籤。
 
-測試命令見 `../../tests/README.md`。重構前已存在的限制：`qwen_encoder.py` 引用 `runtime.py` 中不存在的 `QWEN_*` 設定，導致 `test_qwen_encoder.py` 無法收集；目前主節點僅接入 DINOv3。Qwen 程式與既有修改予以保留，未在此次整理中刪除或補上另一套推論流程。
 
 網頁 `processed RGB FPS`（API `result_fps`）只計不同 `(generation, frame_id)` 的已完成 RGB，不把同影格的背景刷新算成新影格；相機的 `input FPS` 是輸入回呼頻率。主迴圈只保留可配對的深度快照並提交背景 3D 工作，不等待深度或量測完成；非同步模式的 DINOv3 在背景執行，`recognize_ms` 記錄交接結果的背景辨識耗時；細分計時和影像輸出方式見 `../../BUILD_GUIDE.md`。
 
@@ -207,7 +207,7 @@ WebRTC 使用 aiortc 的已編碼 `Packet` 路徑，詳見
 
 短暫遮擋使 NvDCF 不再輸出物件時，`nvdcf_max_missed_frames` 保留其原 context、公開 ID 與分類 metadata（預設 30，設 0 停用）。以不同的已處理 RGB 影格計數，同影格重跑不累計；容忍 N 次連續缺失，第 N+1 次仍缺失才移除。失追期間不顯示過期框，也不提交舊框做 3D 量測，該物件的 SAM3 miss 計數暫停。原生輸出恢復時沿用原生及公開 ID；若由新 SAM3 結果重新配對，保留公開 ID，但可換用新的原生 context。任何物件剛失追時會提前要求 SAM3；仍有隱藏物件時，以 `min(grounding_detection_interval, max(1, nvdcf_max_missed_frames // 3))` 個處理影格重試，預設最多每 10 幀一次。原生 shadow 存活期另外受 `maxShadowTrackingAge` 限制，跨遮擋重新配對使用幾何位置而非 ReID，無法保證大幅位移後仍配對正確。包含框過濾與已知轉 unknown 的立即退場規則仍適用於可見物件。
 
-原生追蹤器使用 DeepStream 9.1，執行於獨立 C++ 子程序，不載入模型 `.venv` 的 TensorRT 11。安裝與參數見 [BUILD_GUIDE.md](../../BUILD_GUIDE.md)。不再使用 KCF worker／ROI／Lab 追蹤設定。GPU smoke test：
+原生追蹤器使用 DeepStream 9.1，執行於獨立 C++ 子程序，不載入模型 `.venv` 的 TensorRT 11。安裝與參數見 [BUILD_GUIDE.md](../../BUILD_GUIDE.md)。GPU smoke test：
 
 ```bash
 PYTHONPATH=dinov3_ws/src/dinov3_cases dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf.py

@@ -58,10 +58,11 @@ def create_app(node):
         image = Image.fromarray(node.bridge.imgmsg_to_cv2(frame, desired_encoding="rgb8")).copy()
         proposals = detector.detect(
             image, prompt, settings["box_threshold"],
-            node.param("grounding_nms_iou"), node.param("grounding_max_detections"),
+            node.param("grounding_max_detections"),
             min_width=node.param("grounding_min_bbox_width"),
             min_height=node.param("grounding_min_bbox_height"),
             min_area=node.param("grounding_min_bbox_area"),
+            containment_threshold=node.param("grounding_containment_threshold"),
         )
         return image, proposals
 

@@ -136,7 +136,7 @@ class SharedMemoryGroundingDetector:
         with self.lock:
             self._request("validate_prompt", prompt=prompt)
 
-    def detect(self, image, prompt, box_threshold, nms_iou, limit,
+    def detect(self, image, prompt, box_threshold, limit,
                *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
         with self.lock:
             prepare_start = time.monotonic_ns()
@@ -146,13 +146,13 @@ class SharedMemoryGroundingDetector:
                 raise RuntimeError("No free shared frame slot")
             prepare_ms = (time.monotonic_ns() - prepare_start) / 1e6
             try:
-                return self._detect_frame(frame, prompt, box_threshold, nms_iou, limit,
+                return self._detect_frame(frame, prompt, box_threshold, limit,
                                           min_width, min_height, min_area, prepare_ms, containment_threshold)
             finally:
                 if owned:
                     frame.release()
 
-    def _detect_frame(self, frame, prompt, box_threshold, nms_iou, limit,
+    def _detect_frame(self, frame, prompt, box_threshold, limit,
                       min_width, min_height, min_area, prepare_ms, containment_threshold):
         copy_ms = frame.copy_ms
         reply = self._request(
@@ -165,7 +165,6 @@ class SharedMemoryGroundingDetector:
             encoding="rgb8",
             prompt=prompt,
             box_threshold=box_threshold,
-            nms_iou=nms_iou,
             limit=limit,
             min_width=min_width,
             min_height=min_height,
@@ -273,7 +272,6 @@ def worker_main(fd, detector_factory=None, version=None):
                         image,
                         request["prompt"],
                         request["box_threshold"],
-                        request["nms_iou"],
                         request["limit"],
                         min_width=request.get("min_width", 0),
                         min_height=request.get("min_height", 0),

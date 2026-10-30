@@ -1,9 +1,0 @@
-source;share/dinov3_cases/hook/pythonpath.ps1
-source;share/dinov3_cases/hook/pythonpath.dsv
-source;share/dinov3_cases/hook/pythonpath.sh
-source;share/dinov3_cases/hook/ament_prefix_path.ps1
-source;share/dinov3_cases/hook/ament_prefix_path.dsv
-source;share/dinov3_cases/hook/ament_prefix_path.sh
-source;../../build/dinov3_cases/share/dinov3_cases/hook/pythonpath_develop.ps1
-source;../../build/dinov3_cases/share/dinov3_cases/hook/pythonpath_develop.dsv
-source;../../build/dinov3_cases/share/dinov3_cases/hook/pythonpath_develop.sh

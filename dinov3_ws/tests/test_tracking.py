@@ -121,7 +121,7 @@ def test_new_track_uses_same_miss_allowance_as_established_tracks():
     item = dict(box(), track_id=1)
     first, _ = lifecycle.update([item], {1}, now=0)
     assert first[0]['track_status'] == 'confirmed'
-    # KCF callbacks cannot count as supporting detections.
+    # NvDCF callbacks cannot count as supporting detections.
     for _ in range(10):
         tracked, _ = lifecycle.update(first, now=.5)
         assert tracked[0]['sam3_hits'] == 1
@@ -196,7 +196,7 @@ def test_track_lifetime_is_independent_for_each_object_and_unknown_is_allowed():
     {'max_missed_detections': 0}, {'max_missed_detections': 1.5},
 ])
 def test_invalid_lifecycle_limits_are_rejected(options):
-    with pytest.raises(ValueError, match='kcf_'):
+    with pytest.raises(ValueError, match='nvdcf_'):
         TrackLifecycle(**options)
 
 

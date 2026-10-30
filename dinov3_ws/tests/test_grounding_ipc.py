@@ -32,7 +32,7 @@ def proxy(monkeypatch):
 
 
 def detect(proxy, color="red", size=(40, 20), prompt="box."):
-    return proxy.detect(Image.new("RGB", size, color), prompt, 0.3, 0.5, 20)
+    return proxy.detect(Image.new("RGB", size, color), prompt, 0.3, 20)
 
 
 def test_rgb_frame_identity_resize_and_shm_cleanup(proxy):
@@ -65,8 +65,8 @@ def test_prompt_error_keeps_worker_available(proxy):
 def test_bbox_limits_reach_worker(proxy, limits):
     p = proxy()
     image = Image.new("RGB", (40, 20), "red")
-    assert not p.detect(image, "box.", .3, .5, 20, **limits)
-    assert p.detect(image, "box.", .3, .5, 20,
+    assert not p.detect(image, "box.", .3, 20, **limits)
+    assert p.detect(image, "box.", .3, 20,
                     min_width=40, min_height=20, min_area=800)
 
 
@@ -135,7 +135,7 @@ def test_external_pool_uses_same_pixels_without_transport_copy(proxy):
         for i in range(3):
             frame = pool.acquire(np.full((20, 40, 3), i, np.uint8), frame_id=100+i)
             frames.append(frame)
-            result = p.detect(frame, "box.", .3, .5, 20)
+            result = p.detect(frame, "box.", .3, 20)
             assert result[0]["color"] == [i, i, i]
             assert p.last_metrics["source_frame_id"] == 100+i
         assert all(slot[0] is None for slot in p.pool.slots)
@@ -149,6 +149,6 @@ def test_external_pool_uses_same_pixels_without_transport_copy(proxy):
 
 @pytest.mark.parametrize("threshold", [0.0, 0.9, 0.95, 1.0])
 def test_containment_threshold_reaches_worker(proxy, threshold):
-    result = proxy().detect(Image.new("RGB", (40, 20)), "box.", .3, 1., 20,
+    result = proxy().detect(Image.new("RGB", (40, 20)), "box.", .3, 20,
                             containment_threshold=threshold)
     assert result[0]["containment_threshold"] == threshold

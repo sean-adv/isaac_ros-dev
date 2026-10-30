@@ -42,23 +42,23 @@ def fake_detector():
 
 def test_presence_score_and_original_coordinates():
     detector=fake_detector();image=Image.new('RGB',(200,100))
-    result=detector.detect(image,'bottle,box.',.2,1.,20)
+    result=detector.detect(image,'bottle,box.',.2,20)
     # Identical boxes across prompts are deduplicated before classification.
     assert len(result)==1
     assert [r['detection_label'] for r in result]==['bottle']
     assert result[0]['bbox']==[50,25,150,75]
     assert result[0]['detection_score']==.25
-    assert len(detector.detect(image,'bottle,box.',.2,1.,20,
+    assert len(detector.detect(image,'bottle,box.',.2,20,
                                containment_threshold=0.0))==2
-    assert detector.detect(image,'bottle,box.',.3,1.,20)==[]
-    assert detector.detect(image,'box.',.2,1.,20,min_width=101)==[]
+    assert detector.detect(image,'bottle,box.',.3,20)==[]
+    assert detector.detect(image,'box.',.2,20,min_width=101)==[]
 
 
 def test_nonfinite_outputs_are_rejected():
     detector=fake_detector()
     detector.predict_tensors=lambda *a:(torch.full((1,1,4),float('nan')),torch.zeros(1,1),torch.zeros(1,1))
     with pytest.raises(RuntimeError,match='Non-finite'):
-        detector.detect(Image.new('RGB',(20,20)),'box',.2,1.,20)
+        detector.detect(Image.new('RGB',(20,20)),'box',.2,20)
 
 
 def test_prompt_cache_and_zero_padding_match_sam3_text_encoder():

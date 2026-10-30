@@ -12,11 +12,11 @@ from PIL import Image
 import rclpy
 
 from dinov3_cases.node import CaseNode, TrackedObjectRecognizer
-from dinov3_cases.runtime import ARTIFACTS, WORKSPACE
+from dinov3_cases.runtime import ARTIFACTS
 
 
 def main():
-    image = Image.open(WORKSPACE / 'DART/dartf/data/train2017/000000230971.jpg').convert('RGB')
+    image = Image.open(ARTIFACTS / 'validation/person.jpg').convert('RGB')
     entered, release = threading.Event(), threading.Event()
     dino_entered, dino_release = threading.Event(), threading.Event()
     real_recognize = TrackedObjectRecognizer.update

@@ -87,7 +87,7 @@ class Sam3Detector:
         return self.head(values[3], values[7], text_features, text_mask)
 
     @torch.inference_mode()
-    def detect(self, image, prompt, box_threshold, nms_iou, limit,
+    def detect(self, image, prompt, box_threshold, limit,
                *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
         from .grounded import clean_proposals
         with self.lock:
@@ -105,6 +105,6 @@ class Sam3Detector:
                     all_boxes.append((np.clip(boxes[index, query], 0, 1) * [*image.size, *image.size]).tolist())
                     confidence.append(float(scores[index, query]))
                     names.append(label)
-            return clean_proposals(all_boxes, confidence, names, image.size, nms_iou, limit,
+            return clean_proposals(all_boxes, confidence, names, image.size, limit,
                 min_width=min_width, min_height=min_height, min_area=min_area,
                 containment_threshold=containment_threshold)

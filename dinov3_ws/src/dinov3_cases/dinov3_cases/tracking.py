@@ -1,4 +1,4 @@
-"""Geometric history matching and moving averages for SAM3/KCF boxes."""
+"""Geometric history matching and moving averages for SAM3/NvDCF boxes."""
 
 from collections import deque
 import math
@@ -135,11 +135,11 @@ class TrackIdentities:
 
 
 class TrackLifecycle:
-    """Require detector support; KCF success alone never renews a track's life."""
+    """Require detector support; Tracker success alone never renews a track's life."""
 
     def __init__(self, max_missed_detections=3):
         if type(max_missed_detections) is not int or max_missed_detections < 1:
-            raise ValueError("kcf_max_missed_detections must be an integer >= 1")
+            raise ValueError("nvdcf_max_missed_detections must be an integer >= 1")
         self.max_missed_detections = max_missed_detections
         self.clear()
 
@@ -147,7 +147,7 @@ class TrackLifecycle:
         self.states = {}
 
     def update(self, items, detected_ids=None, detected_at=None, *, now=None):
-        """Count one miss per committed SAM3 result, never per KCF/camera frame.
+        """Count one miss per committed SAM3 result, never per tracking/camera frame.
 
         No detector result (pending/error/discarded) is not a miss. Elapsed time
         alone never retires a track; age is retained only for diagnostics.
@@ -179,7 +179,7 @@ class TrackLifecycle:
 
 
 class BBoxSmoother:
-    """Average raw boxes per matched object without feeding smoothing into KCF.
+    """Average raw boxes per matched object without feeding smoothing into the tracker.
 
     Match geometrically across SAM3 refreshes, including detection reordering.
     Missing objects lose their history immediately. A repeated frame with the

@@ -1,199 +1,68 @@
-目前啟用中的追蹤後端為 DeepStream 9.1 NvDCF。以下測試驗證新的排程、原生 GPU 追蹤及完整模型流程：
-
-```bash
-source /opt/ros/jazzy/setup.bash
-export PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:$PYTHONPATH"
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests/test_async_nvdcf.py dinov3_ws/tests/test_tracking.py
-dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf.py
-# 完整模型檢查亦需 run.sh 使用的 TensorRT library 路徑：
-export LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:$LD_LIBRARY_PATH"
-OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 dinov3_ws/.venv/bin/python dinov3_ws/tests/check_async_nvdcf_pipeline.py
-```
-
-`test_async_nvdcf.py` 亦以阻塞的舊 context 關閉驗證交接和後續追蹤不等待回收，並檢查停機 drain 與清理例外。`test_h264_stream.py` 驗證繪製／編碼未超時時只等待剩餘幀預算，超時時不再額外延遲。
-
-`test_async_bbox3d_node.py` 驗證新鮮 RGB 的背景通知不重跑影像轉換、追蹤或排入渲染，下一張 RGB 套用最新結果；相機暫停與靜態上傳仍能刷新，且不增加不同 RGB 的 FPS 計數。`test_h264_stream.py` 另檢查週期性 IDR 等待下一張 RGB，同時保留新觀看者與暫停輸入的快取 IDR。
-
-兩階段交接由 `test_async_nvdcf.py` 驗證：DINO 阻塞時先輸出框並追蹤下一張影像，完成後只更新原物件類別，不回退框、不復活已移除物件、不跨設定回合貼標籤；DINO 失敗仍保留框。`check_async_nvdcf_pipeline.py` 使用真實模型，刻意阻塞第一次與刷新回合的 DINO，驗證 API 已輸出框及持續追蹤，再放行確認同一 ID 更新類別。`test_h264_stream.py` 檢查 3D 模式在資料未就緒時不繪框，資料就緒後才顯示 3D 框，並涵蓋 DINO 待辨識與已完成兩種狀態。
-
-KCF 測試與效能報告為歷史對照；`profile_kcf_intervals.py` 的 KCF ROS 參數不再適用目前節點。
-
-# 目前部署測試
-
-一般回歸使用 `dinov3_ws/.venv`。`test_qwen_encoder.py` 為舊 Qwen 實驗，其缺少的設定常數早於本次切換；目前部署不執行該測試：
-
-```bash
-source /opt/ros/jazzy/setup.bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=dinov3_ws/src/dinov3_cases:$PYTHONPATH \
-  dinov3_ws/.venv/bin/pytest dinov3_ws/tests --ignore=dinov3_ws/tests/test_qwen_encoder.py
-```
-
-實際 GPU 回歸：
-
-```bash
-dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
-```
-
-測試影像預設為 `artifacts/validation/person.jpg`。報告輸出 `artifacts/standalone-pipeline-validation.json`，檢查本機模型路徑、FP32 bbox IoU、1–4 類別、Cat2Real 圖庫、IPC parity，以及沒有載入其他模型專案的模組或自訂 SAM3 plugin。數值模型驗證另執行 `build_models.py --validate-only`。下方保留其他功能回歸與歷史效能診斷入口；舊模型實驗腳本不屬於目前部署。
-
 # 測試與診斷
 
-此目錄只保留目前 SAM3 + DINOv3 流程的回歸測試，以及部署驗證與效能診斷工具。舊 OmDet 的離線 prompt、FP16/FP32 精度比較、IPC GPU 比較與舊版整合腳本已移除；原始量測報告仍保留。
+測試涵蓋目前的 SAM3、NvDCF、Cat2Real、3D 深度框、圖庫、ROS 與 HTTP／H.264 流程。下列指令均從工作區根目錄執行。
 
-## 日常回歸測試
-
-`test_async_nvdcf.py` 另驗證失追寬限、同影格不重複累計、隱藏 owner 跨交接保留、原生／SAM3 回配、部分失追提早偵測及逾期清理。`check_nvdcf_occlusion.py` 使用真實 GPU NvDCF、合成遮擋影像及精確的模擬 SAM3 偵測，確認背景 context 在遮擋期間存活、自動重試偵測後恢復同一公開 ID，超過寬限後完整釋放。
-
-目前 NvDCF 的逐物件交接由 `test_async_nvdcf.py` 驗證：部分漏偵測保留原 context、公開 ID 與標籤，重新偵測後配對接手，連續 `nvdcf_max_missed_detections` 次漏偵測才退場（預設 3），並涵蓋跨 context 原生 ID 碰撞、unknown、包含框過濾及資源清理。`check_nvdcf_handoff.py` 使用真正 GPU NvDCF 與合成移動影像，驗證舊原生狀態持續追蹤及漏偵測門檻。下方 KCF 說明保留為歷史流程與回歸參考。
-
-KCF 非同步模式（`grounding_detection_interval > 1`）採逐物品交接：背景 SAM3
-結果在偵測影格初始化、補追到目前影格後，以框重疊、中心距離及尺寸配對。
-配對物品沿用固定 `track_id` 並更新自己的 KCF／ROI；SAM3 漏偵測或回傳空集合時，
-舊 KCF 可繼續追蹤，直到達到連續 SAM3 漏偵測次數限制。
-新舊框統一可 coasting，限制由 `kcf_max_missed_detections` 設定，修改後重啟。
-漏偵測次數僅計算完成交接的 SAM3 結果；相機／KCF 更新、等待結果或經過時間
-不增加次數，也不因距離上次 SAM3 確認過久而淘汰。SAM3 age 僅供診斷顯示。
-KCF 成功不重設漏偵測次數；SAM3 再次確認該物品時才重設。
-額外的 Lab 外觀檢查會將目前 KCF 框與 SAM3 seed 框比較（CPU、48×48、固定參考）。
-`kcf_lab_similarity_threshold` 預設 0.35，連續 `kcf_lab_change_confirmations`（預設 3）
-個不同處理影格低於門檻即移除該追蹤並提前要求 SAM3，不必等漏檢次數達上限。
-相似度介於 0–1，越高越相近；門檻設 0 可停用，修改後重啟。
-保留中的框輸出 `kcf_lab_similarity` 與 `kcf_lab_changed_frames` 供診斷。
-這是色彩分布檢查，同色背景／物件可能無法區分，光照／曝光劇變也可能觸發，需實景校準。
-
-被淘汰的身分也會從恢復快取移除。網頁物品清單
-顯示 track 狀態、SAM3 age 及 miss 次數。首次辨識就是 `unknown` 的物件仍可保留；
-同一 `track_id` 曾有有效分類、後來辨識為 `unknown` 時，在新結果交接後立即淘汰，
-同步清除 KCF、ROI、生命週期與身分恢復快取，不等 SAM3 miss 限制。
-先完成物件配對再淘汰，避免舊的已知 tracker 被當成漏偵測物件保留回來。
-此規則適用同步與非同步模式；判斷依新的辨識結果，不依 KCF 更新影格。
-失效的 KCF 不顯示舊框，但保留最後身分一秒供鄰近位置
-重新配對；逾時、相機或設定 context 改變後不沿用舊身分。外觀近似物品交叉或
-移動過遠仍可能換 ID，這版配對尚未加入外觀特徵。同步模式（間隔為 1）仍逐幀
-使用 SAM3，沒有 KCF 可以在漏偵測時保留。
-
-在工作區根目錄執行，不需啟動相機或載入部署引擎：
+## 回歸測試
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
-dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests
+export PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}"
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests
 ```
 
-使用專案 TRT11 Python 環境，並先載入 ROS 2 Jazzy；若 `isaac_ros_apriltag_interfaces` 安裝於額外的工作區，還需載入該工作區環境。保留既有 `PYTHONPATH`，讓 ROS 訊息可匯入。停用自動載入 pytest 外掛，是為了避免未使用的 ROS launch-testing 外掛引入額外依賴；本套測試不依賴外掛。
+使用專案 `.venv` 與系統 ROS 訊息套件，不需啟動相機或載入部署引擎。停用 pytest 自動外掛載入可避免 ROS launch-testing 的額外依賴。`ipc_fake_worker.py` 是 IPC 測試的必要子程序 fixture。
 
-| 測試 | 保留原因 |
+| 範圍 | 測試 |
 | --- | --- |
-| `test_sam3.py` | Prompt 驗證、分數、原圖座標與 head 輸入 |
-| `test_tracked_recognition.py` | DINO 隨 KCF 組生命週期快取、新組重辨識、遺失清除、圖庫重分類與同步模式 |
-| `test_grounded.py` | 物品辨識、unknown、框過濾、圖庫更新與熱圖 |
-| `test_patches.py`、`test_reference_gallery.py` | DINOv3 前處理、patch 順序與參考圖對齊 |
-| `test_trt_backend.py`、`test_build_dinov3.py` | 引擎輸入限制、建置產物與驗證證據 |
-| `test_frame_pool.py`、`test_grounding_ipc.py` | 共享影格生命週期、子程序失敗、逾時與清理 |
-| `test_realtime.py`、`test_h264_stream.py` | 最新影格排程、發布與繪圖互不阻塞、共用 H.264 編碼、IDR 恢復、ROS 封包與雙 WebRTC 接收端實際解碼（不重新編碼） |
-| `test_cloud_filter.py`、`test_depth_bbox.py`、`test_depth_sync.py` | 深度同步、有效座標、3D 框與 ROS 訊息 |
-| `test_apriltag.py` | Isaac ROS 訊息序列化、座標及空結果發布 |
-| `test_bbox_visualization.py` | 2D/3D 框投影、config 指定單一模式與首頁顯示 |
-| `test_image_manager.py`、`test_camera_capture.py` | 圖庫、去背、相機擷取與 bbox 預覽 |
-| `test_tracking.py` | bbox 移動平均、跨偵測配對、同幀修正與歷史重設 |
-| `test_async_kcf.py` | 背景 SAM3 與 DINO 共用排程且不卡住 KCF、偵測影格初始化／補追及框分類原子交接、過期結果與呼叫／時間預算、租約及錯誤處理 |
-| `test_kcf.py` | SAM3 間隔、KCF 框更新、失敗補偵測、重設與實際 OpenCV 追蹤 |
+| NvDCF 非同步交接、DINO 延後分類、失追／漏偵測與資源回收 | `test_async_nvdcf.py` |
+| 幾何配對、公開 ID、生命週期與框平滑 | `test_tracking.py` |
+| SAM3 prompt、官方前處理、原圖框與分數 | `test_sam3.py` |
+| Cat2Real 前處理、patch 特徵、圖庫與 DINO／Lab 分類 | `test_cat2real.py`、`test_patches.py`、`test_reference_gallery.py`、`test_grounded.py`、`test_lab_similarity.py` |
+| 分類快取與節點辨識流程 | `test_tracked_recognition.py` |
+| 共享影格租約、IPC 失敗／逾時與清理 | `test_frame_pool.py`、`test_grounding_ipc.py` |
+| 深度、3D 框、點雲篩選及背景刷新 | `test_depth_*.py`、`test_bbox3d_fit.py`、`test_cloud_filter.py`、`test_async_bbox3d*.py` |
+| ROS 訊息、疊圖、即時排程與影像串流 | `test_apriltag.py`、`test_bbox_visualization.py`、`test_realtime.py`、`test_h264_stream.py`、`test_timing.py` |
+| 圖庫管理、相機擷取與前端互動 | `test_image_manager.py`、`test_camera_capture.py`、`test_images_ui.cjs` |
+| TensorRT 輸入與缺失產物處理 | `test_trt_backend.py` |
 
-`ipc_fake_worker.py` 是 IPC 測試必要的子程序 fixture，不能當作一般診斷腳本刪除。
-
-前端互動測試另需 Node.js：
+前端互動測試需要 Node.js：
 
 ```bash
 node --test dinov3_ws/tests/test_images_ui.cjs
 ```
 
-這組測試檢查手動 prompt 輸入、輪詢保留文字、擷取驗證、重複點擊與 bbox 預覽。
+## GPU 整合檢查
 
-## 部署整合驗證
-
-以下工具需要實際 GPU、模型與 ROS 環境，修改引擎或部署流程時才執行，不納入日常 pytest：
-
-- `check_gpu_environment.py`：檢查 CUDA driver、PyTorch allocation 與 TensorRT Builder。
-- `check_sam3_trt_pipeline.py`：轉交 `check_official_pipeline.py`，驗證官方 SAM3 單／四類別、Cat2Real 與同環境 TRT11 IPC。
-- `check_async_kcf_pipeline.py`：真實 SAM3／DINOv3 流程，先以 30 FPS 持續輸入並延遲首次 SAM3，確認以最新 RGB 初始化並略過偵測期間影格；再刻意阻塞穩態背景 SAM3，確認前景 KCF 持續完成、SAM3 偵測影格上完成 DINOv3 後，框、分類與診斷圖片一起交接。
-- `check_grounded_trt_pipeline.py`：實際SAM3／Cat2Real HTTP／ROS 流程，以及刻意阻塞 H.264 編碼時的 bbox 發布。
-
-從工作區根目錄執行：
+需實際 GPU、ROS 與模型。先載入上述 ROS／PYTHONPATH，再設定動態函式庫：
 
 ```bash
-LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
-PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:$PYTHONPATH" \
-dinov3_ws/.venv/bin/python dinov3_ws/tests/check_sam3_trt_pipeline.py
+export LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_gpu_environment.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_official_pipeline.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_async_nvdcf_pipeline.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_grounded_trt_pipeline.py
 ```
 
-其他部署工具使用相同環境，替換腳本名稱即可。工具會載入實際模型並寫出驗證報告，執行前可查看腳本中的輸出位置。
+`check_official_pipeline.py` 檢查 FP32 bbox、1–4 類別、Cat2Real 圖庫、IPC parity 與模型來源；`check_async_nvdcf_pipeline.py` 驗證 DINO 阻塞時仍先輸出框並持續追蹤；`check_grounded_trt_pipeline.py` 檢查 HTTP／ROS 與編碼阻塞時的框發布。共同測試影像為 `artifacts/validation/person.jpg`。
+
+原生 NvDCF 的基礎功能、跨 context 交接與遮擋恢復可分別執行：
+
+```bash
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf_handoff.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf_occlusion.py
+```
+
+模型數值驗證使用 `dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --validate-only`；不會重新編譯。
 
 ## 效能診斷
 
-效能量測入口，按問題選用：
+保留的工具依問題選用，使用相同環境，執行 `--help` 查看必要參數：
 
-- `profile_camera_input.py`：只看 ROS 相機輸入的 FPS 與影格年齡。
-- `profile_grounding_stages.py`：以儲存影像量測 SAM3 worker 與共享記憶體傳輸。
-- `profile_camera_pipeline.py`：量測真實相機的整體辨識流程。
+- `profile_camera_input.py`：相機接收 FPS、影格年齡與 QoS。
+- `profile_camera_pipeline.py`：真實相機與各模型階段耗時。
+- `profile_grounding_stages.py`：儲存影像的 SAM3 worker 與共享記憶體耗時。
+- `profile_live_localhost.py`：本機服務狀態與串流量測。
+- `profile_depth_bbox.py`：指定基準程式與儲存深度，對照 3D 框計算。
 
-使用部署整合驗證的 Python 與環境，附上 `--help` 可查看參數。將結果輸出至 `dinov3_ws/artifacts/`，不放進測試程式目錄。
-
-
-### KCF 延遲與 SAM3 間隔比較
-
-```bash
-source /opt/ros/jazzy/setup.bash
-LD_LIBRARY_PATH="$PWD/dinov3_ws/.venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}" \
-PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \
-dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_kcf_intervals.py \
-  --intervals 30 15 10 5 30 --seconds 20 --warmup-seconds 5 \
-  --output dinov3_ws/artifacts/kcf_interval_profile.json
-```
-
-使用目前 YAML 設定與真實相機、SAM3、DINOv3，直接計時主流程 KCF 與背景 replay，保存每幀資料及 median／p95。初始化與切換間隔期間持續接收相機輸入，使用正式流程的初始化等待與 replay 預算；每組仍在首次結果後暖機再量測穩態。冷啟動連續輸入與首次交接另由 `check_async_kcf_pipeline.py` 驗證。測試程序使用隨機 HTTP port，不修改正式參數檔。`kcf_update_ms` 包含 RGB→BGR、所有物件 KCF 更新與框整理；`kcf_detect_stage_ms` 另外包含主流程的影像準備、深度等待及非同步排程。間隔以處理影格計算，應搭配 `processed_frame_fps` 解讀。
-
-
-`profile_kcf_threads.py` 比較 OpenCV 的 `1 / 2 / 4 / 14` 個內部執行緒。以固定 ROI 追蹤相同靜態相機影像中的手動標註框，在實際相機驅動繼續運作時，分別量測前景 KCF、前景＋持續背景 replay；加上 `--preview` 則改測 replay＋30 FPS 的 960×540 縮放、色彩轉換與共用 H.264 編碼。各組先暖機，三輪交替正反順序，每組預設 3 秒，執行緒池只在所有測試 worker 停止時調整。程序 CPU 的 100% 代表一個 CPU 核心；system CPU 是全機平均。這是靜態輸入 CPU 壓力測試，未執行 SAM3／DINOv3，不能視為模型推論 FPS。
-
-```bash
-PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \
-dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_kcf_threads.py \
-  --image dinov3_ws/artifacts/kcf_roi_camera_sample.png \
-  --boxes dinov3_ws/artifacts/kcf_roi_manual_boxes.json \
-  --preview --output dinov3_ws/artifacts/kcf_threads_preview.json
-```
-
-
-相機輸入量測需使用與待測服務一致的 QoS；目前 Orbbec 部署選用 RELIABLE、KEEP_LAST depth=1。沿用上方 ROS/Python 環境執行：
-
-```bash
-dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_camera_input.py \
-  --reliability reliable --queue-depth 1 --seconds 10 \
-  --output dinov3_ws/artifacts/camera_reliable_input.json
-```
-
-工具仍預設 best_effort、depth=5，以保留舊量測口徑。測到 best_effort 掉幀不能直接推論感測器本身幀率不足。`profile_kcf_intervals.py` 會額外輸出 `camera_callback_fps` 與實際 `image_reliability`，將輸入接收率和模型結果 FPS 分開。
-
-比較相同偵測間隔下的繪圖與深度成本，可執行 `profile_kcf_intervals.py --intervals 30 --seconds 10 --warmup-seconds 3 --output <report.json>`，依序加上 `--browser-streams`（要求兩路瀏覽器影像編碼）、`--no-pose`（停用深度同步／3D 框）。使用不同報告路徑；工具使用隨機 HTTP port。每份報告包含前景 KCF 計時與主迴圈各段耗時。此比較需要相機正在發布影像；只看到 launch 程序不代表有實際輸入。
-
-
-### 3D 框 ROI 轉換與射線快取比較
-
-使用已保存的同一批真實深度及修改前實作，分別量測整張轉換、ROI 轉換、ROI 加射線快取。工具逐欄比對所有 3D 與診斷輸出，並獨立記錄首次建表成本；固定 ROI 不代表 SAM3 實際偵測框，結果是此階段耗時而非完整流程 FPS。
-
-```bash
-PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}" \
-dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_depth_bbox.py \
-  --baseline dinov3_ws/artifacts/depth_bbox_optimization_20261018/baseline_depth_bbox.py \
-  --samples dinov3_ws/artifacts/depth_bbox_optimization_20261018 \
-  --output dinov3_ws/artifacts/depth_bbox_recheck.json
-```
-
-比較時保持相同背景負載；2026-10-18 的量測只有原相機驅動持續運作，無推論與 JPEG 負載。`--rounds` 和 `--repeats` 預設為 3 和 2，使用 12 張輸入時每種方案、每個情境有 72 個計時樣本。
-
-## 多物體 KCF 平行化
-
-`test_kcf_parallel.py` 驗證固定 Worker 所有權、init／update 執行緒一致、READY 凍結、generation 失效、mailbox 背壓、取消回收、快照 replay、同影格交接、失敗保留與 reset／關閉。`benchmark_kcf_parallel.py` 使用真實 OpenCV KCF，比較 1／2／3／5／8 個物體與串行／2／4／6 workers，記錄 batch P50/P95/P99、每物體時間、CPU、執行緒數及輸出一致性；支援 `--image`／`--boxes` 真實影像輸入。
-
-目前架構、重跑指令、Thor KCF 與 ROS2 輸出比較見 [KCF_PERSISTENT_WORKERS_20261029.md](KCF_PERSISTENT_WORKERS_20261029.md)。`profile_kcf_intervals.py --parallel-workers 0/4` 比較串行與固定 Worker，所有輸出 topics 隔離到 `/kcf_benchmark/*`；`--image` 可透過 ROS2 以 30 Hz 重播固定場景。舊 ThreadPool 結果保留於 [歷史報告](KCF_PARALLEL_20261029.md)。預設 `kcf_parallel_enabled: false`，啟用時維持 `opencv_num_threads: 1`。
+報告輸出至 `artifacts/`。相機診斷需與服務使用相同 Linux 使用者及 QoS；目前部署使用 RELIABLE、depth=1。效能數值須配合場景與負載判讀。

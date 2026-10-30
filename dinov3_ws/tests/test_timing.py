@@ -11,7 +11,7 @@ def test_first_result_and_context_change_start_a_new_measurement():
     assert rate.update(20.5, "upload") == pytest.approx(2)
 
 
-def test_sam3_kcf_cycle_uses_total_elapsed_time_not_average_instant_fps():
+def test_sam3_nvdcf_cycle_uses_total_elapsed_time_not_average_instant_fps():
     rate = ResultRate()
     rate.update(0.0, 1)
     now = 0.0

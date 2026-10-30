@@ -7,7 +7,7 @@ if [[ -z "${FASTDDS_DEFAULT_PROFILES_FILE:-}" && -z "${FASTRTPS_DEFAULT_PROFILES
   export FASTRTPS_DEFAULT_PROFILES_FILE="$script_dir/config/fastdds_rgbd.xml"
 fi
 
-# Background 3D/BLAS pools otherwise compete with per-frame KCF tracking.
+# Background 3D/BLAS pools otherwise compete with per-frame NvDCF tracking.
 # These defaults apply before NumPy/Open3D/Torch imports and to the SAM3 child.
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"

@@ -33,7 +33,8 @@ def camera(tmp_path):
         grounding_settings={'prompt': 'Detect bottle.', 'box_threshold': 0.3},
         grounding_detector=SimpleNamespace(validate_prompt=validate, detect=detect),
         bridge=SimpleNamespace(imgmsg_to_cv2=lambda frame, desired_encoding: pixels),
-        param=lambda name: {'grounding_nms_iou': 0.5, 'grounding_max_detections': 20,
+        param=lambda name: {'grounding_max_detections': 20,
+                            'grounding_containment_threshold': .8,
                             'grounding_min_bbox_width': 0, 'grounding_min_bbox_height': 0,
                             'grounding_min_bbox_area': 0}[name],
         clear_object_debug=lambda: None,
@@ -54,7 +55,8 @@ def test_capture_creates_exact_crops_and_refreshes_gallery(camera):
     np.testing.assert_array_equal(np.array(Image.open(node.root / 'medicine' / names[0])), pixels[3:10, 2:9])
     np.testing.assert_array_equal(np.array(Image.open(node.root / 'medicine' / names[1])), pixels[0:5, 10:16])
     np.testing.assert_array_equal(calls[0][0], pixels)
-    assert calls[0][1] == ('Detect box.', 0.3, 0.5, 20)
+    assert calls[0][1] == ('Detect box.', 0.3, 20)
+    assert calls[0][2]['containment_threshold'] == .8
     assert node.grounding_settings['prompt'] == 'Detect bottle.'
     assert node.generation == 1
     assert len(client.get('/api/images?case=medicine').json['images']) == 2
