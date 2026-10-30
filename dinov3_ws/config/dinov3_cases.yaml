@@ -58,7 +58,8 @@ dinov3_cases:
     # Full 3D center/size/rotation in background; independent of SAM3 interval.
     # Measure first processed RGB frame, then every bbox3d_interval unique processed frames.
     bbox3d_interval: 1
-    bbox3d_max_age: 1.5
+    # Retain the last valid 3D box through depth failures up to this capture age.
+    bbox3d_max_age: 1.0
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 80
     # Trim box-local axes at the configured quantiles; 0 uses full bounds.

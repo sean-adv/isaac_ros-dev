@@ -169,8 +169,19 @@ class AsyncBBox3D:
                             self.cloud_states[identity] = state
                             measured = {key: value for key, value in item.items()
                                         if key in ("bbox3d", "bbox3d_status")}
-                            self.cache[identity] = (measured, source, submitted)
-                    self.camera_info = inputs[1] if inputs is not None else None
+                            previous = self.cache.get(identity)
+                            if "bbox3d" not in measured and previous and "bbox3d" in previous[0]:
+                                # A rejected depth frame must not erase a recent valid
+                                # box. Keep its original capture time/source so repeated
+                                # failures cannot extend the max_age grace period.
+                                retained = dict(previous[0], bbox3d_status=(
+                                    "cached_after_depth_failure:"
+                                    + measured.get("bbox3d_status", "unknown")))
+                                self.cache[identity] = (retained, previous[1], previous[2])
+                            else:
+                                self.cache[identity] = (measured, source, submitted)
+                    if inputs is not None:
+                        self.camera_info = inputs[1]
                     self.last_ms = (time.monotonic() - started) * 1000
                     self.version += 1
             self.wake()

@@ -38,6 +38,10 @@ async function refreshDetections() {
       if (Number.isFinite(item.sam3_age_seconds)) row.textContent += ' · SAM3 ' + item.sam3_age_seconds.toFixed(1) + 's ago';
       if (item.sam3_misses) row.textContent += ' · missed ' + item.sam3_misses + ' refresh(es)';
     }
+    if (item.bbox3d_status) {
+      row.textContent += ' · 3D: ' + item.bbox3d_status;
+      if (Number.isFinite(item.bbox3d_age_seconds)) row.textContent += ' · depth ' + item.bbox3d_age_seconds.toFixed(1) + 's ago';
+    }
     list.append(row);
   }
 }

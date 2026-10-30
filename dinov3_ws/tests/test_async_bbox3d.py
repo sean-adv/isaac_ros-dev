@@ -156,6 +156,54 @@ def test_failed_measurement_replaces_previous_success():
         pipeline.close()
 
 
+@pytest.mark.parametrize('failure', ['insufficient_cloud_coverage',
+                                    'cloud_change_pending:1/3', 'exception', 'missing_depth'])
+def test_depth_failures_retain_valid_box_without_renewing_age(failure, monkeypatch):
+    completed = threading.Event()
+    clock = [10.]
+    monkeypatch.setattr('dinov3_cases.async_bbox3d.time.monotonic', lambda: clock[0])
+
+    def measure(items, inputs):
+        if inputs and inputs[0] == 'valid':
+            items[0].update(bbox3d=dict(position=[0., 0., 1.], size=[.2, .1, .01]),
+                            bbox3d_status='ok')
+        elif failure == 'exception':
+            raise RuntimeError('depth conversion failed')
+        else:
+            items[0]['bbox3d_status'] = failure
+
+    pipeline = AsyncBBox3D(measure, interval=1, wake=completed.set)
+    try:
+        queued, _, _ = submit(pipeline, inputs=('valid', 'calibration'), captured_at=10.)
+        assert completed.wait(1)
+        original, _ = pipeline.latest(queued)
+        for frame, now in [(2, 10.5), (3, 11.)]:
+            clock[0] = now
+            completed.clear()
+            queued, _, _ = submit(pipeline, frame, inputs=None, captured_at=now)
+            assert completed.wait(1)
+            output, info = pipeline.latest(queued)
+            assert info == 'calibration'
+            assert output[0]['bbox3d'] == original[0]['bbox3d']
+            assert output[0]['bbox3d_source'] == original[0]['bbox3d_source']
+            assert output[0]['bbox3d_age_seconds'] == now - 10.
+            reason = 'background_measurement_failed' if failure == 'exception' else failure
+            assert output[0]['bbox3d_status'] == 'cached_after_depth_failure:' + reason
+        clock[0] = 12.
+        expired, _ = pipeline.latest(queued)
+        assert 'bbox3d' not in expired[0]
+        assert expired[0]['bbox3d_status'] == 'stale_background_measurement'
+        completed.clear()
+        queued, _, _ = submit(pipeline, 4, inputs=('valid', 'calibration'), captured_at=12.)
+        assert completed.wait(1)
+        recovered, _ = pipeline.latest(queued)
+        assert recovered[0]['bbox3d_status'] == 'ok'
+        assert recovered[0]['bbox3d_source']['stamp']['sec'] == 4
+        assert recovered[0]['bbox3d_age_seconds'] == 0.
+    finally:
+        pipeline.close()
+
+
 def test_age_expiry_uses_source_capture_time_and_ros_preserves_measurement_stamp(worker, monkeypatch):
     pipeline, entered, release, completed, _, _ = worker
     monkeypatch.setattr('dinov3_cases.async_bbox3d.time.monotonic', lambda: 10.)
