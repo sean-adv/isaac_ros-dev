@@ -15,6 +15,6 @@ if [[ ! -f /opt/nvidia/deepstream/deepstream-9.1/lib/libnvds_nvmultiobjecttracke
   apt-get update
   apt-get install -y "$package"
 fi
-apt-get install -y g++ libmosquitto1 libyaml-cpp0.8
+apt-get install -y g++ pkg-config libavcodec-dev libavutil-dev libmosquitto1 libyaml-cpp0.8
 ldconfig
 bash "$project_dir/native/build_nvdcf.sh"

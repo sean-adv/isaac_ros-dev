@@ -24,4 +24,8 @@ export VIRTUAL_ENV="$venv_dir"
 export PATH="$venv_dir/bin:$PATH"
 export PYTHONPATH="$script_dir/src/dinov3_cases:${PYTHONPATH:-}"
 export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+# This pipeline communicates only with ROS nodes on this machine.
+# Override inherited SUBNET settings and remove explicit remote-discovery paths.
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+unset ROS_STATIC_PEERS ROS_DISCOVERY_SERVER ROS_LOCALHOST_ONLY
 exec "$VIRTUAL_ENV/bin/python" "$script_dir/launch_pipeline.py" "$@"

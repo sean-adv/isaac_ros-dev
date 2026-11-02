@@ -32,6 +32,20 @@ def prepare_sam3_pixels(image):
     return pixels[None]
 
 
+@torch.inference_mode()
+def prepare_sam3_tensor(image, device):
+    """GPU antialiased bilinear resize, uint8 rounding, then model normalization."""
+    device = torch.device(device)
+    if device.type != 'cuda':
+        return torch.from_numpy(prepare_sam3_pixels(image)).to(device, dtype=torch.float16)
+    rgb = torch.from_numpy(np.array(image.convert('RGB'), dtype=np.uint8)).to(device)
+    pixels = rgb.permute(2,0,1).unsqueeze(0).float()
+    pixels = torch.nn.functional.interpolate(pixels, size=(1008,1008), mode='bilinear',
+                                             align_corners=False, antialias=True)
+    pixels.round_().clamp_(0,255).mul_(1/127.5).sub_(1)
+    return pixels.to(torch.float16)
+
+
 def clean_text(text):
     return ' '.join(html.unescape(html.unescape(ftfy.fix_text(text))).strip().split()).lower()
 
@@ -93,10 +107,11 @@ class Sam3Detector:
         with self.lock:
             labels = self.validate_prompt(prompt)
             features, mask = self._text_features(labels)
-            pixels = torch.from_numpy(prepare_sam3_pixels(image)).to(self.device, dtype=torch.float16)
+            pixels = prepare_sam3_tensor(image, self.device)
             boxes, logits, presence = self.predict_tensors(pixels, features, mask)
-            scores = (logits.float().sigmoid() * presence.float().sigmoid()).cpu().numpy()
-            boxes = boxes.float().cpu().numpy()
+            scores = logits.float().sigmoid() * presence.float().sigmoid()
+            packed = torch.cat((boxes.float(), scores.unsqueeze(-1)), dim=-1).cpu().numpy()
+            boxes, scores = packed[...,:4], packed[...,4]
             if not np.isfinite(boxes).all() or not np.isfinite(scores).all():
                 raise RuntimeError('Non-finite SAM3 bbox outputs')
             all_boxes, confidence, names = [], [], []

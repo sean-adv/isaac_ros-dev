@@ -44,10 +44,10 @@ dinov3_cases:
     sam3_roi_center_y: 200
     recognition_threshold: 0.75
     # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
-    inference_hz: 0.0
     # One 960x540 overlay + H.264 encode shared by WebRTC and ROS. Restart to apply.
     video_fps: 30
     h264_bitrate: 2000000
+    video_backend: cpu  # cuda enables DeepStream GPU OSD + direct NVENC; benchmark first
     h264_encoder: auto  # NVENC first; libx264 fallback. Can explicitly select either.
     h264_topic: /medicine_recognition/image_annotated/h264
     # RViz2 Image display: raw 960x540 BGR overlay, published only when subscribed.
@@ -56,9 +56,9 @@ dinov3_cases:
     # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
     # Legacy pose_* names now configure corner/nearest-depth 3D boxes.
     pose_enabled: true
-    image_topic: /camera/camera/color/image_raw
-    depth_topic: /camera/camera/depth/image_raw
-    depth_camera_info_topic: /camera/camera/depth/camera_info
+    image_topic: /camera/color/image_raw
+    depth_topic: /camera/depth/image_raw
+    depth_camera_info_topic: /camera/depth/camera_info
     pose_sync_tolerance: 0.2
     pose_min_depth: 0.2
     pose_max_depth: 1.0
@@ -71,7 +71,8 @@ dinov3_cases:
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 80
     # Trim box-local axes at the configured quantiles; 0 uses full bounds.
-    bbox3d_quantile: 0.05
+    bbox3d_quantile: 0.03
+    bbox3d_plane_backend: cuda  # use cpu to compare the original Open3D RANSAC
     # Reject sparse/depth-jumping components after Z quantile trimming, before RANSAC.
     bbox3d_min_cloud_coverage: 0.15  # retained points / clipped bbox pixels
     bbox3d_min_coverage_ratio: 0.35  # relative to last accepted coverage

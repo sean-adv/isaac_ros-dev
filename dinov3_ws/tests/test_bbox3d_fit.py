@@ -89,3 +89,15 @@ def test_empty_pixel_targets_do_not_create_invalid_cuboids(target):
     fitted = fit_bbox3d_to_2d(measured, calibration(), target)
     assert fitted["fit_status"] == "invalid_target_or_depth"
     assert fitted["size"] == measured["size"]
+
+
+@pytest.mark.parametrize("model", ["plumb_bob", "rational_polynomial", "equidistant"])
+def test_projection_xyz_jacobian_agrees_with_central_differences(model):
+    info = calibration(model)
+    points = np.array([[.1,.05,1.],[-.2,.1,1.4],[.04,-.12,.7]])
+    pixels,jacobian = project_box_points(points,info,with_jacobian=True)
+    np.testing.assert_allclose(pixels,project_box_points(points,info),atol=1e-12)
+    for axis in range(3):
+        delta = np.zeros_like(points);delta[:,axis] = 1e-6
+        numeric = (project_box_points(points+delta,info)-project_box_points(points-delta,info))/2e-6
+        np.testing.assert_allclose(jacobian[:,:,axis],numeric,atol=1e-5,rtol=1e-7)

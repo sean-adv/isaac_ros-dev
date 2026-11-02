@@ -32,7 +32,11 @@ cd /home/ubuntu/workspaces/isaac_ros-dev
 HOST_WORKSPACE=/home/ubuntu/workspaces/isaac_ros-dev /path/to/start.sh
 ```
 
-Compose 使用 host network、host IPC、NVIDIA runtime 和 privileged 模式，供 ROS 2 discovery、GPU 及相機存取。
+Compose 使用 host network、host IPC、NVIDIA runtime 和 privileged 模式，供本機 ROS 2 通訊、GPU 及 USB 相機存取。
+ROS discovery 固定為 `LOCALHOST`，靜態 peers 與 discovery server 設為空。相機入口停用網路裝置列舉
+（`enumerate_net_device:=false`）；預設 Fast DDS 設定僅允許 UDP `127.0.0.1`，並保留共享記憶體傳輸。
+相機與辨識入口也會強制 `LOCALHOST` 並清除繼承的遠端 discovery 設定。
+修改入口或 DDS 設定後須重新啟動相機及辨識程序；Compose 環境變更須在 host 執行 `./start.sh --detach` 套用。
 USB 掛載必須存在；X11 socket、Xauthority、Jetson 版本資訊、tegrastats、VPI、multimedia/SIPL API
 與 jtop socket 則由腳本依 host 實際存在的路徑加入掛載。X11 使用既有的 host 授權檔，不自動修改 `xhost`。
 不掛載 host 的 AWS / SSH 憑證或覆蓋容器的 `.bashrc`。

@@ -57,6 +57,17 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf_occlusion.py
 
 ## 效能診斷
 
+GPU 優化回歸使用 `test_gpu_acceleration.py`，會實際載入 CUDA helper、NvDCF 及可用的 GPU 編碼器。需先完成原生建置。包含 GPU 平面擬合、ROI 插值、共享記憶體追蹤、影片色彩及 CPU/GPU 編碼切換的 IDR／時間戳檢查。
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests/test_gpu_acceleration.py
+dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_gpu_pipeline.py --samples /tmp/bbox_capture.npz --metadata /tmp/bbox_capture.json --output /tmp/gpu_stages.json --models
+```
+
+重播工具接受含 `rgb`／`depth` 的 NPZ，以及含 `info`／`detections` 的 JSON。`--baseline-depth` 可指定變更前的 `depth_bbox.py` 做相同輸入對照；報告是個別階段時間，不是相機端到端延遲。
+
+本次目前 RANSAC 路徑測試（排除工作區殘留的未追蹤舊 PCA `test_surface_pose.py`）為 486 通過、2 失敗。兩項 `/api/resources` 404 測試在原始 HEAD 也同樣失敗，與本次優化無關。
+
 保留的工具依問題選用，使用相同環境，執行 `--help` 查看必要參數：
 
 - `profile_camera_input.py`：相機接收 FPS、影格年齡與 QoS。

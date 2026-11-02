@@ -9,8 +9,8 @@ from .runtime import MODEL_ID, DINO_ENGINE
 
 
 def validate_shape(shape, minimum, maximum):
-    if len(shape) != 4 or shape[:2] != (1, 3):
-        raise ValueError(f'TRT requires batch=1 and RGB NCHW; received {shape}.')
+    if len(shape) != 4 or shape[0] < 1 or shape[1] != 3:
+        raise ValueError(f'TRT requires a positive batch and RGB NCHW; received {shape}.')
     if any(n < low or n > high for n, low, high in zip(shape, minimum, maximum)):
         raise ValueError(f'TRT input {shape} is outside {minimum} .. {maximum}.')
 
@@ -36,8 +36,11 @@ class TRTBackbone:
                                       num_register_tokens=4, hidden_size=1024)
         self.lock = threading.Lock()
         self.scripted = torch.jit.load(str(path), map_location=self.device).eval()
-        self.minimum = self.maximum = (1, 3, 384, 384)
-        self.description = 'Official Torch-TensorRT Cat2Real ViT-L/16 FP32 (384×384)'
+        self.minimum = tuple(info.get('min_shape', info['input_shape']))
+        self.maximum = tuple(info.get('max_shape', info['input_shape']))
+        if self.minimum != (1,3,384,384) or self.maximum[1:] != (3,384,384) or not 1 <= self.maximum[0] <= 8:
+            raise ValueError('Unsupported Cat2Real batch profile')
+        self.description = f'Official Torch-TensorRT Cat2Real ViT-L/16 FP32 (384×384, batch≤{self.maximum[0]})'
 
     @torch.inference_mode()
     def __call__(self, pixel_values):
@@ -46,7 +49,7 @@ class TRTBackbone:
             raise ValueError(f'TRT input must be on {self.device}, got {pixel_values.device}.')
         with self.lock, torch.cuda.device(self.device):
             y = self.scripted(pixel_values.float().contiguous())
-            if tuple(y.shape) != (1, 581, 1024):
+            if tuple(y.shape) != (pixel_values.shape[0], 581, 1024):
                 raise RuntimeError(f'Unexpected Cat2Real output shape: {tuple(y.shape)}')
             if not torch.isfinite(y).all():
                 raise RuntimeError('Non-finite Cat2Real features')

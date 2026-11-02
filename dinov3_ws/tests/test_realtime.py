@@ -1,4 +1,4 @@
-"""Latency regressions: latest-only streams and start-to-start scheduling."""
+"""Latency regressions: latest-only streams and input-driven scheduling."""
 
 from collections import deque
 from types import SimpleNamespace
@@ -28,18 +28,19 @@ def test_model_timings_topic_contains_only_latest_milliseconds():
         assert json.loads(node.model_timings_pub.publish.call_args.args[0].data) == payload
 
 
-def test_rate_limit_subtracts_processing_time():
-    node = SimpleNamespace(image_changed=Mock(), stop=Mock(), param=lambda _: 20.0)
-    node.stop.is_set.return_value = False
-    node.stop.wait.return_value = False
-    with patch("dinov3_cases.node.time.monotonic", side_effect=[0.0, 0.0, 0.03, 0.05, 0.15, 0.15]):
-        ticks = CaseNode.worker_ticks(node)
+def test_worker_wakes_on_input_or_timeout_and_stops_before_processing():
+    node = SimpleNamespace(image_changed=Mock(), stop=threading.Event())
+    ticks = CaseNode.worker_ticks(node)
+    # A signaled input and a periodic timeout both allow processing.
+    node.image_changed.wait.side_effect = [True, False, True]
+    next(ticks)
+    next(ticks)
+    # Shutdown during the wait must not start another processing pass.
+    node.image_changed.wait.side_effect = lambda timeout: node.stop.set()
+    with pytest.raises(StopIteration):
         next(ticks)
-        next(ticks)
-        next(ticks)
-    assert [call.args[0] for call in node.stop.wait.call_args_list] == pytest.approx(
-        [0.0, 0.02, 0.0]
-    )
+    assert [call.args[0] for call in node.image_changed.wait.call_args_list] == [0.1] * 3
+    assert node.image_changed.clear.call_count == 3
 
 
 def test_requested_debug_revision_survives_new_inference(tmp_path):

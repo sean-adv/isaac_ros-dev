@@ -20,6 +20,11 @@ bash dinov3_ws/run.sh --ros-args -p port:=8091
 
 相機使用已安裝的 `orbbec_camera`；若位於其他 ROS 工作區，可設定 `ORBBEC_SETUP=/path/to/install/setup.bash`。RGB、深度與 CameraInfo 訂閱採 RELIABLE、KEEP_LAST、depth=1。跨使用者啟動可能影響 Fast DDS 共享記憶體通訊。
 
+相機入口使用 `enumerate_net_device:=false`，停用區網相機列舉。相機與辨識入口均強制
+`ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`，並清除 `ROS_STATIC_PEERS`、`ROS_DISCOVERY_SERVER`
+與舊的 `ROS_LOCALHOST_ONLY` 設定。預設 Fast DDS UDP 僅允許 `127.0.0.1`，保留共享記憶體傳輸。
+若自行指定 DDS profile，請同樣限制網路介面。修改後須重啟相機與辨識程序才會生效。
+
 ## 環境與模型
 
 需由系統提供 Python 3.12、ROS 2 Jazzy、CUDA driver/runtime、cv_bridge、vision_msgs、isaac_ros_apriltag_interfaces 與相機驅動。Python 相依套件與模型均位於 `dinov3_ws`，不需要相鄰模型專案。
@@ -67,6 +72,33 @@ dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --validate-only
 Cat2Real 固定 revision `a763964f2041722ffcc5bc4c72e3cb241530727e`，SAM3 固定 `3c879f39826c281e95690f02c7821c4de09afae7`。建置要求完整編譯 vision 圖；儲存後重新載入，與原始 FP32 權重比較，通過才寫入同名 `.json` 部署中繼資料。各模型目錄的 `validation.json` 保存 SHA256、版本、樣本結果與測速。
 
 Cat2Real 在 Thor 固定使用 FP32，避免 FP16 非有限輸出。SAM3 只編譯 vision；bbox head 與文字編碼使用官方 PyTorch 模組，不執行 mask 或 SAM3 tracking。
+
+## GPU 延遲優化
+
+目前預設使用 CUDA RANSAC、NvDCF RGB 共享記憶體傳輸及 GPU 縮放、SAM3 GPU 前處理，以及 DINO 同一影格內的 ROI 批次推論與圖庫矩陣比對。RANSAC 的最後平面精修、深度連通區與小型投影擬合仍在 CPU；投影擬合使用解析 Jacobian，減少數值差分。`bbox3d_quantile` 維持 `0.05`。
+
+在 Thor / CUDA 13 / DeepStream 9.1 上，從工作區根目錄建置原生程式：
+
+```bash
+bash dinov3_ws/native/build_gpu_geometry.sh
+bash dinov3_ws/native/build_nvdcf.sh
+bash dinov3_ws/native/build_video_gpu.sh
+```
+
+需要 CUDA 開發工具、DeepStream headers、`g++`、`pkg-config`、`libavcodec-dev`、`libavutil-dev`。`setup_all.sh` 與原生 Dockerfile 已包含建置步驟；其他 GPU 可用 `CUDA_ARCH` 指定架構。原生程式使用獨立程序，避免 DeepStream 與 Python TensorRT 函式庫衝突。
+
+另建並驗證模型，不覆蓋原有單筆引擎：
+
+```bash
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target cat2real --max-batch-size 8
+dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target sam3 --artifact-suffix native
+```
+
+驗證通過後寫入同名 `.json`，啟動時優先選用 `cat2real-fp32-batch8-trt.ts` 與 `vision-fp16-native.ts`。DINO 保持 FP32，支援 batch 1–8，僅合併本次影格已有的物件，不等待後續影格。沒有新引擎時沿用原有單筆版本。TensorRT 引擎應在實際部署 GPU 上重新建置。
+
+`bbox3d_plane_backend: cpu` 可切回 Open3D RANSAC。`video_backend: cuda` 可啟用 DeepStream GPU 疊圖與直接 NVENC；預設仍為 `cpu` 疊圖搭配既有 NVENC，因測量未顯示 GPU 疊圖有穩定優勢。GPU 疊圖模式有 ROS annotated image 訂閱者時改走共用 CPU 疊圖。GPU 前處理與 OpenCV/PIL 的插值可能有一個 RGB 灰階的差異，已檢查描述子與 SAM3 偵測框。
+
+2026-11-02 Thor 上相同已保存 RGB-D 的階段中位數：3D bbox `70.54 → 50.30 ms`，NvDCF 輸入與追蹤 `8.78 → 2.30 ms`，四個物件 DINO `180.25 → 160.52 ms`，SAM3 前處理 `28.16 → 4.43 ms`。3D 收益同時包含解析 Jacobian 與 CUDA RANSAC；各階段不能相加當成端到端收益。原始樣本數據在 `artifacts/gpu_optimization_20261102/stages.json`。
 
 ## 設定與排程
 

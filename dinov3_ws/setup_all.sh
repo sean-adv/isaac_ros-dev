@@ -27,10 +27,10 @@ if [[ "$nvdcf_ready" == false && $EUID -ne 0 ]]; then
   sudo -v
 fi
 
-echo '[1/2] Setting up the Python environment...'
+echo '[1/3] Setting up the Python environment...'
 bash "$project_dir/setup_env.sh"
 
-echo '[2/2] Setting up NvDCF...'
+echo '[2/3] Setting up NvDCF...'
 if [[ "$nvdcf_ready" == true ]]; then
   echo "Using existing NvDCF bridge: $bridge"
 elif [[ $EUID -eq 0 ]]; then
@@ -38,5 +38,10 @@ elif [[ $EUID -eq 0 ]]; then
 else
   sudo bash "$project_dir/native/install_nvdcf.sh"
 fi
+
+echo '[3/3] Building CUDA geometry, native NvDCF and GPU video helpers...'
+bash "$project_dir/native/build_gpu_geometry.sh"
+bash "$project_dir/native/build_nvdcf.sh"
+bash "$project_dir/native/build_video_gpu.sh"
 
 echo 'Environment setup complete. Model download/build is a separate step; see BUILD_GUIDE.md.'

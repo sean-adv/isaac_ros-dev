@@ -99,6 +99,7 @@ class CaseNode(Node):
             bbox3d_depth_band=0.08,
             bbox3d_min_points=80,
             bbox3d_quantile=0.02,
+            bbox3d_plane_backend="cuda",
             bbox3d_min_cloud_coverage=0.15,
             bbox3d_min_coverage_ratio=0.35,
             bbox3d_max_depth_jump=0.10,
@@ -106,10 +107,10 @@ class CaseNode(Node):
             engine_path=str(DINO_ENGINE),
             port=8090,
             host="127.0.0.1",
-            inference_hz=0.0,
             video_fps=30,
             h264_bitrate=2_000_000,
             h264_encoder="auto",
+            video_backend="cpu",
             bbox_visualization_mode="3d",
         )
         for k, v in defaults.items():
@@ -151,9 +152,14 @@ class CaseNode(Node):
             or self.param("grounding_ipc_timeout") <= 0
         ):
             raise ValueError("grounding_ipc_timeout must be positive.")
-        if not np.isfinite(self.param("inference_hz")) or self.param("inference_hz") < 0:
-            raise ValueError("inference_hz must be finite and nonnegative; 0 is unlimited.")
-        self.video_encoder = H264Encoder(
+        video_backend = self.param("video_backend")
+        if video_backend not in ("cpu", "cuda"):
+            raise ValueError("video_backend must be cpu or cuda")
+        video_class = H264Encoder
+        if video_backend == "cuda":
+            from .gpu_video import GpuH264Encoder
+            video_class = GpuH264Encoder
+        self.video_encoder = video_class(
             self.param("h264_encoder"), self.param("video_fps"), self.param("h264_bitrate")
         )
         for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
@@ -258,6 +264,13 @@ class CaseNode(Node):
         self.publisher_worker.start()
         self.renderer_worker = threading.Thread(target=self.run_rendering, daemon=True)
         self.renderer_worker.start()
+        plane_backend = self.param("bbox3d_plane_backend")
+        if plane_backend not in ("cuda", "cpu"):
+            raise ValueError("bbox3d_plane_backend must be cuda or cpu")
+        self.plane_fitter = None
+        if self.param("pose_enabled") and plane_backend == "cuda":
+            from .gpu_geometry import CudaPlaneFitter
+            self.plane_fitter = CudaPlaneFitter()
         self.bbox3d_worker = AsyncBBox3D(
             self.estimate_bboxes3d, interval=self.param("bbox3d_interval"),
             max_age=self.param("bbox3d_max_age"), wake=self.image_changed.set,
@@ -325,6 +338,7 @@ class CaseNode(Node):
                 depth_band=self.param("bbox3d_depth_band"),
                 min_points=self.param("bbox3d_min_points"),
                 quantile=self.param("bbox3d_quantile"),
+                plane_fitter=getattr(self, "plane_fitter", None),
                 cloud_filter=self.cloud_filter,
                 cloud_frame=(depth_msg.header.frame_id, depth_msg.header.stamp.sec,
                              depth_msg.header.stamp.nanosec),
@@ -334,15 +348,12 @@ class CaseNode(Node):
                 item["bbox3d_status"] = str(error)
 
     def worker_ticks(self):
-        """Wake on input; rate limit start-to-start, never sleep after processing."""
-        deadline = 0.0
+        """Wake on input and periodically recheck non-image changes."""
         while not self.stop.is_set():
             self.image_changed.wait(0.1)  # Also recheck uploads, settings and gallery changes.
             self.image_changed.clear()
-            if self.stop.wait(max(0.0, deadline - time.monotonic())):
+            if self.stop.is_set():
                 return
-            hz = float(self.param("inference_hz"))
-            deadline = time.monotonic() + (1 / hz if hz > 0 else 0)
             yield
 
     def run_publications(self):
@@ -441,6 +452,10 @@ class CaseNode(Node):
                         cached, last_key = None, None
                         last_generation = generation
                     start = time.monotonic()
+                    render = render_display_overlay
+                    if getattr(self.video_encoder, "gpu_render", False) is True and not image_readers:
+                        from .gpu_video import prepare_gpu_display_frame
+                        render = prepare_gpu_display_frame
                     if job is not None:
                         frame, detections, header, gen, seq, info, completed_at = job
                         if gen == generation:
@@ -453,7 +468,7 @@ class CaseNode(Node):
                                            ("bbox3d" in item and info is not None))
                                           for item in detections)
                             if source == "upload" or (visible and time.monotonic() - completed_at < 3.0):
-                                pixels = render_display_overlay(
+                                pixels = render(
                                     frame.pixels, detections, info, self.bbox_visualization_mode)
                                 cached = (pixels, header, ("result", gen, seq, completed_at),
                                           completed_at)
@@ -482,7 +497,7 @@ class CaseNode(Node):
                             continue
                     if pixels is None:
                         rgb = self.bridge.imgmsg_to_cv2(camera, desired_encoding="rgb8")
-                        pixels = render_display_overlay(rgb, [], mode=self.bbox_visualization_mode)
+                        pixels = render(rgb, [], mode=self.bbox_visualization_mode)
                     if header is None:
                         header = Header(stamp=self.get_clock().now().to_msg())
                     if image_readers:
@@ -612,6 +627,9 @@ class CaseNode(Node):
                 self.pending_render[0].release()
                 self.pending_render = None
         self.frame_pool.close()
+        fitter = getattr(self, "plane_fitter", None)
+        if fitter is not None:
+            fitter.close()
         return super().destroy_node()
 
     def clear_object_debug(self):

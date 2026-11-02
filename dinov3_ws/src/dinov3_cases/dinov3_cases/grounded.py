@@ -223,6 +223,18 @@ class ObjectGallery:
                 label="unknown", score=None, candidate=None, margin=None, reason="empty_gallery"
             )
         dino, lab = self.similarities(descriptor, lab_histogram)
+        return self._classify_scores(dino, lab, threshold)
+
+    def classify_batch(self, descriptors, threshold, margin, *, lab_histograms):
+        """One GPU matrix multiply/host transfer for all current object scores."""
+        if self.features is None:
+            return [dict(label="unknown", score=None, candidate=None, margin=None,
+                         reason="empty_gallery") for _ in descriptors]
+        dino = (descriptors @ self.features.T).clamp(-1, 1).cpu().numpy()
+        lab = np.sqrt(np.asarray(lab_histograms)[:,None,:] * self.lab_histograms[None,:,:]).sum(axis=2).clip(0,1)
+        return [self._classify_scores(d, l, threshold) for d,l in zip(dino,lab)]
+
+    def _classify_scores(self, dino, lab, threshold):
         eligible = np.flatnonzero(dino >= threshold).tolist()
         ranked = self._rank_references(dino, lab, eligible)
         if ranked:
@@ -247,7 +259,6 @@ class ObjectGallery:
             reference=dict(case=label, name=Path(self.paths[best]).name),
         )
 
-
 def recognize_objects(
     image,
     proposals,
@@ -261,13 +272,24 @@ def recognize_objects(
     defer_diagnostics=False,
 ):
     results = []
-    for proposal in proposals:
-        roi = image.crop(proposal["bbox"])
-        prepared, patches, descriptor = encode_object(encoder, roi, max_side, stride)
-        lab_histogram = compute_lab_histogram(roi)
-        classification = gallery.classify(
-            descriptor, threshold, margin, lab_histogram=lab_histogram
-        )
+    if not proposals:
+        return results
+    rois = [image.crop(proposal["bbox"]) for proposal in proposals]
+    if hasattr(encoder, 'encode_regions'):
+        encoded = encoder.encode_regions(image, [proposal["bbox"] for proposal in proposals])
+    else:
+        encoded = [encode_object(encoder, roi, max_side, stride) for roi in rois]
+    if len(encoded) != len(proposals):
+        raise ValueError("Encoder did not return one result per ROI")
+    histograms = [compute_lab_histogram(roi) for roi in rois]
+    if hasattr(gallery, 'classify_batch'):
+        classifications = gallery.classify_batch(
+            torch.stack([row[2] for row in encoded]), threshold, margin, lab_histograms=histograms)
+    else:
+        classifications = [gallery.classify(row[2], threshold, margin, lab_histogram=histogram)
+                           for row,histogram in zip(encoded,histograms)]
+    for proposal,roi,row,lab_histogram,classification in zip(proposals,rois,encoded,histograms,classifications):
+        prepared, patches, descriptor = row
         result = dict(proposal, **classification)
         if diagnostics is not None:
             # The crop already owns its pixels; retain it for on-demand diagnostics.

@@ -44,21 +44,24 @@ class ProjectionRayCache:
         return self._rays
 
 
-def _surface_rotation(points, threshold, min_points):
+def _surface_rotation(points, threshold, min_points, plane_fitter=None):
     """Dominant plane + longest rectangle edge; columns map local to camera.
 
     Open3D estimates and refines the plane on the full component in native code.
     Normal points away from the camera; the long axis has its largest camera
     component positive. These conventions cannot resolve 180-degree symmetry.
     """
-    cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
-    try:
-        plane, indices = cloud.segment_plane(
-            distance_threshold=threshold, ransac_n=3, num_iterations=128,
-            probability=0.999,
-        )
-    except RuntimeError as error:
-        raise ValueError("plane_segmentation_failed") from error
+    if plane_fitter is not None:
+        plane, indices = plane_fitter.fit(points, threshold)
+    else:
+        cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+        try:
+            plane, indices = cloud.segment_plane(
+                distance_threshold=threshold, ransac_n=3, num_iterations=128,
+                probability=0.999,
+            )
+        except RuntimeError as error:
+            raise ValueError("plane_segmentation_failed") from error
     normal = np.asarray(plane[:3], dtype=np.float64)
     length = np.linalg.norm(normal)
     if not np.isfinite(plane).all() or length < 1e-12:
@@ -103,7 +106,7 @@ def _rotation_quaternion(rotation):
 def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
                     depth_band=0.08, min_points=80, quantile=0.02,
                     depth_scale=1.0, ray_cache=None, plane_threshold=0.005,
-                    cloud_filter=None, cloud_state=None, cloud_frame=None):
+                    cloud_filter=None, cloud_state=None, cloud_frame=None, plane_fitter=None):
     """Segment around the central median Z and bound its visible point cloud.
 
     RANSAC fits the visible plane; its longest rectangle edge sets local X.
@@ -201,7 +204,7 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     plane_inliers = 0
     try:
         rotation, plane_inliers, orientation_status = _surface_rotation(
-            plane_points, plane_threshold, min_points)
+            plane_points, plane_threshold, min_points, plane_fitter)
     except (ValueError, np.linalg.LinAlgError, cv2.error) as error:
         orientation_status = "camera_aligned_fallback:" + str(error)
     origin = points.mean(axis=0)
@@ -224,6 +227,7 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     return dict(position=position.tolist(), size=size.tolist(),
                 rotation=rotation.tolist(), orientation_status=orientation_status,
                 plane_inlier_count=plane_inliers, plane_threshold=float(plane_threshold),
+                plane_backend=(plane_fitter.backend if plane_fitter is not None else "open3d_cpu"),
                 corners=points[samples].tolist(), corner_depths=depths[samples].tolist(),
                 corner_pixels=corner_pixels.tolist(),
                 corner_sample_pixels=pixels[samples].astype(int).tolist(),
@@ -261,20 +265,23 @@ def bbox_vertices(data):
     return local @ np.asarray(data.get("rotation", np.eye(3))).T + data["position"]
 
 
-def project_box_points(points, info):
+def project_box_points(points, info, *, with_jacobian=False):
     """Project camera-frame vertices with the overlay's calibration model."""
     k = np.asarray(info.k, dtype=np.float64).reshape(3, 3)
     distortion = np.asarray(info.d, dtype=np.float64)
     zero = np.zeros(3, dtype=np.float64)
     if info.distortion_model == "equidistant" and distortion.size == 4:
-        pixels, _ = cv2.fisheye.projectPoints(
+        pixels, jacobian = cv2.fisheye.projectPoints(
             points.reshape(-1, 1, 3), zero, zero, k, distortion)
+        xyz_jacobian = jacobian[:,11:14]
     elif info.distortion_model in ("plumb_bob", "rational_polynomial", ""):
-        pixels, _ = cv2.projectPoints(
+        pixels, jacobian = cv2.projectPoints(
             points, zero, zero, k, distortion if distortion.size else None)
+        xyz_jacobian = jacobian[:,3:6]
     else:
         raise ValueError("unsupported_distortion_model")
-    return pixels.reshape(-1, 2)
+    pixels = pixels.reshape(-1, 2)
+    return (pixels, xyz_jacobian.reshape(-1,2,3).copy()) if with_jacobian else pixels
 
 
 def fit_bbox3d_to_2d(data, info, bbox):
@@ -309,18 +316,42 @@ def fit_bbox3d_to_2d(data, info, bbox):
         pixels = project_box_points(points, info)
         return np.r_[pixels.min(axis=0), pixels.max(axis=0)]
 
-    def residual(parameters):
+    signs = np.array([(x,y,z) for z in (-1.,1.)
+                      for x,y in [(-1.,-1.),(1.,-1.),(1.,1.),(-1.,1.)]])
+    point_jacobian = np.concatenate((np.broadcast_to(np.eye(3),(8,3,3)),
+                                    rotation[None,:,:] * signs[:,None,:] / 2),axis=2)
+    cached_parameters, cached_result = None, None
+
+    def evaluate(parameters):
+        nonlocal cached_parameters, cached_result
+        if cached_parameters is not None and np.array_equal(parameters,cached_parameters):
+            return cached_result
         points = vertices(parameters)
-        # Keep trial projections finite while penalizing crossing the near plane.
-        near_penalty = np.maximum(.01 - points[:, 2], 0.)
-        points[:, 2] = np.maximum(points[:, 2], .01)
-        return np.r_[(bounds(points) - target) / span,
-                     1e-4 * (parameters - initial), 100. * near_penalty]
+        near = points[:,2] < .01
+        near_penalty = np.maximum(.01-points[:,2],0.)
+        points[:,2] = np.maximum(points[:,2],.01)
+        pixels, xyz_jacobian = project_box_points(points,info,with_jacobian=True)
+        xyz_jacobian[near,:,2] = 0.
+        pixel_jacobian = np.einsum('nij,njk->nik',xyz_jacobian,point_jacobian)
+        indices = np.r_[pixels.argmin(axis=0),pixels.argmax(axis=0)]
+        coordinates = np.array([0,1,0,1])
+        values = pixels[indices,coordinates]
+        residual = np.r_[(values-target)/span,1e-4*(parameters-initial),100.*near_penalty]
+        jacobian = np.vstack((pixel_jacobian[indices,coordinates]/span[:,None],
+                              1e-4*np.eye(6),-100.*point_jacobian[:,2,:]*near[:,None]))
+        cached_parameters, cached_result = parameters.copy(), (residual,jacobian)
+        return cached_result
+
+    def residual(parameters):
+        return evaluate(parameters)[0]
+
+    def derivative(parameters):
+        return evaluate(parameters)[1]
 
     lower = np.r_[initial[:2] - 2., .25, np.full(3, 1e-6)]
     upper = np.r_[initial[:2] + 2., 4., np.maximum(initial[3:] * 2., 4.)]
     try:
-        fitted = least_squares(residual, initial, bounds=(lower, upper),
+        fitted = least_squares(residual, initial, jac=derivative, bounds=(lower, upper),
                                max_nfev=100, ftol=1e-9, xtol=1e-9, gtol=1e-9)
         points = vertices(fitted.x)
         projected = bounds(points)

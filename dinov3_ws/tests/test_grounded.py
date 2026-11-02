@@ -465,3 +465,15 @@ def test_overlapping_boxes_below_containment_threshold_are_kept():
     result = clean_proposals(boxes, [.9, .8], ["box"] * 2, (120, 120),
                              containment_threshold=.95)
     assert [item["bbox"] for item in result] == boxes
+
+
+def test_batched_gallery_preserves_single_object_ranking_and_order(tmp_path):
+    encoder=ColorEncoder()
+    for name,color in [('red','red'),('blue','blue')]:
+        (tmp_path/name).mkdir();Image.new('RGB',(32,32),color).save(tmp_path/name/'one.png')
+    gallery=ObjectGallery();gallery.refresh(tmp_path,encoder,64,16)
+    descriptors=torch.tensor([[1.,0.,0.],[0.,0.,1.],[0.,1.,0.]])
+    histograms=[compute_lab_histogram(Image.new('RGB',(20,20),c)) for c in ('red','blue','green')]
+    expected=[gallery.classify(d,.75,.05,lab_histogram=h) for d,h in zip(descriptors,histograms)]
+    actual=gallery.classify_batch(descriptors,.75,.05,lab_histograms=histograms)
+    assert actual==expected

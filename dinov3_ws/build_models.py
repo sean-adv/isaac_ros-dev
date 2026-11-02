@@ -37,6 +37,8 @@ def metrics(reference, actual):
 
 
 def build(target, args):
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()
     import torch
     import torch_tensorrt
     import tensorrt as trt
@@ -57,7 +59,11 @@ def build(target, args):
     torch.manual_seed(0);torch.set_num_threads(8)
     torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False
     dtype=torch.float32 if spec['dtype']=='fp32' else torch.float16
-    path=out/spec['filename']
+    max_batch=args.max_batch_size if target=='cat2real' else 1
+    filename=(f'cat2real-fp32-batch{max_batch}-trt.ts' if max_batch>1 else spec['filename'])
+    if args.artifact_suffix:
+        filename=Path(filename).stem+"-"+args.artifact_suffix+Path(filename).suffix
+    path=out/filename
     def load(dtype):
         cls=AutoModel if target=='cat2real' else Sam3Model
         model=cls.from_pretrained(str(source),local_files_only=True,dtype=dtype).eval()
@@ -68,7 +74,10 @@ def build(target, args):
         model=load(dtype)
         example=torch.zeros((1,3,spec['size'],spec['size']),device='cuda',dtype=dtype)
         start=time.perf_counter()
-        compiled=torch_tensorrt.compile(model,ir='dynamo',inputs=[example],require_full_compilation=True)
+        profile=(torch_tensorrt.Input(min_shape=(1,3,spec['size'],spec['size']),
+            opt_shape=(min(4,max_batch),3,spec['size'],spec['size']),
+            max_shape=(max_batch,3,spec['size'],spec['size']),dtype=dtype) if max_batch>1 else example)
+        compiled=torch_tensorrt.compile(model,ir='dynamo',inputs=[profile],require_full_compilation=True)
         compile_seconds=time.perf_counter()-start
         torch_tensorrt.save(compiled,str(path),output_format='torchscript',inputs=[example])
         del compiled,model
@@ -99,6 +108,15 @@ def build(target, args):
                 passed=all(v['finite'] and v['cosine']>=.99 and v['relative_l2']<=.15 for v in values)
             checks.append(dict(image=name,passed=passed,outputs=values))
             print(target, name, 'PASS' if passed else 'FAIL',flush=True)
+        if max_batch>1:
+            for batch in sorted({1,2,min(4,max_batch),max_batch}):
+                if batch>max_batch:continue
+                bx=x.expand(batch,-1,-1,-1).contiguous()
+                a,b=reference(bx),compiled(bx.to(dtype))
+                value=metrics(a,b)
+                passed=value['finite'] and value['cosine']>=.999 and value['relative_l2']<=.01
+                checks.append(dict(batch=batch,passed=passed,outputs=[value]))
+                print(target,'batch',batch,'PASS' if passed else 'FAIL',flush=True)
         for _ in range(10):compiled(x.to(dtype))
         torch.cuda.synchronize();times=[]
         for _ in range(50):
@@ -107,13 +125,17 @@ def build(target, args):
     metadata=dict(model_id=spec['model_id'],revision=spec['revision'],dtype=spec['dtype'],
         input_shape=[1,3,spec['size'],spec['size']],checkpoint_sha256=digest(source/'model.safetensors'),
         artifact_sha256=digest(path),torch=torch.__version__,torch_tensorrt=torch_tensorrt.__version__,
-        tensorrt=trt.__version__,gpu=torch.cuda.get_device_name(),require_full_compilation=True)
+        tensorrt=trt.__version__,gpu=torch.cuda.get_device_name(),
+        multi_processor_count=torch.cuda.get_device_properties(0).multi_processor_count,
+        require_full_compilation=True)
+    if max_batch>1:metadata.update(min_shape=[1,3,spec['size'],spec['size']],max_shape=[max_batch,3,spec['size'],spec['size']])
     if target=='cat2real':metadata.update(hidden_size=1024,patch_size=16,num_register_tokens=4,descriptor='normalized CLS/pooler_output')
     report=dict(passed=all(v['passed'] for v in checks),checks=checks,metadata=metadata,compile_seconds=compile_seconds,
         benchmark=dict(mean_ms=float(np.mean(times)),p50_ms=float(np.median(times)),p95_ms=float(np.percentile(times,95)),warmup=10,iterations=50),
         scope='Reloaded TRT vs fresh original FP32; model-only GPU timing; no AP claim')
-    (out/'validation.json').write_text(json.dumps(report,indent=2)+'\n')
-    if not report['passed']:raise RuntimeError(f'{target} validation failed; see {out}/validation.json')
+    validation_path=out/(path.stem+'.validation.json' if max_batch>1 or args.artifact_suffix else 'validation.json')
+    validation_path.write_text(json.dumps(report,indent=2)+'\n')
+    if not report['passed']:raise RuntimeError(f'{target} validation failed; see {validation_path}')
     path.with_suffix('.json').write_text(json.dumps(metadata,indent=2)+'\n')
     print(json.dumps(dict(target=target,passed=True,benchmark=report['benchmark'])),flush=True)
 
@@ -122,9 +144,13 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--target',choices=['all','sam3','cat2real'],default='all')
     p.add_argument('--artifacts',type=Path,default=ROOT/'artifacts')
+    p.add_argument('--max-batch-size',type=int,default=1,choices=range(1,9),help='Cat2Real dynamic batch profile; preserves the original batch-1 artifact')
+    p.add_argument('--artifact-suffix',default='',help='Build a separately named artifact without replacing the original')
     p.add_argument('--download',action='store_true',help='Download pinned official checkpoints/tokenizers')
     p.add_argument('--validate-only',action='store_true',help='Validate existing artifacts without recompiling')
     args=p.parse_args();args.artifacts=args.artifacts.resolve()
+    if args.artifact_suffix and not all(c.isalnum() or c in "-_" for c in args.artifact_suffix):
+        p.error("artifact suffix must contain only letters, digits, dash or underscore")
     for target in (SPECS if args.target=='all' else [args.target]):build(target,args)
 
 

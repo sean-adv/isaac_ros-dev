@@ -5,6 +5,7 @@ import select
 import struct
 import subprocess
 import time
+from multiprocessing import shared_memory
 
 import cv2
 import numpy as np
@@ -35,7 +36,11 @@ class NvDCF:
     Native IDs index classification metadata within a context; the scheduler
     assigns public IDs when a detector generation catches up to the live frame.
     """
-    def __init__(self, config=DEFAULT_CONFIG, width=640, height=384, timeout=30):
+    def __init__(self, config=DEFAULT_CONFIG, width=640, height=384, timeout=30, transport="shm"):
+        if transport not in ("shm", "pipe"):
+            raise ValueError("NvDCF transport must be shm or pipe")
+        self.transport = transport
+        self.input_shm = None
         check_nvdcf(config)
         if any(type(v) is not int or v < 32 or v > 4096 or v % 32 for v in (width, height)):
             raise ValueError('nvdcf width/height must be multiples of 32 in [32, 4096]')
@@ -50,11 +55,20 @@ class NvDCF:
         # run.sh prioritizes pip TensorRT 11; DeepStream uses system dependencies.
         env['LD_LIBRARY_PATH'] = f'{DEEPSTREAM}/lib:/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/nvidia:/usr/lib/aarch64-linux-gnu'
         env.pop('LD_PRELOAD', None)
-        self.process = subprocess.Popen(
-            [str(BRIDGE), str(DEEPSTREAM / 'lib/libnvds_nvmultiobjecttracker.so'),
-             str(Path(config).resolve()), str(width), str(height)],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, bufsize=0,
-        )
+        if transport == "shm":
+            self.input_shm = shared_memory.SharedMemory(create=True, size=4096*4096*3)
+        arguments = [str(BRIDGE), str(DEEPSTREAM / 'lib/libnvds_nvmultiobjecttracker.so'),
+                     str(Path(config).resolve()), str(width), str(height)]
+        if self.input_shm is not None:
+            arguments.append('/'+self.input_shm.name)
+        try:
+            self.process = subprocess.Popen(
+                arguments,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, bufsize=0,
+            )
+        except BaseException:
+            self.close()
+            raise
         os.set_blocking(self.process.stdin.fileno(), False)
         try:
             if struct.unpack('<I', self._read(4))[0] != 0x4e564443:
@@ -81,13 +95,24 @@ class NvDCF:
             return self.proposals
         height, width = pixels.shape[:2]
         sx, sy = self.width / width, self.height / height
-        rgba = cv2.cvtColor(cv2.resize(pixels, (self.width, self.height)), cv2.COLOR_RGB2RGBA)
+        if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 3:
+            raise ValueError('NvDCF expects uint8 HWC RGB')
+        if self.input_shm is not None:
+            if pixels.nbytes > self.input_shm.size:
+                raise ValueError('NvDCF source exceeds shared RGB capacity')
+            shared = np.ndarray(pixels.shape, dtype=np.uint8, buffer=self.input_shm.buf)
+            np.copyto(shared, pixels)
+        else:
+            rgba = cv2.cvtColor(cv2.resize(pixels, (self.width, self.height)), cv2.COLOR_RGB2RGBA)
         items = [] if detections is None else detections
         if len(items) > 150:
             raise ValueError('NvDCF supports at most 150 detections per frame')
         self.serial += 1
-        data = bytearray(struct.pack('<III', self.serial, detections is not None, len(items)))
-        data.extend(np.ascontiguousarray(rgba).tobytes())
+        if self.input_shm is not None:
+            data = bytearray(struct.pack('<5I', self.serial, detections is not None, len(items), width, height))
+        else:
+            data = bytearray(struct.pack('<III', self.serial, detections is not None, len(items)))
+            data.extend(np.ascontiguousarray(rgba).tobytes())
         for item in items:
             x0, y0, x1, y1 = item['bbox']
             data.extend(struct.pack('<5f', x0*sx, y0*sy, (x1-x0)*sx, (y1-y0)*sy,
@@ -146,3 +171,7 @@ class NvDCF:
                     process.kill()
                     process.wait()
             process.stdout.close()
+        if self.input_shm is not None:
+            self.input_shm.close()
+            self.input_shm.unlink()
+            self.input_shm = None

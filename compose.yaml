@@ -45,7 +45,9 @@ services:
       DISPLAY: "${DISPLAY:-}"
       XAUTHORITY: /home/admin/.Xauthority
       ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
-      ROS_AUTOMATIC_DISCOVERY_RANGE: "${ROS_AUTOMATIC_DISCOVERY_RANGE:-SUBNET}"
+      ROS_AUTOMATIC_DISCOVERY_RANGE: LOCALHOST
+      ROS_STATIC_PEERS: ""
+      ROS_DISCOVERY_SERVER: ""
     healthcheck:
       # PID 1 becomes sleep after user and GPU group initialization finishes.
       test: ["CMD-SHELL", 'test "$$(cat /proc/1/comm)" = sleep']

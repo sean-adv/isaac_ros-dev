@@ -27,3 +27,8 @@ def test_wrong_backbone_and_missing_engine_fail_explicitly(tmp_path):
 def test_fixed_engine_does_not_accept_native_rectangular_image():
     with pytest.raises(ValueError, match="outside"):
         validate_shape((1, 3, 720, 1280), (1, 3, 448, 448), (1, 3, 448, 448))
+
+
+@pytest.mark.parametrize("batch", [1,2,3,4,7,8])
+def test_dynamic_batch_profile_accepts_each_current_batch_without_waiting(batch):
+    validate_shape((batch,3,384,384),(1,3,384,384),(8,3,384,384))

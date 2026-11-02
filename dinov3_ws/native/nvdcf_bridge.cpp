@@ -1,5 +1,9 @@
 // Isolated DeepStream NvMOT bridge. stdout is exclusively the binary protocol.
 #include <nvdstracker.h>
+#include <nvbufsurftransform.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
 #include <cstdio>
@@ -9,6 +13,8 @@
 #include <stdexcept>
 #include <vector>
 #include <unistd.h>
+
+extern "C" int resize_rgb_rgba(const void*,int,int,int,void*,int,int,int);
 
 static void require(bool ok, const char* message) {
     if (!ok) throw std::runtime_error(message);
@@ -31,10 +37,28 @@ int main(int argc, char** argv) {
     dup2(STDERR_FILENO, STDOUT_FILENO);
     NvMOTContextHandle context = nullptr;
     NvBufSurface* surface = nullptr;
+    NvBufSurface* input_surface = nullptr;
+    NvBufSurface* rgba_surface = nullptr;
+    void* shared_pixels = MAP_FAILED;
+    size_t shared_bytes = 0;
+    int shared_fd = -1;
     void* library = nullptr;
     decltype(&NvMOT_DeInit) deinit = nullptr;
     try {
-        require(argc == 5, "usage: nvdcf_bridge LIB CONFIG WIDTH HEIGHT");
+        require(argc == 5 || argc == 6, "usage: nvdcf_bridge LIB CONFIG WIDTH HEIGHT [RGB_SHM]");
+        const bool shared_input = argc == 6;
+        if (shared_input) {
+            shared_fd = shm_open(argv[5], O_RDONLY, 0);
+            require(shared_fd >= 0, "RGB shm open failed");
+            struct stat st{}; require(fstat(shared_fd, &st) == 0, "RGB shm stat failed");
+            shared_bytes = st.st_size;
+            shared_pixels = mmap(nullptr, shared_bytes, PROT_READ, MAP_SHARED, shared_fd, 0);
+            require(shared_pixels != MAP_FAILED, "RGB shm map failed");
+            NvBufSurfTransformConfigParams transform_config{};
+            transform_config.compute_mode = NvBufSurfTransformCompute_GPU;
+            transform_config.gpu_id = 0;
+            require(NvBufSurfTransformSetSessionParams(&transform_config) == NvBufSurfTransformError_Success, "transform session failed");
+        }
         const unsigned width = std::stoul(argv[3]), height = std::stoul(argv[4]);
         require(width && height && width <= 4096 && height <= 4096, "invalid tracker resolution");
         library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
@@ -66,6 +90,14 @@ int main(int argc, char** argv) {
         allocation.memType = capabilities.memType;
         require(NvBufSurfaceCreate(&surface, 1, &allocation) == 0, "NvBufSurfaceCreate failed");
         surface->numFilled = 1;
+        if (shared_input) {
+            NvBufSurfaceCreateParams prep{};
+            prep.gpuId=0;prep.width=width;prep.height=height;
+            prep.layout=NVBUF_LAYOUT_PITCH;prep.colorFormat=NVBUF_COLOR_FORMAT_RGBA;
+            prep.memType=NVBUF_MEM_CUDA_DEVICE;
+            require(NvBufSurfaceCreate(&rgba_surface,1,&prep)==0,"GPU RGBA allocation failed");
+            rgba_surface->numFilled=1;
+        }
         auto& buffer = surface->surfaceList[0];
         uint32_t magic = 0x4e564443;
         write_value(magic, protocol); fflush(protocol);
@@ -75,10 +107,12 @@ int main(int argc, char** argv) {
         std::vector<NvMOTTrackedObj> output(capacity);
         while (true) {
             // frame number, detectionDone, count; then RGBA and count*(xywh,score).
-            uint32_t header[3];
-            if (!read_all(header, sizeof(header))) break;
+            uint32_t header[5]{};
+            if (!read_all(header, (shared_input ? 5 : 3) * sizeof(uint32_t))) break;
             require(header[2] <= capacity, "too many detections");
-            require(read_all(pixels.data(), pixels.size()), "truncated image");
+            if (!shared_input) require(read_all(pixels.data(), pixels.size()), "truncated image");
+            else require(header[3] && header[4] && size_t(header[3])*header[4]*3 <= shared_bytes,
+                         "RGB shm image exceeds capacity");
             std::vector<NvMOTObjToTrack> detections(header[2]);
             for (unsigned i = 0; i < detections.size(); ++i) {
                 float values[5];
@@ -88,7 +122,35 @@ int main(int argc, char** argv) {
                 object.confidence = values[4]; object.doTracking = true;
                 object.pPreservedData = reinterpret_cast<void*>(static_cast<uintptr_t>(i + 1));
             }
-            if (surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+            if (shared_input) {
+                if (!input_surface || input_surface->surfaceList[0].width != header[3]
+                                   || input_surface->surfaceList[0].height != header[4]) {
+                    if (input_surface) NvBufSurfaceDestroy(input_surface);
+    if (rgba_surface) NvBufSurfaceDestroy(rgba_surface);
+                    input_surface = nullptr;
+                    NvBufSurfaceCreateParams input_params{};
+                    input_params.gpuId = 0; input_params.width = header[3]; input_params.height = header[4];
+                    input_params.layout = NVBUF_LAYOUT_PITCH; input_params.colorFormat = NVBUF_COLOR_FORMAT_RGB;
+                    input_params.memType = NVBUF_MEM_CUDA_DEVICE;
+                    require(NvBufSurfaceCreate(&input_surface, 1, &input_params) == 0, "RGB surface allocation failed");
+                    input_surface->numFilled = 1;
+                }
+                auto& src = input_surface->surfaceList[0];
+                require(cudaMemcpy2D(src.dataPtr, src.pitch, shared_pixels, header[3]*3,
+                                    header[3]*3, header[4], cudaMemcpyHostToDevice) == cudaSuccess,
+                        "RGB upload failed");
+                auto& rgba=rgba_surface->surfaceList[0];
+                require(resize_rgb_rgba(src.dataPtr,header[3],header[4],src.pitch,
+                                        rgba.dataPtr,width,height,rgba.pitch)==0,"CUDA RGB preparation failed");
+                NvBufSurfTransformRect src_rect{}, dst_rect{};
+                src_rect.width=dst_rect.width=width;src_rect.height=dst_rect.height=height;
+                NvBufSurfTransformParams params{};
+                params.src_rect = &src_rect; params.dst_rect = &dst_rect;
+                params.transform_flag = NVBUFSURF_TRANSFORM_FILTER;
+                params.transform_filter = NvBufSurfTransformInter_Bilinear;
+                require(NvBufSurfTransform(rgba_surface, surface, &params) == NvBufSurfTransformError_Success,
+                        "GPU RGB resize/convert failed");
+            } else if (surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
                 require(NvBufSurfaceMap(surface, 0, 0, NVBUF_MAP_WRITE) == 0, "surface map failed");
                 auto dest = static_cast<unsigned char*>(buffer.mappedAddr.addr[0]);
                 for (unsigned y=0; y<height; ++y)
@@ -135,7 +197,11 @@ int main(int argc, char** argv) {
     } catch (const std::exception& error) {
         fprintf(stderr, "NvDCF bridge: %s\n", error.what());
         if (context && deinit) deinit(context);
-        if (surface) NvBufSurfaceDestroy(surface);
+        if (input_surface) NvBufSurfaceDestroy(input_surface);
+    if (rgba_surface) NvBufSurfaceDestroy(rgba_surface);
+    if (shared_pixels != MAP_FAILED) munmap(shared_pixels, shared_bytes);
+    if (shared_fd >= 0) close(shared_fd);
+    if (surface) NvBufSurfaceDestroy(surface);
         return 1;
     }
 }
