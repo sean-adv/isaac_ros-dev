@@ -36,9 +36,9 @@ bash dinov3_ws/setup_all.sh
 
 `setup_all.sh` 先呼叫 `setup_env.sh`，再檢查 NvDCF。如果工作區或容器映像已有 bridge 執行檔及 DeepStream 9.1 追蹤函式庫，就沿用；否則使用 `sudo` 呼叫 `native/install_deps.sh` 安裝系統依賴。最後以工作區使用者執行 `native/build.sh`，增量編譯全部 native 產物。檔案檢查不代表 GPU 相容性驗證，主機與容器仍須符合 [部署要求](../DOCKER_HOST.md)。入口不下載或建置模型。
 
-個別維護時可執行 `bash dinov3_ws/setup_env.sh`；原生依賴安裝使用 `sudo bash dinov3_ws/native/install_deps.sh`，編譯使用 `bash dinov3_ws/native/build.sh`。舊的 `install_nvdcf.sh` 仍相容，但會同時安裝依賴與編譯 NvDCF。
+個別維護時可執行 `bash dinov3_ws/setup_env.sh`；原生依賴安裝使用 `sudo bash dinov3_ws/native/install_deps.sh`，編譯使用 `bash dinov3_ws/native/build.sh`。
 
-`setup_env.sh` 先安裝 CUDA 13.0 Torch／torchvision，再使用 [constraints-thor.txt](constraints-thor.txt) 安裝 [requirements-build.txt](requirements-build.txt)。可透過 `PYTHON_BIN`、`DINOV3_VENV` 指定 Python 與環境位置。
+`setup_env.sh` 先安裝 CUDA 13.0 Torch／torchvision，再使用 [constraints-thor.txt](constraints-thor.txt) 安裝 [requirements.txt](requirements.txt)。可透過 `PYTHON_BIN`、`DINOV3_VENV` 指定 Python 與環境位置。
 
 | 用途 | 模型與執行方式 | 本機位置 |
 | --- | --- | --- |
@@ -75,7 +75,7 @@ Cat2Real 在 Thor 固定使用 FP32，避免 FP16 非有限輸出。SAM3 只編�
 
 ## GPU 延遲優化
 
-目前預設使用 CUDA RANSAC、NvDCF RGB 共享記憶體傳輸及 GPU 縮放、SAM3 GPU 前處理，以及 DINO 同一影格內的 ROI 批次推論與圖庫矩陣比對。RANSAC 的最後平面精修、深度連通區與小型投影擬合仍在 CPU；投影擬合使用解析 Jacobian，減少數值差分。`bbox3d_quantile` 維持 `0.05`。
+目前預設使用 CUDA RANSAC、NvDCF RGB 共享記憶體傳輸及 GPU 縮放、SAM3 GPU 前處理，以及 DINO 同一影格內的 ROI 批次推論與圖庫矩陣比對。RANSAC 的最後平面精修、深度連通區與小型投影擬合仍在 CPU；投影擬合使用解析 Jacobian，減少數值差分。`bbox3d_quantile` 目前部署值為 `0.10`。
 
 在 Thor / CUDA 13 / DeepStream 9.1 上，從工作區根目錄建置原生程式：
 
@@ -89,7 +89,7 @@ bash dinov3_ws/native/build.sh gpu_geometry
 
 需要 CUDA 開發工具、DeepStream headers、`cmake`（3.24 以上）、`g++`。`setup_all.sh` 與原生 Dockerfile 已包含建置步驟。預設 `CUDA_ARCH=110`，也相容舊的 `sm_110` 格式；其他 GPU 可覆寫 `CUDA_ARCH`。`DEEPSTREAM_DIR` 可指定 SDK 根目錄。原生程式使用獨立程序，避免 DeepStream 與 Python TensorRT 函式庫衝突。
 
-CMake 建置快取預設放在 `dinov3_ws/build/native`，可用 `NATIVE_BUILD_DIR` 覆寫；產物仍放在 `artifacts/cuda`、`artifacts/nvdcf`。重複執行會跳過未變更的編譯，修改 `.cu` 後會更新函式庫與相依的 bridge。`build_gpu_geometry.sh` 與 `build_nvdcf.sh` 保留為相容入口。
+CMake 建置快取預設放在 `dinov3_ws/build/native`，可用 `NATIVE_BUILD_DIR` 覆寫；產物仍放在 `artifacts/cuda`、`artifacts/nvdcf`。重複執行會跳過未變更的編譯，修改 `.cu` 後會更新函式庫與相依的 bridge。
 
 Docker 先安裝依賴，再複製原始碼編譯，修改程式可沿用依賴安裝快取。系統安裝由 `cmake --install dinov3_ws/build/native --prefix /usr/local` 執行（需管理員權限），維持既有 `dinov3-*-bridge` 名稱。執行檔使用相對 RPATH 尋找共用函式庫，不依賴 Docker 編譯暫存目錄。
 
@@ -112,11 +112,11 @@ dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target sam3 --artifact-su
 
 | 參數 | 目前值 | 用途 |
 | --- | --- | --- |
-| `grounding_prompt` | `box.` | 1–4 個逗號分隔類別，文字特徵按 prompt 快取 |
+| `grounding_prompt` | `box, can.` | 1–4 個逗號分隔類別，文字特徵按 prompt 快取 |
 | `grounding_detection_interval` | 3 | 每 N 個處理影格提交背景 SAM3；1 改為同步且停用 NvDCF |
 | `grounding_box_threshold` | 0.8 | SAM3 偵測門檻 |
-| `grounding_containment_threshold` | 0.8 | 追蹤後去除被包含的小框；0 停用 |
-| `recognition_threshold` | 0.8 | DINO cosine 候選門檻，再以 Lab 色彩相似度選分類 |
+| `grounding_containment_threshold` | 0.5 | 追蹤後去除被包含的小框；0 停用 |
+| `recognition_threshold` | 0.75 | DINO cosine 候選門檻，再以 Lab 色彩相似度選分類 |
 | `nvdcf_width`／`nvdcf_height` | 640／384 | 追蹤解析度，須為 32 的倍數 |
 | `nvdcf_max_missed_detections` | 5 | 已提交 SAM3 結果連續漏偵測的淘汰門檻 |
 | `nvdcf_max_missed_frames` | 15 | 失追寬限影格，期間隱藏舊框；0 停用 |

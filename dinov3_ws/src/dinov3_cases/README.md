@@ -26,7 +26,7 @@ SAM3 bbox 必須完整位於區域內才交給後續辨識；NvDCF 追蹤框移�
 網頁 **Recognition settings → SAM3 region** 可即時調整四個參數，
 按 **Apply region** 生效並清除舊結果；重啟後使用 YAML 初始值。
 **Preview crop area** 只在目前瀏覽器的完整相機辨識畫面上疊半透明框，保留 bbox。
-輸入時可先預覽尚未套用的值。預覽依原始相機尺寸、編碼影片尺寸和
+輸入時可先預覽尚未套用的值。預覽依原始相機尺寸、輸出影像尺寸和
 `object-fit: contain` 留白換算位置，視窗改變大小時同步更新；不修改 ROS 影像或其他觀看者的畫面。
 
 | 要修改的功能 | 主要檔案 |
@@ -57,3 +57,10 @@ SAM3 bbox 必須完整位於區域內才交給後續辨識；NvDCF 追蹤框移�
 `recognition_state.py` 集中網頁造成的辨識狀態更新；呼叫端必須持有
 `node.lock`，並在更新前完成參數驗證或圖片解碼。更新設定／來源與
 遞增 `generation` 必須在同一個鎖定區段內完成，避免發布舊工作的結果。
+
+
+編碼介面統一為 `prepare_image()`、`encode_with_descriptor()` 與
+`encode_regions()`。圖庫與單張效能診斷仍使用 `encode_object()`；
+候選框辨識直接使用批次 `encode_regions()`。前處理使用 Cat2Real 置中補白與
+OpenCV 雙線性縮放，分類描述向量使用 pooler 輸出；不再支援舊 `encode()`、
+patch 平均向量後備路徑、`prepare_object()` 或 `run_dino_image()`。

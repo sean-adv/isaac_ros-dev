@@ -43,20 +43,6 @@ def patch_features(outputs, model, height, width):
 
 
 @torch.inference_mode()
-def run_dino_image(image, model, processor):
-    """Run one original image and return its final spatial feature grid."""
-    stride = feature_stride(model)
-    if min(image.shape[-2:]) < stride:
-        raise ValueError(f"Image width and height must each be at least feature_stride={stride}.")
-    batch = preprocess_image(image, processor)
-    outputs = model(pixel_values=batch)
-    features = patch_features(outputs, model, *image.shape[-2:])
-    if not torch.isfinite(features).all():
-        raise RuntimeError("Non-finite DINOv3 features; image rejected.")
-    return features
-
-
-@torch.inference_mode()
 def compute_similarity_maps(features, reference_embedding):
     """Best cosine match against the existing normalized reference patch bank."""
     if reference_embedding.ndim == 1:

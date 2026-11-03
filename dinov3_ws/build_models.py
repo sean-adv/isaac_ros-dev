@@ -9,12 +9,12 @@ import time
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT/'src/dinov3_cases'))
 from dinov3_cases.cat2real import MODEL_ID as CAT_ID, REVISION as CAT_REVISION
-from dinov3_cases.runtime import SAM3_REVISION
+from dinov3_cases.runtime import GROUNDING_MODEL_ID, SAM3_REVISION
 
 SPECS = {
     'cat2real': dict(model_id=CAT_ID, revision=CAT_REVISION, directory='cat2real-dinov3-384',
                      size=384, dtype='fp32', filename='cat2real-fp32-trt.ts'),
-    'sam3': dict(model_id='facebook/sam3', revision=SAM3_REVISION, directory='sam3',
+    'sam3': dict(model_id=GROUNDING_MODEL_ID, revision=SAM3_REVISION, directory='sam3',
                  size=1008, dtype='fp16', filename='vision-fp16.ts'),
 }
 

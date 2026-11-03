@@ -8,10 +8,15 @@ from dinov3_cases.grounded import (
     ObjectGallery, recognize_objects, compute_lab_histogram,
 )
 
+from encoder_stub import ColorEncoder
 
-class SameDescriptorEncoder:
-    def encode(self, image):
-        return torch.tensor([[1., 0.]])
+
+class SameDescriptorEncoder(ColorEncoder):
+    def __init__(self):
+        super().__init__(size=32)
+
+    def encode_with_descriptor(self, image):
+        return torch.tensor([[1., 0.]]), torch.tensor([1., 0.])
 
 
 def test_lab_histogram_normalization_transparency_and_size():

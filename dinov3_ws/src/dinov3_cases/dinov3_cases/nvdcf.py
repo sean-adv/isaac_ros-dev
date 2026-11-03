@@ -27,7 +27,7 @@ def validate_detection_interval(value):
 def check_nvdcf(config=DEFAULT_CONFIG):
     for path in (BRIDGE, Path(config), DEEPSTREAM / 'lib/libnvds_nvmultiobjecttracker.so'):
         if not path.is_file():
-            raise ValueError(f'NvDCF dependency missing: {path}. Run native/install_nvdcf.sh.')
+            raise ValueError(f'NvDCF dependency missing: {path}. Run bash dinov3_ws/setup_all.sh.')
 
 
 class NvDCF:

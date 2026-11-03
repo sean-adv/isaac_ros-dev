@@ -11,7 +11,7 @@ from flask import Flask, jsonify, request, send_file, render_template
 from PIL import Image, ImageDraw, ImageFont
 
 from .gallery_files import (
-    group_path, image_path, load_image as load_rgba, gallery_groups, gallery_images,
+    group_path, image_path, load_image as load_rgba, gallery_groups, gallery_images, save_image,
 )
 
 
@@ -97,12 +97,7 @@ def register_image_manager(app, root, on_change=None, capture=None):
     def save(image, folder, suffix=""):
         folder.mkdir(exist_ok=True)
         destination = folder / f"{uuid.uuid4().hex}{suffix}.png"
-        temporary = destination.with_suffix(".tmp")
-        try:
-            image.save(temporary, format="PNG")
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+        save_image(image, destination)
         return destination.name
 
     @app.get("/images")

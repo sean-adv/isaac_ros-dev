@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
@@ -8,10 +7,7 @@ import torch.nn.functional as F
 from dinov3_cases.patches import (
     patch_features,
     preprocess_image,
-    run_dino_image,
     compute_similarity_maps,
-    feature_stride,
-    prefix_tokens,
 )
 
 
@@ -74,7 +70,9 @@ def test_original_pixels_batch_one_and_patch_geometry(shape):
         torch.testing.assert_close(pixels, image[None])
 
     model.register_forward_pre_hook(inspect_input, with_kwargs=True)
-    actual = run_dino_image(image, model, processor)
+    with torch.inference_mode():
+        actual = patch_features(model(pixel_values=preprocess_image(image, processor)),
+                                model, *image.shape[-2:])
     assert calls == [(1, 3, *shape)]
     expected = F.normalize(F.avg_pool2d(image[None], 16).permute(0, 2, 3, 1), dim=-1)
     torch.testing.assert_close(actual, expected)
@@ -82,10 +80,10 @@ def test_original_pixels_batch_one_and_patch_geometry(shape):
     assert actual.shape == (1, shape[0] // 16, shape[1] // 16, 3)
 
 
-@pytest.mark.parametrize("shape", [(1, 32), (32, 15)])
-def test_too_small_image_is_not_padded(shape):
-    with pytest.raises(ValueError, match="at least feature_stride"):
-        run_dino_image(torch.zeros((3, *shape)), SpatialProbe(), None)
+@pytest.mark.parametrize("shape", [(3, 0, 32), (1, 32, 32)])
+def test_preprocessing_rejects_empty_or_non_rgb_images(shape):
+    with pytest.raises(ValueError, match="nonempty RGB CHW"):
+        preprocess_image(torch.zeros(shape), None)
 
 
 def test_preprocessing_matches_processor_without_resize():
@@ -115,7 +113,9 @@ def test_real_model_matches_direct_original_image_forward():
     ).eval()
     processor = DINOv3ViTImageProcessorFast()
     image = torch.randint(0, 256, (3, 53, 87), dtype=torch.uint8)
-    actual = run_dino_image(image, model, processor)
+    with torch.inference_mode():
+        actual = patch_features(model(pixel_values=preprocess_image(image, processor)),
+                                model, *image.shape[-2:])
     with torch.inference_mode():
         pixels = processor(
             images=image, do_resize=False, do_center_crop=False, return_tensors="pt"

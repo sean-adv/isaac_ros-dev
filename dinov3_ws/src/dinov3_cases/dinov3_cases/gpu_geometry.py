@@ -17,7 +17,7 @@ def library():
     with _lock:
         if _library is None:
             if not LIBRARY.is_file():
-                raise RuntimeError('Missing CUDA kernels; run bash dinov3_ws/native/build_gpu_geometry.sh')
+                raise RuntimeError('Missing CUDA kernels; run bash dinov3_ws/native/build.sh gpu_geometry')
             lib = C.CDLL(str(LIBRARY))
             lib.geometry_error.restype = C.c_char_p
             lib.plane_create.restype = C.c_void_p

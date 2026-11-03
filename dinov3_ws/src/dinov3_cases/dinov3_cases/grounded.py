@@ -9,7 +9,6 @@ from PIL import Image, ImageOps
 import torch
 import torch.nn.functional as F
 
-from .runtime import INPUT_SIZE
 from .gallery_files import gallery_groups, gallery_images
 from .object_visualization import build_object_diagnostic
 
@@ -98,32 +97,11 @@ def clean_proposals(boxes, scores, labels, size, limit=20,
     return sorted(outer_boxes, key=lambda item: item["detection_score"], reverse=True)[:limit]
 
 
-def prepare_object(image, max_side=INPUT_SIZE, stride=16, minimum=32):
-    """Apply the same aspect-preserving resize/padding to references and proposals."""
-    if max_side < minimum or stride <= 0:
-        raise ValueError(
-            "Object size must cover the minimum input size and stride must be positive."
-        )
-    image = image.convert("RGB")
-    scale = max_side / max(image.size)
-    width, height = [max(1, round(n * scale)) for n in image.size]
-    image = image.resize((width, height), Image.Resampling.LANCZOS)
-    padded_w = padded_h = math.ceil(max_side / stride) * stride
-    pixels = np.pad(
-        np.asarray(image), ((0, padded_h - height), (0, padded_w - width), (0, 0)), mode="edge"
-    )
-    return Image.fromarray(pixels)
-
-
 @torch.inference_mode()
 def encode_object(encoder, image, max_side, stride):
-    prepare = getattr(encoder, 'prepare_image', prepare_object)
-    prepared = prepare(image, max_side, stride)
-    if hasattr(encoder, 'encode_with_descriptor'):
-        features, vector = encoder.encode_with_descriptor(prepared)
-    else:
-        features = encoder.encode(prepared)
-        vector = features.float().mean(dim=0)
+    """Prepare a gallery/profile image and normalize its explicit model descriptor."""
+    prepared = encoder.prepare_image(image, max_side, stride)
+    features, vector = encoder.encode_with_descriptor(prepared)
     if not torch.isfinite(vector).all() or vector.norm() < 1e-8:
         raise ValueError("Invalid object descriptor.")
     return prepared, features, F.normalize(vector, dim=0)
@@ -271,10 +249,7 @@ def recognize_objects(
     if not proposals:
         return results
     rois = [image.crop(proposal["bbox"]) for proposal in proposals]
-    if hasattr(encoder, 'encode_regions'):
-        encoded = encoder.encode_regions(image, [proposal["bbox"] for proposal in proposals])
-    else:
-        encoded = [encode_object(encoder, roi, max_side, stride) for roi in rois]
+    encoded = encoder.encode_regions(image, [proposal["bbox"] for proposal in proposals])
     if len(encoded) != len(proposals):
         raise ValueError("Encoder did not return one result per ROI")
     histograms = [compute_lab_histogram(roi) for roi in rois]

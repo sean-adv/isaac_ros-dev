@@ -1,2 +1,0 @@
-# Self-contained official Torch-TensorRT builders; no sibling repository required.
--r requirements.txt

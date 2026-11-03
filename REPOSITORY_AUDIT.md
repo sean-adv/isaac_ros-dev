@@ -1,6 +1,20 @@
+> **歷史文件**：目前功能請以 [CURRENT_FUNCTIONALITY](docs/CURRENT_FUNCTIONALITY.md) 為準；本輪清理與驗證見 [CLEANUP_REPORT](docs/CLEANUP_REPORT.md)。下列各輪記錄含已移除介面與過期測試數字，不是目前保留需求。
+
 # Repository audit 與整理記錄
 
 > 本文件下方的初次 audit 記錄反映清理當時狀態。後續使用者已明確要求改用 ROS Image 並移除影片編碼；目前狀態以本節及更新後的應用／建置文件為準。
+
+## 後續更新：移除舊編碼介面（2026-11-03）
+
+移除 `prepare_object()`、`Encoder.encode()`、`run_dino_image()`，以及
+圖庫編碼的前處理／patch 平均向量後備與候選框逐張編碼後備。正式部署原已
+使用 Cat2Real 前處理、pooler 與批次 ROI 編碼；`encode_object()` 仍用於圖庫
+及單張效能對照。測試替身改用現行介面，保留底層 patch 幾何與模型比對。
+
+完整 pytest：**470 通過、0 失敗**（14.88 秒），未新增 skip／xfail。
+相較前次 467 項新增 3 項測試：批次 encoder 的切分／順序／pooler／預覽，以及
+零值與非有限描述向量拒絕。批次測試的模型／ROI 準備為 CPU 替身；未啟動
+真實部署模型／相機端到端驗證。詳見應用 [維護狀態](dinov3_ws/src/dinov3_cases/docs/maintenance.md)。
 
 ## 後續更新：單次辨識與同步清理（2026-11-03）
 

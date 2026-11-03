@@ -4,9 +4,15 @@
 
 ## 回歸測試
 
-最新結果（2026-11-03，單次辨識清理後）：**467 通過、0 失敗**（14.36 秒）。
-舊快取類別的 9 項測試改為 2 項單次辨識測試，節點交接與失追回歸保留；
-新增 HTTP margin 相容邊界斷言，未新增 skip／xfail。下方較早結果為歷史記錄。
+本輪清理後：**472 通過、0 失敗**（14.08 秒），無 skip／xfail。新增兩項
+首頁／圖庫／來源切換 smoke，亦在清理前程式副本通過。真實模型同步 smoke
+及 native 建置結果、非同步整合檢查限制見 [清理報告](../../docs/CLEANUP_REPORT.md)。
+
+本輪清理前基準（2026-11-03，含既有舊編碼介面清理）：**470 通過、0 失敗**（14.38 秒）。
+測試改用現行 encoder 介面與 Cat2Real 前處理，保留 patch 幾何、熱圖與模型比對；
+新增 1 項正式批次 encoder 的 CPU 替身測試及 2 項無效描述向量測試，未新增
+skip／xfail。`encoder_stub.py` 是分類／節點測試共用的 CPU encoder 替身。
+本輪清理後結果見 [清理報告](../../docs/CLEANUP_REPORT.md)。
 
 ```bash
 # 首次執行測試前，另安裝開發依賴（runtime setup 不包含 pytest）：
@@ -29,6 +35,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_
 | 共享影格租約、IPC 失敗／逾時與清理 | `test_frame_pool.py`、`test_grounding_ipc.py` |
 | 深度、3D 框、點雲篩選及背景刷新 | `test_depth_*.py`、`test_bbox3d_fit.py`、`test_cloud_filter.py`、`test_async_bbox3d*.py` |
 | ROS 訊息、疊圖、即時排程與影像串流 | `test_apriltag.py`、`test_bbox_visualization.py`、`test_realtime.py`、`test_image_stream.py`、`test_timing.py` |
+| 首頁／圖庫 smoke、上傳與來源切換 | `test_web_workflow.py` |
 | 圖庫管理、相機擷取與前端互動 | `test_image_manager.py`、`test_camera_capture.py`、`test_images_ui.cjs` |
 | TensorRT 輸入與缺失產物處理 | `test_trt_backend.py` |
 
@@ -37,12 +44,6 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_
 ```bash
 node --test dinov3_ws/tests/test_images_ui.cjs dinov3_ws/tests/test_sam3_roi_ui.cjs
 ```
-
-2026-11-03 套件整理後完整 pytest：**488 通過、12 項既有失敗**；整理前為 480 通過、12 失敗，新增 8 項啟動設定測試通過。失敗名稱相同，未排除測試。Node.js 測試因環境缺少 `node` 未執行。詳見 [維護狀態](../src/dinov3_cases/docs/maintenance.md)。
-
-2026-11-03 移除資源監控後，完整 pytest：**477 通過、10 項既有失敗**，失敗皆位於 `test_surface_pose.py`。移除的專屬測試原有 11 項通過、2 項失敗；沒有新增失敗或 skip／xfail。
-
-2026-11-03 移除未使用的多平面模組與專屬測試後，完整 pytest：**474 通過、0 失敗**（14.37 秒）。現用 RANSAC／CUDA、深度框、追蹤、ROS 與 HTTP 測試均保留，未新增 skip／xfail。多平面專屬測試移除前為 3 通過、10 失敗。
 
 ## GPU 整合檢查
 
@@ -66,7 +67,7 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf_handoff.py
 dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf_occlusion.py
 ```
 
-模型數值驗證使用 `dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --validate-only`；不會重新編譯。
+模型數值驗證使用 `dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --validate-only`；不會重新編譯，但會更新 validation／metadata，請先保存需要保留的報告。
 
 ## 效能診斷
 
@@ -78,10 +79,6 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_gpu_pipeline.py --samples /tm
 ```
 
 重播工具接受含 `rgb`／`depth` 的 NPZ，以及含 `info`／`detections` 的 JSON。`--baseline-depth` 可指定變更前的 `depth_bbox.py` 做相同輸入對照；報告是個別階段時間，不是相機端到端延遲。
-
-2026-11-02 改為 ROS Image／MJPEG 後：**476 通過、12 項既有失敗**（完整 pytest，未排除測試）。舊編碼器專屬測試已移除，raw Image／疊圖測試保留於 `test_image_stream.py`，並新增 MJPEG 多觀看者、背景 JPEG、來源重設與真實 ROS topic 接收測試。真實模型 `check_grounded_trt_pipeline.py` 的繪圖阻塞／ROS Image smoke 已通過。Node.js／瀏覽器與真實相機端到端尚未驗證。
-
-2026-11-02 整理前完整回歸基準：489 通過、12 失敗。`test_resource_web.py` 的兩項測試要求目前未註冊的 `/api/resources`；`test_surface_pose.py` 的十項失敗使用舊多平面介面，與目前單平面 `_surface_rotation` 的參數、回傳值及 method 不一致。此為歷史基準；2026-11-03 已依使用者要求移除資源監控及專屬測試，同日確認只使用 RANSAC 後，亦移除未使用的多平面模組與專屬測試；現用 RANSAC 測試保留。不應排除現有測試後宣稱完整回歸通過。詳見 [整理報告](../../REPOSITORY_AUDIT.md)。
 
 保留的工具依問題選用，使用相同環境，執行 `--help` 查看必要參數：
 

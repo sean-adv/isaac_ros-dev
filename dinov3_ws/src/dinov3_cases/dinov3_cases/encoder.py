@@ -70,6 +70,3 @@ class Encoder:
                 diagnostic.info['content_box']=(x0,y0,max(x0+1,min(INPUT_SIZE,x1)),max(y0+1,min(INPUT_SIZE,y1)))
                 rows.append((diagnostic, features[offset], descriptors[offset]))
         return rows
-
-    def encode(self, image):
-        return self.encode_with_descriptor(image)[0]

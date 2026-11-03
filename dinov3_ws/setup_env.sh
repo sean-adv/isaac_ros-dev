@@ -10,5 +10,5 @@ fi
 "$venv_dir/bin/python" -m pip install torch==2.14.1 torchvision==0.29.1 \
   --index-url https://download.pytorch.org/whl/cu130
 "$venv_dir/bin/python" -m pip install -c "$project_dir/constraints-thor.txt" \
-  -r "$project_dir/requirements-build.txt"
+  -r "$project_dir/requirements.txt"
 "$venv_dir/bin/python" -m pip check

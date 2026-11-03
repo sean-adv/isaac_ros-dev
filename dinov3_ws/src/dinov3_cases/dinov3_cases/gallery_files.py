@@ -60,3 +60,13 @@ def gallery_images(folder):
     return [path for path in sorted(folder.iterdir())
             if not path.is_symlink() and path.is_file()
             and path.suffix.lower() in EXTENSIONS]
+
+
+def save_image(image, destination):
+    """Atomically publish a PNG without leaving a partial file after a failed save."""
+    temporary = destination.with_suffix(".tmp")
+    try:
+        image.save(temporary, format="PNG")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)

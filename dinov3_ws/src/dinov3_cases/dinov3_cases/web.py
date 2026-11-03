@@ -14,12 +14,8 @@ from .image_manager import register_image_manager
 from .sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
 from . import recognition_state
 from .gallery_files import (
-    group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
+    group_path as case_path, image_path, load_image, gallery_groups, gallery_images, save_image,
 )
-
-
-def decode_image(stream):
-    return load_image(stream, mode="RGB")
 
 
 def create_app(node):
@@ -142,7 +138,7 @@ def create_app(node):
         for path in gallery_images(folder):
             item = dict(name=path.name, version=f"{path.stat().st_mtime_ns}-{path.stat().st_size}")
             try:
-                original = decode_image(path)
+                original = load_image(path, mode="RGB")
                 reference = prepare_cat2real_image(original, INPUT_SIZE)
                 item.update(
                     original_size=list(original.size),
@@ -162,7 +158,7 @@ def create_app(node):
             stride = node.reference_stride
         if stride is None:
             return jsonify(error="The model is loading."), 503
-        reference = prepare_cat2real_image(decode_image(path), INPUT_SIZE)
+        reference = prepare_cat2real_image(load_image(path, mode="RGB"), INPUT_SIZE)
         data = BytesIO()
         reference_grid_image(reference, stride).save(data, format="PNG")
         return Response(
@@ -227,13 +223,11 @@ def create_app(node):
         if not files:
             raise ValueError("Choose at least one picture.")
         # Validate all pictures before modifying the case.
-        images = [decode_image(f.stream) for f in files]
+        images = [load_image(f.stream, mode="RGB") for f in files]
         folder.mkdir(exist_ok=True)
         for i, image in enumerate(images):
             dest = folder / f"{time.time_ns()}_{i}.png"
-            temp = dest.with_suffix(".tmp")
-            image.save(temp, format="PNG")
-            temp.replace(dest)
+            save_image(image, dest)
         with node.lock:
             recognition_state.select_case(node, name, rebuild=True)
         return jsonify(ok=True, count=len(images))
@@ -257,7 +251,7 @@ def create_app(node):
         if mode == "upload":
             if "image" not in request.files:
                 raise ValueError("Choose a target picture.")
-            image = decode_image(request.files["image"].stream)
+            image = load_image(request.files["image"].stream, mode="RGB")
         with node.lock:
             recognition_state.set_source(node, mode, image)
         return jsonify(ok=True)

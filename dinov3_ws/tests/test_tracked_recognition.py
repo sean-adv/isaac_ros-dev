@@ -8,16 +8,7 @@ from PIL import Image
 
 from dinov3_cases.grounded import ObjectGallery, recognize_objects
 from dinov3_cases.timing import ModelTimings
-
-
-class CountingEncoder:
-    def __init__(self):
-        self.calls = 0
-
-    def encode(self, image):
-        self.calls += 1
-        vector = torch.tensor(np.asarray(image).mean(axis=(0, 1)), dtype=torch.float32)
-        return vector.repeat(4, 1)
+from encoder_stub import ColorEncoder
 
 
 @pytest.fixture
@@ -25,7 +16,7 @@ def setup(tmp_path):
     for label in ('red', 'blue'):
         (tmp_path / label).mkdir()
         Image.new('RGB', (32, 32), label).save(tmp_path / label / 'ref.png')
-    encoder, gallery = CountingEncoder(), ObjectGallery()
+    encoder, gallery = ColorEncoder(size=32), ObjectGallery()
     gallery.refresh(tmp_path, encoder, 32, 16)
     encoder.calls = 0
     pixels = np.zeros((40, 80, 3), dtype=np.uint8)
@@ -55,12 +46,12 @@ def test_single_shot_recognition_uses_current_crop_order_and_empty_results(setup
 
 def test_failed_recognition_can_retry_without_retaining_partial_labels(setup):
     encoder, gallery, pixels = setup
-    original = encoder.encode
-    encoder.encode = Mock(side_effect=[torch.ones((4, 3)), RuntimeError('GPU failure')])
+    original = encoder.encode_with_descriptor
+    encoder.encode_with_descriptor = Mock(side_effect=[(torch.ones((4, 3)), torch.ones(3)), RuntimeError('GPU failure')])
     with pytest.raises(RuntimeError, match='GPU failure'):
         recognize_objects(Image.fromarray(pixels), [proposal(), proposal(45)],
                           encoder, gallery, 32, 16, .75)
-    encoder.encode = original
+    encoder.encode_with_descriptor = original
     result = recognize_objects(Image.fromarray(pixels), [proposal(45)],
                                encoder, gallery, 32, 16, .75)
     assert result[0]['label'] == 'blue'

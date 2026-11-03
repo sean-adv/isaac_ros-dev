@@ -13,20 +13,14 @@ from dinov3_cases.grounded import (
     ObjectGallery,
     compute_lab_histogram,
     clean_proposals,
-    prepare_object,
     recognize_objects,
     validate_settings,
     validate_bbox_limits,
     recognition_message,
 )
 
-
-class ColorEncoder:
-    def encode(self, image):
-        vector = torch.tensor(np.asarray(image).mean(axis=(0, 1)), dtype=torch.float32)
-        return torch.nn.functional.normalize(vector, dim=0).repeat(
-            image.width // 16 * (image.height // 16), 1
-        )
+from encoder_stub import ColorEncoder
+from dinov3_cases.cat2real import prepare_cat2real_image
 
 
 def test_clip_suppress_duplicates_without_merging_adjacent_objects():
@@ -79,11 +73,12 @@ def test_containment_uses_clipped_boxes_and_keeps_best_equal_area_duplicate():
 
 def test_object_preprocessing_handles_small_and_thin_crops():
     for size in [(1, 1), (1, 1000), (1000, 1), (77, 151)]:
-        result = prepare_object(Image.new("RGB", size, "red"), 224, 16)
+        result = prepare_cat2real_image(Image.new("RGB", size, "red"), 224)
         assert min(result.size) >= 32
         assert max(result.size) == 224
         assert all(n % 16 == 0 for n in result.size)
-        assert result.getpixel((result.width - 1, result.height - 1)) == (255, 0, 0)
+        assert result.info["content_box"][2] > result.info["content_box"][0]
+        assert result.info["content_box"][3] > result.info["content_box"][1]
 
 
 @pytest.mark.parametrize("limits", [dict(min_width=10), dict(min_height=10),
@@ -195,14 +190,7 @@ def test_invalid_runtime_settings(key, value):
 
 
 def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
-    class CountingEncoder(ColorEncoder):
-        calls = 0
-
-        def encode(self, image):
-            self.calls += 1
-            return super().encode(image)
-
-    encoder = CountingEncoder()
+    encoder = ColorEncoder()
     (tmp_path / "red").mkdir()
     Image.new("RGB", (32, 48), "red").save(tmp_path / "red/one.png")
     gallery = ObjectGallery()
@@ -229,15 +217,16 @@ def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
     assert metadata["similarity_min"] == pytest.approx(1.0)
 
 
-def test_heatmap_removes_right_padding_before_mapping_back_to_roi():
+def test_heatmap_removes_left_and_right_padding_before_mapping_back_to_roi():
     roi = Image.new("RGB", (16, 32))
-    prepared = prepare_object(roi, 32, 16)
-    # Actual content is the left patch column. The right column is minimum-size padding.
-    features = torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+    prepared = prepare_cat2real_image(roi, 64)
+    # White padding occupies the first/last patch column; the crop is centered.
+    features = torch.tensor([[[0., 1.], [1., 0.], [1., 0.], [0., 1.]]] * 4).reshape(16, 2)
     views, metadata = object_debug_views(
-        roi, prepared, features, torch.tensor([[1.0, 0.0]]), 32, 16
+        roi, prepared, features, torch.tensor([[1.0, 0.0]]), 64, 16
     )
-    assert metadata["content_size"] == [16, 32] and metadata["input_size"] == [32, 32]
+    assert metadata["content_box"] == [16, 0, 48, 64]
+    assert metadata["content_size"] == [32, 64] and metadata["input_size"] == [64, 64]
     assert views["heatmap"].shape == (32, 16, 3)
     # Last valid pixel interpolates at the edge; ROI must not include the zero-score padding column.
     assert metadata["similarity_min"] > 0.5
@@ -264,11 +253,9 @@ def test_empty_gallery_and_large_crop_visualizations():
 
 
 def test_selected_label_compares_every_object_and_all_reference_images_without_forward(tmp_path):
-    class PatchEncoder:
-        calls = 0
-
-        def encode(self, image):
-            self.calls += 1
+    class PatchEncoder(ColorEncoder):
+        def encode_with_descriptor(self, image):
+            _, descriptor = super().encode_with_descriptor(image)
             pixels = np.asarray(image)
             features = [
                 pixels[y : y + 16, x : x + 16].mean(axis=(0, 1))
@@ -277,9 +264,9 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
             ]
             return torch.nn.functional.normalize(
                 torch.tensor(np.array(features), dtype=torch.float32), dim=1
-            )
+            ), descriptor
 
-    encoder = PatchEncoder()
+    encoder = PatchEncoder(size=32)
     for label, name, color in [
         ("mix", "red.png", "red"),
         ("mix", "blue.png", "blue"),
@@ -376,21 +363,26 @@ def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
 @pytest.mark.parametrize("size", [(1, 1000), (1000, 1), (77, 151), (224, 224)])
 def test_square_object_input_preserves_content_and_pads_to_224(size):
     image = Image.new("RGB", size, "red")
-    result = prepare_object(image, 224, 16)
+    result = prepare_cat2real_image(image, 224)
     assert result.size == (224, 224)
-    assert result.getpixel((223, 223)) == (255, 0, 0)
+    x0, y0, x1, y1 = result.info["content_box"]
+    assert 0 <= x0 < x1 <= 224 and 0 <= y0 < y1 <= 224
+    if size[0] != size[1]:
+        assert result.getpixel((0, 0)) == (255, 255, 255)
 
 
 def test_square_object_padding_is_removed_from_heatmap():
     roi = Image.new("RGB", (32, 16), "red")
-    prepared = prepare_object(roi, 32, 16)
-    features = torch.tensor([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]])
+    prepared = prepare_cat2real_image(roi, 64)
+    features = torch.tensor([[[0., 1.]] * 4, [[1., 0.]] * 4,
+                             [[1., 0.]] * 4, [[0., 1.]] * 4]).reshape(16, 2)
     views, metadata = object_debug_views(
-        roi, prepared, features, torch.tensor([[1.0, 0.0]]), 32, 16
+        roi, prepared, features, torch.tensor([[1.0, 0.0]]), 64, 16
     )
-    assert metadata["input_size"] == [32, 32]
-    assert metadata["content_size"] == [32, 16]
-    assert metadata["patch_grid"] == [2, 2]
+    assert metadata["content_box"] == [0, 16, 64, 48]
+    assert metadata["input_size"] == [64, 64]
+    assert metadata["content_size"] == [64, 32]
+    assert metadata["patch_grid"] == [4, 4]
     assert views["heatmap"].shape[:2] == (16, 32)
     # Bilinear interpolation may blend across the boundary, but the pure
     # padding region at score zero must not appear in the cropped ROI map.
