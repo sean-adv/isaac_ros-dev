@@ -172,7 +172,7 @@ def main():
                 event.set()
             node.server.shutdown()
             node.close_grounding_worker()
-            for worker in (node.video_publisher_worker, node.worker, node.publisher_worker,
+            for worker in (node.worker, node.publisher_worker,
                            node.renderer_worker):
                 worker.join(10)
             node.destroy_node()

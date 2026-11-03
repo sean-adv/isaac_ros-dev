@@ -19,15 +19,15 @@ from dinov3_cases.runtime import ARTIFACTS
 def main():
     image = Image.open(ARTIFACTS / 'validation/person.jpg').convert('RGB')
     entered, release = threading.Event(), threading.Event()
-    from dinov3_cases.h264_stream import H264Encoder
-    original_encode = H264Encoder.encode
+    from dinov3_cases import node as pipeline
+    original_render = pipeline.render_display_overlay
 
-    def stalled_encode(*args, **kwargs):
+    def stalled_render(*args, **kwargs):
         if threading.current_thread() is node.renderer_worker and not release.is_set():
             entered.set()
             if not release.wait(30):
                 raise RuntimeError('Renderer test timed out')
-        return original_encode(*args, **kwargs)
+        return original_render(*args, **kwargs)
 
     def png():
         data = io.BytesIO()
@@ -41,8 +41,8 @@ def main():
         node = CaseNode()
         client = node.app.test_client()
         packets = []
-        from sensor_msgs.msg import CompressedImage
-        node.create_subscription(CompressedImage, node.param("h264_topic"), packets.append, 30)
+        from sensor_msgs.msg import Image as ImageMsg
+        node.create_subscription(ImageMsg, node.param("annotated_image_topic"), packets.append, 1)
 
         def wait_for(predicate, seconds=90):
             deadline = time.monotonic() + seconds
@@ -56,7 +56,7 @@ def main():
             raise AssertionError(client.get('/api/status').json)
 
         try:
-            with patch.object(H264Encoder, 'encode', autospec=True, side_effect=stalled_encode):
+            with patch.object(pipeline, 'render_display_overlay', side_effect=stalled_render):
                 assert client.post('/api/cases', data={'case': 'sample', 'images': (png(), 'ref.png')}).status_code == 200
                 assert client.post('/api/source', data={'source': 'upload', 'image': (png(), 'target.png')}).status_code == 200
                 status = wait_for(lambda s: s['performance'].get('completed_at') is not None)
@@ -69,11 +69,8 @@ def main():
                 release.set()
                 wait_for(lambda s: s['overlay_ready'])
             wait_for(lambda _: bool(packets), seconds=10)
-            import av
-            decoder = av.CodecContext.create('h264', 'r')
-            decoded = [frame for packet in packets for frame in decoder.decode(av.Packet(bytes(packet.data)))]
-            assert decoded and (decoded[-1].width, decoded[-1].height) == (960, 540)
-            assert all(packet.format == 'h264' for packet in packets)
+            assert all(packet.encoding == 'bgr8' for packet in packets)
+            assert (packets[-1].width, packets[-1].height) == (960, 540)
             assert client.post('/api/source', data={'source': 'camera'}).status_code == 200
             ros_results = []
             from vision_msgs.msg import Detection2DArray
@@ -89,7 +86,7 @@ def main():
                 status = wait_for(lambda s: s['performance'].get('frame_id') == expected)
                 rows.append(status['performance'])
             wait_for(lambda _: 'memory-smoke-3' in ros_results, seconds=10)
-            report = dict(passed=True, bbox_before_h264=True, camera_frames=len(rows),
+            report = dict(passed=True, bbox_before_image=True, camera_frames=len(rows),
                           ros_results=ros_results, worker=status['grounding_worker'], rows=rows)
             output = ARTIFACTS / 'sam3/memory_pipeline_validation.json'
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -104,7 +101,6 @@ def main():
             node.server.shutdown()
             node.close_grounding_worker()
             node.worker.join(15)
-            node.video_publisher_worker.join(3)
             node.publisher_worker.join(3)
             node.renderer_worker.join(3)
             node.destroy_node()

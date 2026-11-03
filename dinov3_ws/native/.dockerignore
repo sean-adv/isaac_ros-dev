@@ -1,0 +1,7 @@
+# Only native build inputs belong in this Docker context.
+*
+!Dockerfile
+!CMakeLists.txt
+!*.sh
+!*.cpp
+!*.cu

@@ -34,9 +34,9 @@ bash dinov3_ws/run.sh --ros-args -p port:=8091
 bash dinov3_ws/setup_all.sh
 ```
 
-`setup_all.sh` 先呼叫 `setup_env.sh`，再檢查 NvDCF。如果工作區或容器映像已有 bridge 執行檔及 DeepStream 9.1 追蹤函式庫，就沿用；否則使用 `sudo` 呼叫 `native/install_nvdcf.sh` 安裝並編譯。檔案檢查不代表 GPU 相容性驗證，主機與容器仍須符合 [部署要求](../DOCKER_HOST.md)。入口不下載或建置模型。
+`setup_all.sh` 先呼叫 `setup_env.sh`，再檢查 NvDCF。如果工作區或容器映像已有 bridge 執行檔及 DeepStream 9.1 追蹤函式庫，就沿用；否則使用 `sudo` 呼叫 `native/install_deps.sh` 安裝系統依賴。最後以工作區使用者執行 `native/build.sh`，增量編譯全部 native 產物。檔案檢查不代表 GPU 相容性驗證，主機與容器仍須符合 [部署要求](../DOCKER_HOST.md)。入口不下載或建置模型。
 
-個別維護時仍可執行 `bash dinov3_ws/setup_env.sh` 或 `sudo bash dinov3_ws/native/install_nvdcf.sh`。
+個別維護時可執行 `bash dinov3_ws/setup_env.sh`；原生依賴安裝使用 `sudo bash dinov3_ws/native/install_deps.sh`，編譯使用 `bash dinov3_ws/native/build.sh`。舊的 `install_nvdcf.sh` 仍相容，但會同時安裝依賴與編譯 NvDCF。
 
 `setup_env.sh` 先安裝 CUDA 13.0 Torch／torchvision，再使用 [constraints-thor.txt](constraints-thor.txt) 安裝 [requirements-build.txt](requirements-build.txt)。可透過 `PYTHON_BIN`、`DINOV3_VENV` 指定 Python 與環境位置。
 
@@ -80,12 +80,18 @@ Cat2Real 在 Thor 固定使用 FP32，避免 FP16 非有限輸出。SAM3 只編�
 在 Thor / CUDA 13 / DeepStream 9.1 上，從工作區根目錄建置原生程式：
 
 ```bash
-bash dinov3_ws/native/build_gpu_geometry.sh
-bash dinov3_ws/native/build_nvdcf.sh
-bash dinov3_ws/native/build_video_gpu.sh
+bash dinov3_ws/native/build.sh
+
+# 只建置個別 target（自動更新相依的 CUDA 函式庫）
+bash dinov3_ws/native/build.sh nvdcf_bridge
+bash dinov3_ws/native/build.sh gpu_geometry
 ```
 
-需要 CUDA 開發工具、DeepStream headers、`g++`、`pkg-config`、`libavcodec-dev`、`libavutil-dev`。`setup_all.sh` 與原生 Dockerfile 已包含建置步驟；其他 GPU 可用 `CUDA_ARCH` 指定架構。原生程式使用獨立程序，避免 DeepStream 與 Python TensorRT 函式庫衝突。
+需要 CUDA 開發工具、DeepStream headers、`cmake`（3.24 以上）、`g++`。`setup_all.sh` 與原生 Dockerfile 已包含建置步驟。預設 `CUDA_ARCH=110`，也相容舊的 `sm_110` 格式；其他 GPU 可覆寫 `CUDA_ARCH`。`DEEPSTREAM_DIR` 可指定 SDK 根目錄。原生程式使用獨立程序，避免 DeepStream 與 Python TensorRT 函式庫衝突。
+
+CMake 建置快取預設放在 `dinov3_ws/build/native`，可用 `NATIVE_BUILD_DIR` 覆寫；產物仍放在 `artifacts/cuda`、`artifacts/nvdcf`。重複執行會跳過未變更的編譯，修改 `.cu` 後會更新函式庫與相依的 bridge。`build_gpu_geometry.sh` 與 `build_nvdcf.sh` 保留為相容入口。
+
+Docker 先安裝依賴，再複製原始碼編譯，修改程式可沿用依賴安裝快取。系統安裝由 `cmake --install dinov3_ws/build/native --prefix /usr/local` 執行（需管理員權限），維持既有 `dinov3-*-bridge` 名稱。執行檔使用相對 RPATH 尋找共用函式庫，不依賴 Docker 編譯暫存目錄。
 
 另建並驗證模型，不覆蓋原有單筆引擎：
 
@@ -96,7 +102,7 @@ dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target sam3 --artifact-su
 
 驗證通過後寫入同名 `.json`，啟動時優先選用 `cat2real-fp32-batch8-trt.ts` 與 `vision-fp16-native.ts`。DINO 保持 FP32，支援 batch 1–8，僅合併本次影格已有的物件，不等待後續影格。沒有新引擎時沿用原有單筆版本。TensorRT 引擎應在實際部署 GPU 上重新建置。
 
-`bbox3d_plane_backend: cpu` 可切回 Open3D RANSAC。`video_backend: cuda` 可啟用 DeepStream GPU 疊圖與直接 NVENC；預設仍為 `cpu` 疊圖搭配既有 NVENC，因測量未顯示 GPU 疊圖有穩定優勢。GPU 疊圖模式有 ROS annotated image 訂閱者時改走共用 CPU 疊圖。GPU 前處理與 OpenCV/PIL 的插值可能有一個 RGB 灰階的差異，已檢查描述子與 SAM3 偵測框。
+`bbox3d_plane_backend: cpu` 可切回 Open3D RANSAC。疊圖統一走 CPU，發布 ROS Image 後由網頁 bridge 做背景 JPEG 轉換。GPU 前處理與 OpenCV/PIL 的插值可能有一個 RGB 灰階的差異，描述子與 SAM3 偵測框的數值驗證流程維持原樣。
 
 2026-11-02 Thor 上相同已保存 RGB-D 的階段中位數：3D bbox `70.54 → 50.30 ms`，NvDCF 輸入與追蹤 `8.78 → 2.30 ms`，四個物件 DINO `180.25 → 160.52 ms`，SAM3 前處理 `28.16 → 4.43 ms`。3D 收益同時包含解析 Jacobian 與 CUDA RANSAC；各階段不能相加當成端到端收益。原始樣本數據在 `artifacts/gpu_optimization_20261102/stages.json`。
 
@@ -128,6 +134,6 @@ NvDCF 原生參數位於 [nvdcf.yaml](config/nvdcf.yaml)，可用 ROS `nvdcf_con
 
 ## 驗證與程式導覽
 
-[測試說明](tests/README.md) 列出目前回歸與 GPU 整合檢查。[程式導覽](src/dinov3_cases/README.md) 說明模組責任、影格租約、3D 深度框、ROS topics 與 H.264／WebRTC 介面。
+[測試說明](tests/README.md) 列出目前回歸與 GPU 整合檢查。[程式導覽](src/dinov3_cases/README.md) 說明模組責任、影格租約、3D 深度框、ROS topics 與 ROS Image／MJPEG 介面。
 
-API `result_fps` 只計不同 RGB 影格的完成率；背景結果刷新不增加此計數。SAM3、NvDCF、3D、發布與編碼耗時應分別判讀，模型單獨測速不代表完整流程 FPS。
+API `result_fps` 只計不同 RGB 影格的完成率；背景結果刷新不增加此計數。SAM3、NvDCF、3D、發布與 JPEG 轉換耗時應分別判讀，模型單獨測速不代表完整流程 FPS。

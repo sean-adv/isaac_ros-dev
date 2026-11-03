@@ -45,7 +45,7 @@ def api(tmp_path):
     node = SimpleNamespace(root=tmp_path, lock=threading.Lock(), generation=7,
                            sam3_roi=DEFAULT_ROI, camera_frame=Image(width=1920, height=1080),
                            image_changed=threading.Event(), render_changed=threading.Event(),
-                           video_hub=Mock(), clear_object_debug=Mock())
+                           image_stream=Mock(), clear_object_debug=Mock())
     return create_app(node).test_client(), node
 
 
@@ -93,4 +93,4 @@ def test_region_disclosure_is_closed_and_preserves_live_video(api):
     assert 'id="roi-preview-enabled"' in html
     assert 'name="center_x"' in html and 'name="center_y"' in html
     assert '/static/sam3_roi.js' in html
-    assert 'data-live-video' in html
+    assert 'data-live-image' in html

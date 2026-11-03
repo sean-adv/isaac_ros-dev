@@ -1,4 +1,4 @@
-/* Native camera coordinates -> encoded video -> object-fit: contain display. */
+/* Native camera coordinates -> annotated image -> object-fit: contain display. */
 (function () {
   function regionBounds(native, values) {
     function axis(length, size, center) {
@@ -57,7 +57,7 @@
       (enabled ? '' : ' · filtering disabled') + (source === 'camera' ? '' : ' · camera source only');
     if (!toggle.checked || source !== 'camera' || bounds[2] <= bounds[0] || bounds[3] <= bounds[1]) return;
     const rect = previewRect(bounds, state.native_size, [video.clientWidth, video.clientHeight],
-      [video.videoWidth || 960, video.videoHeight || 540]);
+      [video.naturalWidth || 960, video.naturalHeight || 540]);
     for (const key of ['left', 'top', 'width', 'height']) box.style[key] = rect[key] + 'px';
     box.hidden = false;
   }
@@ -105,7 +105,7 @@
     form.requestSubmit();
   };
   new ResizeObserver(draw).observe(video);
-  video.addEventListener('loadedmetadata', draw);
+  video.addEventListener('load', draw);
   video.addEventListener('resize', draw);
   globalThis.sam3Region = {update};
 })();

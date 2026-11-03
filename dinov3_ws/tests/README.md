@@ -1,10 +1,12 @@
 # 測試與診斷
 
-測試涵蓋目前的 SAM3、NvDCF、Cat2Real、3D 深度框、圖庫、ROS 與 HTTP／H.264 流程。下列指令均從工作區根目錄執行。
+測試涵蓋目前的 SAM3、NvDCF、Cat2Real、3D 深度框、圖庫、ROS 與 HTTP／MJPEG 流程。下列指令均從工作區根目錄執行。
 
 ## 回歸測試
 
 ```bash
+# 首次執行測試前，另安裝開發依賴（runtime setup 不包含 pytest）：
+dinov3_ws/.venv/bin/python -m pip install -c dinov3_ws/constraints-thor.txt -r dinov3_ws/requirements-dev.txt
 source /opt/ros/jazzy/setup.bash
 export PYTHONPATH="$PWD/dinov3_ws/src/dinov3_cases:${PYTHONPATH:-}"
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests
@@ -21,14 +23,14 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_
 | 分類快取與節點辨識流程 | `test_tracked_recognition.py` |
 | 共享影格租約、IPC 失敗／逾時與清理 | `test_frame_pool.py`、`test_grounding_ipc.py` |
 | 深度、3D 框、點雲篩選及背景刷新 | `test_depth_*.py`、`test_bbox3d_fit.py`、`test_cloud_filter.py`、`test_async_bbox3d*.py` |
-| ROS 訊息、疊圖、即時排程與影像串流 | `test_apriltag.py`、`test_bbox_visualization.py`、`test_realtime.py`、`test_h264_stream.py`、`test_timing.py` |
+| ROS 訊息、疊圖、即時排程與影像串流 | `test_apriltag.py`、`test_bbox_visualization.py`、`test_realtime.py`、`test_image_stream.py`、`test_timing.py` |
 | 圖庫管理、相機擷取與前端互動 | `test_image_manager.py`、`test_camera_capture.py`、`test_images_ui.cjs` |
 | TensorRT 輸入與缺失產物處理 | `test_trt_backend.py` |
 
 前端互動測試需要 Node.js：
 
 ```bash
-node --test dinov3_ws/tests/test_images_ui.cjs
+node --test dinov3_ws/tests/test_images_ui.cjs dinov3_ws/tests/test_sam3_roi_ui.cjs
 ```
 
 ## GPU 整合檢查
@@ -43,7 +45,7 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_async_nvdcf_pipeline.py
 dinov3_ws/.venv/bin/python dinov3_ws/tests/check_grounded_trt_pipeline.py
 ```
 
-`check_official_pipeline.py` 檢查 FP32 bbox、1–4 類別、Cat2Real 圖庫、IPC parity 與模型來源；`check_async_nvdcf_pipeline.py` 驗證 DINO 阻塞時仍先輸出框並持續追蹤；`check_grounded_trt_pipeline.py` 檢查 HTTP／ROS 與編碼阻塞時的框發布。共同測試影像為 `artifacts/validation/person.jpg`。
+`check_official_pipeline.py` 檢查 FP32 bbox、1–4 類別、Cat2Real 圖庫、IPC parity 與模型來源；`check_async_nvdcf_pipeline.py` 驗證 DINO 阻塞時仍先輸出框並持續追蹤；`check_grounded_trt_pipeline.py` 檢查 HTTP／ROS 與繪圖阻塞時的框發布。共同測試影像為 `artifacts/validation/person.jpg`。
 
 原生 NvDCF 的基礎功能、跨 context 交接與遮擋恢復可分別執行：
 
@@ -57,7 +59,7 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/check_nvdcf_occlusion.py
 
 ## 效能診斷
 
-GPU 優化回歸使用 `test_gpu_acceleration.py`，會實際載入 CUDA helper、NvDCF 及可用的 GPU 編碼器。需先完成原生建置。包含 GPU 平面擬合、ROI 插值、共享記憶體追蹤、影片色彩及 CPU/GPU 編碼切換的 IDR／時間戳檢查。
+GPU 優化回歸使用 `test_gpu_acceleration.py`，會實際載入 CUDA helper、NvDCF。需先完成原生建置。包含 GPU 平面擬合、ROI 插值、共享記憶體追蹤。圖片串流測試另涵蓋真實 ROS Image→JPEG、色彩／尺寸／header、多觀看者共享及慢讀者測試。
 
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_ws/tests/test_gpu_acceleration.py
@@ -66,7 +68,9 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_gpu_pipeline.py --samples /tm
 
 重播工具接受含 `rgb`／`depth` 的 NPZ，以及含 `info`／`detections` 的 JSON。`--baseline-depth` 可指定變更前的 `depth_bbox.py` 做相同輸入對照；報告是個別階段時間，不是相機端到端延遲。
 
-本次目前 RANSAC 路徑測試（排除工作區殘留的未追蹤舊 PCA `test_surface_pose.py`）為 486 通過、2 失敗。兩項 `/api/resources` 404 測試在原始 HEAD 也同樣失敗，與本次優化無關。
+2026-11-02 改為 ROS Image／MJPEG 後：**476 通過、12 項既有失敗**（完整 pytest，未排除測試）。舊編碼器專屬測試已移除，raw Image／疊圖測試保留於 `test_image_stream.py`，並新增 MJPEG 多觀看者、背景 JPEG、來源重設與真實 ROS topic 接收測試。真實模型 `check_grounded_trt_pipeline.py` 的繪圖阻塞／ROS Image smoke 已通過。Node.js／瀏覽器與真實相機端到端尚未驗證。
+
+2026-11-02 整理前完整回歸基準：489 通過、12 失敗。`test_resource_web.py` 的兩項測試要求目前未註冊的 `/api/resources`；`test_surface_pose.py` 的十項失敗使用舊多平面介面，與目前單平面 `_surface_rotation` 的參數、回傳值及 method 不一致。這兩個測試檔與 `surface_pose.py` 均已受 Git 追蹤，先保留供確認需求；不應排除測試後宣稱完整回歸通過。詳見 [整理報告](../../REPOSITORY_AUDIT.md)。
 
 保留的工具依問題選用，使用相同環境，執行 `--help` 查看必要參數：
 

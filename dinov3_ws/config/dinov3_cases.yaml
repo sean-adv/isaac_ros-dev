@@ -44,12 +44,8 @@ dinov3_cases:
     sam3_roi_center_y: 200
     recognition_threshold: 0.75
     # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
-    # One 960x540 overlay + H.264 encode shared by WebRTC and ROS. Restart to apply.
+    # One 960x540 ROS Image output, also consumed by the web MJPEG bridge.
     video_fps: 30
-    h264_bitrate: 2000000
-    video_backend: cpu  # cuda enables DeepStream GPU OSD + direct NVENC; benchmark first
-    h264_encoder: auto  # NVENC first; libx264 fallback. Can explicitly select either.
-    h264_topic: /medicine_recognition/image_annotated/h264
     # RViz2 Image display: raw 960x540 BGR overlay, published only when subscribed.
     annotated_image_topic: /medicine_recognition/image_annotated
     bbox_visualization_mode: "3d"

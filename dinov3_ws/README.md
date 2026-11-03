@@ -6,7 +6,7 @@
 - 追蹤：DeepStream 9.1 NvDCF，原生 GPU 子程序；統一安裝：`bash setup_all.sh`。
 - Cat2Real：`zhanganyi88/Cat2Real-DINOv3-384`，官方 Torch-TensorRT FP32，384×384、1024 維 pooler 向量。
 - 圖庫：`data/gallery/`；模型：`artifacts/`；Python：`.venv/`。
-- 即時影像：共用 960×540 H.264 編碼，提供網頁 WebRTC 與 ROS 封包 topic；優先使用 NVENC。詳見 [影像介面](src/dinov3_cases/README.md#共用-h264-即時影像)。
+- 即時影像：共用 960×540 ROS Image `/medicine_recognition/image_annotated`；網頁訂閱相同 topic，透過 JPEG／MJPEG 顯示。詳見 [影像介面](src/dinov3_cases/README.md#共用-ros-image-即時影像)。
 
 ```bash
 # 在本目錄執行；現有環境與模型已遷入
@@ -24,8 +24,10 @@ bash setup_all.sh
 
 開啟 <http://127.0.0.1:8090>。ROS Jazzy、CUDA driver、相機驅動與 ROS 訊息套件需由系統提供；模型建置與推論不依賴相鄰的模型專案。SAM3 首次下載需要 Hugging Face 官方存取權；已有本機模型可離線執行。
 
-`setup_all.sh` 依序準備 Python 環境與 NvDCF；若容器已內建 NvDCF，會沿用既有執行檔。只有 NvDCF 系統安裝步驟會使用 `sudo`，請勿對整支入口加上 `sudo`。單獨更新 Python 環境仍可執行 `bash setup_env.sh`。
+`setup_all.sh` 依序準備 Python 環境與 NvDCF；若容器已內建 NvDCF，會沿用既有執行檔。最後透過 `native/build.sh` 增量編譯 CUDA／NvDCF 輔助程式。只有系統依賴安裝步驟會使用 `sudo`，請勿對整支入口加上 `sudo`。單獨更新 Python 環境仍可執行 `bash setup_env.sh`。
 
 套件清單：[requirements.txt](requirements.txt)、[requirements-build.txt](requirements-build.txt)、[Thor pins](constraints-thor.txt)。完整操作與排程說明見 [BUILD_GUIDE.md](BUILD_GUIDE.md)。
 
 程式責任與資料流程見 [程式導覽](src/dinov3_cases/README.md)，檢查指令見 [測試說明](tests/README.md)。模型建置統一使用 `build_models.py`。
+
+更新 native 程式後，在容器內執行 `bash dinov3_ws/native/build.sh`（從工作區根目錄）；不需重裝依賴。詳見 [原生建置說明](BUILD_GUIDE.md#gpu-延遲優化)。

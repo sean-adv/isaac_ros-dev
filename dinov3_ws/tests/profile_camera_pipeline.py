@@ -118,7 +118,6 @@ def main():
         node.server.shutdown()
         node.worker.join(15)
         node.close_grounding_worker()
-        node.video_publisher_worker.join(3)
         node.publisher_worker.join(3)
         node.renderer_worker.join(3)
         node.destroy_node()

@@ -27,7 +27,7 @@ def create_app(node):
 
     @app.after_request
     def wake_after_update(response):
-        if request.method != "GET" and not request.path.startswith("/api/video/"):
+        if request.method != "GET":
             node.image_changed.set()
             node.render_changed.set()
         return response
@@ -36,7 +36,7 @@ def create_app(node):
         """Caller holds node.lock; discard output from the previous input revision."""
         node.generation += 1
         node.video_at = None
-        node.video_hub.reset()
+        node.image_stream.reset()
         node.clear_object_debug()
         node.detections = []
 
@@ -280,21 +280,13 @@ def create_app(node):
             invalidate_results()
         return jsonify(ok=True)
 
-    @app.post("/api/video/offer")
-    def video_offer():
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict) or not isinstance(data.get("sdp"), str):
-            raise ValueError("Expected a JSON WebRTC SDP offer")
-        return jsonify(node.webrtc.offer(data["sdp"], data.get("type")))
-
-    @app.post("/api/video/peers/<peer_id>/heartbeat")
-    def video_heartbeat(peer_id):
-        return Response(status=204 if node.webrtc.heartbeat(peer_id) else 404)
-
-    @app.delete("/api/video/peers/<peer_id>")
-    def video_disconnect(peer_id):
-        node.webrtc.disconnect(peer_id)
-        return Response(status=204)
+    @app.get("/image_annotated.mjpg")
+    def annotated_image():
+        return Response(
+            node.image_stream.multipart(),
+            content_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/detections")
     def detections():

@@ -25,7 +25,7 @@ section { background: #1b2836; border: 1px solid #304151; border-radius: 12px; m
 .legend { color: #b0becd; font-size: 12px }
 .recognized { color: #8ddcc4 }
 .unknown { color: #f2cb67; margin-left: 8px }
-img, video { max-width: 100%; border-radius: 8px }
+img { max-width: 100%; border-radius: 8px }
 #overlay { display: block; width: 100%; height: clamp(220px, 48vh, 580px); object-fit: contain; background: #080f17 }
 .live-video { position: relative }
 #roi-preview { position: absolute; pointer-events: none; border: 2px solid #8ddcc4; background: rgb(141 220 196 / 20%) }

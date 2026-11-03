@@ -19,14 +19,13 @@
 <section class="live-panel" aria-labelledby="live-title">
 <div class="panel-heading"><h2 id="live-title">Live view</h2><span class="legend"><span class="recognized">●</span> Recognized <span class="unknown">●</span> Unknown</span></div>
 <div class="live-video">
-<video id="overlay" data-live-video autoplay muted playsinline aria-label="Live annotated video"></video>
+<img id="overlay" data-live-image src="/image_annotated.mjpg" alt="Live annotated image">
 <div id="roi-preview" hidden aria-hidden="true"></div>
 </div>
 <div class="live-status">
 <p id="camera-status">Waiting for camera…</p>
 <p id="status">Connecting…</p>
 <p id="model-timings" aria-live="off" title="Wall time: NvDCF live tracker update; DINOv3 gallery refresh, batch recognition and diagnostics; SAM3 worker detection. Stages run asynchronously.">NvDCF — · DINOv3 — · SAM3 —</p>
-<p data-video-status role="status">Connecting video…</p>
 </div>
 <p id="error" role="alert"></p>
 <div class="panel-heading"><h3>Recognition results</h3></div>
@@ -137,9 +136,9 @@
 </details>
 </section>
 </main>
-<script src="/static/video.js"></script>
 <script src="/static/sam3_intervals.js"></script>
 <script src="/static/sam3_roi.js"></script>
 <script src="/static/cases.js"></script>
+<script src="/static/image_stream.js"></script>
 </body>
 </html>

@@ -28,8 +28,6 @@ def main():
     from dinov3_cases.gpu_geometry import CudaPlaneFitter
     from dinov3_cases.nvdcf import NvDCF
     from dinov3_cases.visualization import render_display_overlay
-    from dinov3_cases.gpu_video import GpuH264Encoder,prepare_gpu_display_frame
-    from dinov3_cases.h264_stream import H264Encoder
     report=dict(scope='Identical saved-input stage timing, not live camera end-to-end latency',capture_stamps=meta.get('stamps'),stages={})
     stages=report['stages']
     import torch
@@ -66,12 +64,9 @@ def main():
                 serial[0]+=1;return tracker.update(rgb,serial[0])
             stages['nvdcf_'+mode]=median_ms(measure,15)
         finally:tracker.close()
-    for mode,encoder,render in [('cpu',H264Encoder('auto'),render_display_overlay),
-                                ('cuda',GpuH264Encoder(),prepare_gpu_display_frame)]:
-        try:
-            def measure():return encoder.encode(render(rgb,meta['detections'],info),None,0)
-            stages['video_'+mode]=median_ms(measure,15)
-        finally:encoder.reset()
+    overlay=render_display_overlay(rgb,meta['detections'],info)
+    stages['image_overlay']=median_ms(lambda: render_display_overlay(rgb,meta['detections'],info),15)
+    stages['image_jpeg']=median_ms(lambda: cv2.imencode('.jpg',overlay,[cv2.IMWRITE_JPEG_QUALITY,90]),15)
     if args.models:
         import torch
         from PIL import Image

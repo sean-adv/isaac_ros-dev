@@ -161,85 +161,31 @@ ROS 每筆 `Detection3D.header` 保留該量測的來源時間，陣列 header �
 `/api/status` 的 `performance.bbox3d_schedule` 顯示獨立間隔與背景量測耗時；`bbox3d_ms` 則是前景提交／讀取快取的耗時。
 參數在啟動時讀入，修改 YAML 後需重啟節點。
 
-### 共用 H.264 即時影像
+### 共用 ROS Image 即時影像
 
-主頁與圖庫頁共用一條 960×540 H.264 影像：原圖縮放、相機內參縮放、畫框各一次，
-單一編碼器的 Annex-B 封包同時提供給 WebRTC 與 ROS，兩路不解碼後重新編碼。
-主頁／圖庫頁都使用 `<video>`；圖庫的手動相機擷取仍從原始 RGB 取圖，與觀看串流無關。
-當來源設為上傳圖片時，兩頁觀看的都是該上傳結果。
+單一疊圖輸出為 `/medicine_recognition/image_annotated`（`sensor_msgs/msg/Image`，
+`bgr8`、960×540、Reliable、KeepLast(1)、Volatile），保留來源 RGB 的 header。
+`annotated_image_topic` 可覆寫 topic；`video_fps` 控制最大輸出頻率（1–30）。
+疊圖與 ROS 發布各用獨立 worker，待處理工作只保留最新一份，不讓慢速 DDS 阻塞推論。
+無網頁觀看者且無外部 Image 訂閱者時不繪圖。
 
-- 網頁：`POST /api/video/offer` 交換 SDP，使用 WebRTC H.264 播放；關閉時 `DELETE /api/video/peers/<peer_id>`。
-- ROS：`/medicine_recognition/image_annotated/h264`，型別 `sensor_msgs/msg/CompressedImage`，`format: h264`。
-  每則 `data` 是一個完整 Annex-B access unit，保留來源 RGB 的 `header`。
-  接收端須使用有狀態的 H.264 解碼器，從含 SPS/PPS 的 IDR 開始；不能將每張當成獨立 JPEG。
-  這是本專案的 H.264 封包格式，不相容一般 JPEG/PNG `compressed_image_transport` 或 `rqt_image_view`。
-  ROS QoS 為 reliable、volatile、keep-last 30；只需觀看的客戶端不必訂閱原始 RGB。
+首頁與圖庫頁都使用 `<img src="/image_annotated.mjpg">`。HTTP bridge 實際訂閱同一個
+annotated Image topic，背景 worker 將最新影格轉為 JPEG（quality=90），以 MJPEG 提供給網頁。
+所有觀看者共用同一份 JPEG；每個接收端只取最新完成影格，不建立逐幀佇列。
+無網頁觀看者時不做 JPEG 轉換；靜態來源可重送快取 JPEG，無需重新編碼。
+連線關閉或輸出錯誤會回收觀看者；圖片播放器會在網路錯誤後重連。
+HTTP 經反向代理時應停用此路徑的 response buffering。
 
-`config/dinov3_cases.yaml` 的 `video_fps`（1–30，最大輸出頻率）、`h264_bitrate`（bit/s）、
-`h264_encoder`（auto／h264_nvenc／libx264）、`h264_topic` 與 `bbox_visualization_mode` 於啟動時讀入。
-影片上限以每幀繪製開始時間計算，畫圖與編碼耗時包含在幀預算內；超時直接取最新待處理影像，不補送過期幀。
-`auto` 實際嘗試 NVENC 編碼首張影像，無法使用時改用 libx264；兩者都停用 B-frame 與編碼緩衝。
-無網頁或 ROS 訂閱者時不繪圖、不編碼；同一份最新畫面必要時重送為 IDR，供新觀看者加入。
-每秒及新觀看者加入時請求 IDR；各接收端最多緩存 30 個 access unit，溢位後捨棄整組待傳封包，
-等待下一個 IDR，避免任意丟 P-frame 造成花屏。DDS 發布由獨立 worker 處理，不阻塞 WebRTC 編碼。
-相機持續送新影格時，週期性 IDR 合併到下一張 RGB，避免在兩次結果間重編碼快取畫面；新觀看者明確要求 IDR 或相機暫停時仍可立即重送。
+3D 模式等待有效深度量測及相機參數，不暫時畫 2D 框；DINO 尚未完成時可先顯示
+已就緒 3D 框和 SAM3 名稱。相機辨識結果超過 3 秒或無可見框時顯示原始相機預覽；
+上傳圖片不過期，沒有 ROS header 時使用繪圖當下節點時間。
+圖庫手動擷取仍使用原始 RGB，ROI 預覽依 `<img>` 的 natural size 及顯示留白換算。
 
-3D 模式等待有效的 3D 量測與相機參數後才繪框，不暫時繪製 2D 框。3D 就緒時即使 DINO 尚未完成，也可顯示 3D 框與待辨識標籤；DINO 先完成但 3D 尚未就緒時仍等待。`recognition_pending` 表示該物件類別仍待更新。
+RViz2 使用 **Image** display，選擇上述 topic，Transport Hint=`raw`、Reliability=`Reliable`，
+Queue Size 建議為 1。結構化 Detection2D／Detection3D、AprilTag topic、物件診斷及圖庫圖片保持原有用途。
 
-相機模式有有效框且結果未超過 3 秒時顯示疊圖，否則顯示最新相機預覽；上傳結果不過期。
-上傳圖片沒有 ROS header，使用編碼當下的節點時間，`frame_id` 為空。
-WebRTC 目前使用 host ICE candidates，適用本機／可直連區網；跨 NAT 尚未配置 STUN/TURN。
-最多同時 8 個網頁觀看者。播放器每 3 秒續租，連線中斷或分頁強制關閉後，
-伺服器會在約 15–17 秒內回收未續租的已連線觀看者；協商未完成的連線最多保留 30 秒。狀態 API 的 `video_error` 與 `performance.video_*` 提供編碼診斷。
-
-RViz2 可新增 **Image** display，選擇 `/medicine_recognition/image_annotated`，
-Transport Hint 設為 `raw`、Reliability 設為 `Reliable`。
-此 topic 由 `annotated_image_topic` 設定，發布編碼前的 960×540 `sensor_msgs/msg/Image`（`bgr8`），
-保留來源 header，與網頁共用同一份疊圖及 `video_fps` 上限。
-僅有 RViz2 訂閱時也會繪圖及發布，不啟動 H.264 編碼。
-原始影像由獨立 worker 發布，待傳佇列只保留最新一張；DDS 傳送期間不持有共用鎖，
-避免 RViz2 接收變慢拖住繪圖、追蹤與網頁編碼。RViz2 Image 的 Queue Size 建議設為 1，
-並將全域 Frame Rate 設為 30。實際更新率仍受相機、追蹤與傳輸速度限制。
-
-舊 `/view.mjpg`、`/camera.mjpg`、`/overlay.mjpg`、`/overlay.jpg`，
-以及 `/dinov3/heatmap/overlay`、`/medicine_recognition/debug_image` 影像輸出已移除。
-物件診斷與圖庫的靜態圖片仍保留。結構化結果維持 `/medicine_recognition/detections`、
-`/medicine_recognition/detections_3d` 與 AprilTag topic。
-
-ROS 接收端解碼範例（需先載入 ROS 與本專案虛擬環境）：
-
-```python
-import av
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage
-
-rclpy.init()
-node = Node("h264_viewer")
-decoder = av.CodecContext.create("h264", "r")
-
-def receive(message):
-    try:
-        frames = decoder.decode(av.Packet(bytes(message.data)))
-    except av.FFmpegError:
-        return  # 初次訂閱可能尚未收到下一個 IDR。
-    for frame in frames:
-        bgr = frame.to_ndarray(format="bgr24")  # shape: (540, 960, 3)
-        # 在這裡把 bgr 與 message.header 提供給應用。
-
-subscription = node.create_subscription(
-    CompressedImage, "/medicine_recognition/image_annotated/h264", receive, 30)
-try:
-    rclpy.spin(node)
-finally:
-    node.destroy_node()
-    rclpy.shutdown()
-```
-
-ROS `CompressedImage.format` 允許自訂傳輸格式，詳見
-[訊息定義](https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/CompressedImage.msg)。
-WebRTC 使用 aiortc 的已編碼 `Packet` 路徑，詳見
-[API](https://aiortc.readthedocs.io/en/latest/api.html#aiortc.MediaStreamTrack)。
+網頁圖片串流已取代先前的影片傳輸；舊影片封包 topic、協商／peer API 及編碼設定已移除。
+MJPEG 與 raw Image 的頻寬可能較高；實際 CPU、頻寬及端到端延遲需在目標場景量測。
 
 ## NvDCF 執行環境
 

@@ -28,7 +28,7 @@ def camera(tmp_path):
 
     node = SimpleNamespace(
         root=tmp_path, lock=threading.Lock(), image_changed=threading.Event(),
-        render_changed=threading.Event(), video_hub=Mock(), camera_frame=object(),
+        render_changed=threading.Event(), image_stream=Mock(), camera_frame=object(),
         camera_received_at=time.monotonic(), generation=0,
         grounding_settings={'prompt': 'Detect bottle.', 'box_threshold': 0.3},
         grounding_detector=SimpleNamespace(validate_prompt=validate, detect=detect),

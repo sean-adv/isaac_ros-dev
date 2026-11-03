@@ -1,5 +1,4 @@
 """Actual CUDA kernels and native IPC; skipped when the native helpers are absent."""
-from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
@@ -64,42 +63,3 @@ def test_native_tracker_shared_rgb_agrees_with_legacy_pipe():
         finally:tracker.close()
         assert tracker.input_shm is None
     np.testing.assert_allclose(results[0],results[1],atol=2)
-
-
-def test_gpu_osd_nvenc_color_and_fresh_decoder_at_forced_idr():
-    import av
-    from dinov3_cases.gpu_video import BRIDGE,GpuH264Encoder,prepare_gpu_display_frame
-    if not BRIDGE.exists():pytest.skip('GPU video bridge not built')
-    rgb=np.full((480,640,3),[200,80,30],np.uint8)
-    frame=prepare_gpu_display_frame(rgb,[],mode='2d')
-    rgb[:]=0  # Queued frame owns its input pixels.
-    encoder=GpuH264Encoder();decoder=av.CodecContext.create('h264','r')
-    try:
-        units=[encoder.encode(frame,None,7,force_keyframe=i==2) for i in range(3)]
-        assert [u.keyframe for u in units]==[True,False,True]
-        assert all(u.generation==7 for u in units)
-        assert units[0].pts<units[1].pts<units[2].pts
-        for unit in units:
-            decoded=decoder.decode(av.Packet(unit.data));assert len(decoded)==1
-        pixels=decoded[0].to_ndarray(format='rgb24')
-        np.testing.assert_allclose(pixels[100,100],[200,80,30],atol=8)
-        assert len(av.CodecContext.create('h264','r').decode(av.Packet(units[-1].data)))==1
-    finally:encoder.reset()
-    assert encoder.input_shm is None
-
-
-def test_switching_ros_cpu_preview_and_gpu_video_starts_a_new_decodable_gop():
-    import av
-    from dinov3_cases.gpu_video import BRIDGE,GpuH264Encoder,prepare_gpu_display_frame
-    if not BRIDGE.exists():pytest.skip('GPU video bridge not built')
-    rgb=np.full((240,320,3),[80,150,30],np.uint8)
-    encoder=GpuH264Encoder()
-    try:
-        gpu=prepare_gpu_display_frame(rgb,[],mode='2d')
-        cpu=np.full((540,960,3),[30,150,80],np.uint8)
-        units=[encoder.encode(gpu,None,1),encoder.encode(cpu,None,1),encoder.encode(gpu,None,1)]
-        assert all(u.keyframe for u in units)
-        assert units[0].pts<units[1].pts<units[2].pts
-        for unit in units:
-            assert len(av.CodecContext.create('h264','r').decode(av.Packet(unit.data)))==1
-    finally:encoder.reset()
