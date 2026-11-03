@@ -2,6 +2,34 @@
 
 > 本文件下方的初次 audit 記錄反映清理當時狀態。後續使用者已明確要求改用 ROS Image 並移除影片編碼；目前狀態以本節及更新後的應用／建置文件為準。
 
+## 後續更新：單次辨識與同步清理（2026-11-03）
+
+依使用者要求，移除 `TrackedObjectRecognizer`：部署每次都建立新實例，
+跨呼叫快取與重新分類分支沒有實際重用。節點直接執行單次辨識，保留 NvDCF
+分類沿用、背景交接與診斷快照。輸入 margin 僅留在 ROS／HTTP 設定邊界驗證，
+內部分類介面不再接收；輸出的 Lab gap 保留。深度佇列改用原有 `node.lock`，
+移除無等待者的 Condition；取消追蹤 4 個 Python 快取檔（保留本機檔案）。
+
+完整 pytest：**467 通過、0 失敗**（14.36 秒），未新增 skip／xfail。
+相較前次 474 項，移除舊快取專用的 9 項測試、加入 2 項單次辨識測試；
+現用節點交接／失追回歸仍保留。74 個 Python 檔案語法檢查通過。
+本輪未啟動真實模型／相機；沒有 Node.js，未執行前端測試。
+詳見 [維護狀態](dinov3_ws/src/dinov3_cases/docs/maintenance.md)。
+
+## 後續更新：移除未使用的多平面姿態估算（2026-11-03）
+
+使用者確認目前只使用 RANSAC，移除未被主流程匯入的 `surface_pose.py`
+與專屬 `test_surface_pose.py`（移除前為 3 通過、10 失敗）。保留
+`depth_bbox.py` 的單平面 RANSAC、CPU／CUDA 實作與現用深度／姿態測試。
+完整 pytest：**474 通過、0 失敗**（14.37 秒），未新增 skip／xfail。
+下方多平面 API 與失敗數字為移除前的歷史記錄。
+
+## 後續更新：移除資源監控（2026-11-03）
+
+依使用者要求移除 `resources.py`、`static/resources.js` 及專屬的
+`test_resources.py`、`test_resource_web.py`。此功能原先未接入部署節點與首頁；
+模型耗時與效能診斷工具保留。下方資源監控與測試數字為移除前的歷史記錄。
+
 ## 後續更新：ROS Image／MJPEG（2026-11-02）
 
 - 網頁實際訂閱 `/medicine_recognition/image_annotated`（可由 `annotated_image_topic` 覆寫），背景轉 JPEG，首頁／圖庫透過 `/image_annotated.mjpg` 的 `<img>` 顯示。保留 960×540、bgr8、header、Reliable／KeepLast(1) 與 `video_fps` 上限。
@@ -73,8 +101,8 @@ Git ownership 不一致，檢查使用單次 `git -c safe.directory=/workspaces/
 
 ## C. Requires Verification — 保留
 
-- `surface_pose.py`：目前只有 `test_surface_pose.py` 匯入，主流程使用 `depth_bbox.py` 的單平面路徑；但仍有 3 個測試通過且屬可公開匯入模組。十項失敗預期舊多平面回傳六值，現行函式回傳三值。須確認多平面功能是否正式放棄，再決定移除或修訂契約。
-- `resources.py`、`static/resources.js`、資源監控測試：目前 node／首頁未整合，`/api/resources` 404；sampler 本身有測試。須確認要補上功能或廢除，不能擅自新增 endpoint 或刪除公開模組。
+- 多平面姿態估算：初次 audit 時保留待確認；2026-11-03 使用者確認只使用 RANSAC 後，已移除模組與專屬測試，見上方後續更新。
+- 資源監控：初次 audit 時未接入 node／首頁；2026-11-03 已依使用者要求移除實作與專屬測試，見上方後續更新。
 - 根 `run.sh` 的 host 預設 container／路徑與 Compose 不同：可能仍供既有部署使用，保留並文件化；後續確認使用者後再統一。
 - `requirements-build.txt` 目前只有 include runtime requirements；模型 wrapper 也在 runtime 使用 Transformers／Torch-TensorRT，無證據可移走這些依賴。保留相容檔名及 setup 引用。
 - AST 看似未使用的 `torch_tensorrt` import：實際會註冊反序列化 operator，保留。`model_modules.py` 同時由 builder 與 SAM3 runtime 使用；不得視為 build-only。
@@ -130,4 +158,4 @@ Git ownership 不一致，檢查使用單次 `git -c safe.directory=/workspaces/
 
 ## Remaining recommendations
 
-先確認資源監控 endpoint 與多平面 API 的產品需求，處理既有失敗；再確認 root host wrapper 的服務目標。後續部署工作應先定義最小 source/config/model manifest、補齊 wheel relocation、鎖定 base image／DeepStream 校驗與 Orbbec 版本，再在實際 admin／相機環境建立模型 parity 和端到端效能基準。約 8.2 GB 的 `.git` 及大型外部目錄可另做容量盤點，但本次不改寫 Git history 或刪除外部資料。
+資源監控與多平面 API 已依使用者要求移除；後續確認 root host wrapper 的服務目標。後續部署工作應先定義最小 source/config/model manifest、補齊 wheel relocation、鎖定 base image／DeepStream 校驗與 Orbbec 版本，再在實際 admin／相機環境建立模型 parity 和端到端效能基準。約 8.2 GB 的 `.git` 及大型外部目錄可另做容量盤點，但本次不改寫 Git history 或刪除外部資料。

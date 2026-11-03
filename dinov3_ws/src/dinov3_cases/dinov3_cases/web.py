@@ -12,6 +12,7 @@ from .cat2real import prepare_cat2real_image
 from .nvdcf import check_nvdcf
 from .image_manager import register_image_manager
 from .sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
+from . import recognition_state
 from .gallery_files import (
     group_path as case_path, image_path, load_image, gallery_groups, gallery_images,
 )
@@ -32,18 +33,9 @@ def create_app(node):
             node.render_changed.set()
         return response
 
-    def invalidate_results():
-        """Caller holds node.lock; discard output from the previous input revision."""
-        node.generation += 1
-        node.video_at = None
-        node.image_stream.reset()
-        node.clear_object_debug()
-        node.detections = []
-
     def images_changed(group):
         with node.lock:
-            invalidate_results()
-            node.status = "Building reference features…"
+            recognition_state.gallery_changed(node)
 
     def capture_camera(prompt):
         with node.lock:
@@ -196,9 +188,7 @@ def create_app(node):
                 return jsonify(error="SAM3 is loading. Please try again once it is ready."), 503
             if detector is not None:
                 detector.validate_prompt(settings["prompt"])
-            node.grounding_settings = settings
-            invalidate_results()
-            node.status = "Settings applied: Preparing first detection and recognition…"
+            recognition_state.set_grounding_settings(node, settings)
         return jsonify(ok=True, grounding=settings)
 
     def region_state():
@@ -225,10 +215,7 @@ def create_app(node):
         with node.lock:
             previous = getattr(node, "sam3_roi", DEFAULT_ROI)
             region = validate_roi(*(payload.get(key, old) for key, old in zip(keys, previous)))
-            if region != previous:
-                node.sam3_roi = region
-                invalidate_results()
-                node.status = "SAM3 region applied: Preparing first detection and recognition…"
+            recognition_state.set_region(node, region, previous)
             state = region_state()
         return jsonify(state)
 
@@ -248,9 +235,7 @@ def create_app(node):
             image.save(temp, format="PNG")
             temp.replace(dest)
         with node.lock:
-            node.selected = name
-            invalidate_results()
-            node.status = "Building reference features…"
+            recognition_state.select_case(node, name, rebuild=True)
         return jsonify(ok=True, count=len(images))
 
     @app.post("/api/select")
@@ -260,7 +245,7 @@ def create_app(node):
         if not folder.is_dir():
             raise ValueError("Case does not exist.")
         with node.lock:
-            node.selected = name
+            recognition_state.select_case(node, name)
         return jsonify(ok=True)
 
     @app.post("/api/source")
@@ -274,10 +259,7 @@ def create_app(node):
                 raise ValueError("Choose a target picture.")
             image = decode_image(request.files["image"].stream)
         with node.lock:
-            node.source = mode
-            node.frame = image
-            node.frame_seq += 1
-            invalidate_results()
+            recognition_state.set_source(node, mode, image)
         return jsonify(ok=True)
 
     @app.get("/image_annotated.mjpg")

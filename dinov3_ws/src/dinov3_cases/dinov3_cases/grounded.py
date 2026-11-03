@@ -20,6 +20,7 @@ DEFAULT_PROMPT = "medicine bottle, medicine box."
 
 
 def validate_settings(prompt, box_threshold, recognition_threshold, margin, detection_interval=1):
+    """Validate external settings, including the accepted legacy margin field."""
     validate_detection_interval(detection_interval)
     if not isinstance(prompt, str) or not prompt.strip(" .\t\r\n") or len(prompt) > 1000:
         raise ValueError("Prompt must contain 1–1000 characters.")
@@ -212,12 +213,8 @@ class ObjectGallery:
         best = self._rank_references(dino, lab, indices)[0]
         return best, float(dino[best])
 
-    def classify(self, descriptor, threshold, margin, *, lab_histogram):
-        """Gate references by DINO, then choose the class with the highest Lab score.
-
-        The legacy margin argument is accepted for settings/API compatibility;
-        it no longer rejects the Lab winner. score is the selected DINO score.
-        """
+    def classify(self, descriptor, threshold, *, lab_histogram):
+        """Gate references by DINO, then choose the class with the highest Lab score."""
         if self.features is None:
             return dict(
                 label="unknown", score=None, candidate=None, margin=None, reason="empty_gallery"
@@ -225,7 +222,7 @@ class ObjectGallery:
         dino, lab = self.similarities(descriptor, lab_histogram)
         return self._classify_scores(dino, lab, threshold)
 
-    def classify_batch(self, descriptors, threshold, margin, *, lab_histograms):
+    def classify_batch(self, descriptors, threshold, *, lab_histograms):
         """One GPU matrix multiply/host transfer for all current object scores."""
         if self.features is None:
             return [dict(label="unknown", score=None, candidate=None, margin=None,
@@ -267,7 +264,6 @@ def recognize_objects(
     max_side,
     stride,
     threshold,
-    margin,
     diagnostics=None,
     defer_diagnostics=False,
 ):
@@ -284,9 +280,9 @@ def recognize_objects(
     histograms = [compute_lab_histogram(roi) for roi in rois]
     if hasattr(gallery, 'classify_batch'):
         classifications = gallery.classify_batch(
-            torch.stack([row[2] for row in encoded]), threshold, margin, lab_histograms=histograms)
+            torch.stack([row[2] for row in encoded]), threshold, lab_histograms=histograms)
     else:
-        classifications = [gallery.classify(row[2], threshold, margin, lab_histogram=histogram)
+        classifications = [gallery.classify(row[2], threshold, lab_histogram=histogram)
                            for row,histogram in zip(encoded,histograms)]
     for proposal,roi,row,lab_histogram,classification in zip(proposals,rois,encoded,histograms,classifications):
         prepared, patches, descriptor = row
@@ -309,85 +305,6 @@ def recognize_objects(
             )
         results.append(result)
     return results
-
-
-
-class TrackedObjectRecognizer:
-    """Reuse classifications in stable tracker list order within one tracker set.
-
-    A new tracker-set object (or a new synchronous SAM3 frame) is a new token.
-    Count changes discard cached classifications and encode the current crops.
-    No spatial matching or public numeric IDs are used across tracker sets.
-    """
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.token = None
-        self.classifications = None
-        self.diagnostics = []
-        self.diagnostic_proposals = []
-        self.classification_key = None
-        self.encoded = False
-
-    @property
-    def diagnostic_detections(self):
-        return [dict(proposal, **classification)
-                for proposal, classification in zip(self.diagnostic_proposals,
-                                                      self.classifications or [])]
-
-    def update(self, pixels, proposals, encoder, gallery, max_side, stride,
-               threshold, margin, *, token, gallery_revision):
-        key = (gallery_revision, threshold, margin)
-        self.encoded = False
-        if not proposals:
-            changed = (token != self.token or self.classifications != []
-                       or key != self.classification_key)
-            self.reset()
-            self.token, self.classification_key = token, key
-            self.classifications = []
-            return [], [], changed
-
-        # A surviving subset can change size without replacing the tracker object.
-        # Never zip it with old labels; discard the complete cache and encode all
-        # current crops, including after recovery from an empty set.
-        if (token == self.token and self.classifications is not None
-                and len(proposals) != len(self.classifications)):
-            self.reset()
-        fresh = token != self.token or self.classifications is None
-        changed = fresh or key != self.classification_key
-        if fresh:
-            diagnostics = []
-            detections = recognize_objects(
-                Image.fromarray(pixels), proposals, encoder, gallery, max_side, stride,
-                threshold, margin, diagnostics=diagnostics, defer_diagnostics=True,
-            )
-            fields = ("label", "score", "dino_score", "lab_score",
-                      "candidate", "margin", "reason", "reference")
-            classifications = [{k: item[k] for k in fields if k in item}
-                               for item in detections]
-            # Commit only a complete successful recognition of the new set.
-            self.token = token
-            self.diagnostics = diagnostics
-            self.diagnostic_proposals = [dict(p, bbox=list(p["bbox"])) for p in proposals]
-            self.classifications = classifications
-            self.classification_key = key
-            self.encoded = True
-        elif changed:
-            # Reclassify cached descriptors without another encoder forward.
-            self.classifications = [
-                gallery.classify(
-                    item["context"]["descriptor"], threshold, margin,
-                    lab_histogram=item["context"]["lab_histogram"],
-                )
-                for item in self.diagnostics
-            ]
-            for item in self.diagnostics:
-                item["context"] = dict(item["context"], recognition_threshold=threshold)
-            self.classification_key = key
-        detections = [dict(p, **c) for p, c in zip(proposals, self.classifications)]
-        return detections, self.diagnostics, changed
 
 
 def recognition_message(items, header=None):

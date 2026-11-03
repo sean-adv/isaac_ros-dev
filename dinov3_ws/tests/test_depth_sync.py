@@ -45,7 +45,7 @@ def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     from dinov3_cases.cloud_filter import CloudFilter
     node = SimpleNamespace(cloud_filter=CloudFilter(), depth_ray_cache=ProjectionRayCache(),
                            param=values.__getitem__, bridge=Mock(), stop=threading.Event(),
-                           depth_changed=threading.Condition(), depth_frames=deque(),
+                           lock=threading.Lock(), depth_frames=deque(),
                            depth_infos=deque([calibration()]))
     frame = Image(header=header(), width=160, height=120)
     depth = Image(header=header(), width=160, height=120, encoding=encoding)
@@ -62,12 +62,12 @@ def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
 
 
 def test_depth_snapshot_does_not_wait_for_future_depth():
-    condition = Mock()
-    condition.__enter__ = Mock(return_value=condition)
-    condition.__exit__ = Mock(return_value=False)
+    lock = Mock()
+    lock.__enter__ = Mock(return_value=lock)
+    lock.__exit__ = Mock(return_value=False)
     values = dict(pose_enabled=True, pose_sync_tolerance=.05)
-    node = SimpleNamespace(param=values.__getitem__, depth_changed=condition,
+    node = SimpleNamespace(param=values.__getitem__, lock=lock,
                            depth_frames=[], depth_infos=[calibration()])
     frame = Image(header=header(), width=160, height=120)
     assert CaseNode.depth_inputs_for(node, frame) is None
-    condition.wait.assert_not_called()
+    lock.__enter__.assert_called_once()

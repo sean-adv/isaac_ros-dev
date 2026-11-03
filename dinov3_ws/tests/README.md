@@ -4,6 +4,10 @@
 
 ## 回歸測試
 
+最新結果（2026-11-03，單次辨識清理後）：**467 通過、0 失敗**（14.36 秒）。
+舊快取類別的 9 項測試改為 2 項單次辨識測試，節點交接與失追回歸保留；
+新增 HTTP margin 相容邊界斷言，未新增 skip／xfail。下方較早結果為歷史記錄。
+
 ```bash
 # 首次執行測試前，另安裝開發依賴（runtime setup 不包含 pytest）：
 dinov3_ws/.venv/bin/python -m pip install -c dinov3_ws/constraints-thor.txt -r dinov3_ws/requirements-dev.txt
@@ -16,11 +20,12 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_
 
 | 範圍 | 測試 |
 | --- | --- |
+| 啟動設定、參數邊界與 prompt 正規化 | `test_config.py` |
 | NvDCF 非同步交接、DINO 延後分類、失追／漏偵測與資源回收 | `test_async_nvdcf.py` |
 | 幾何配對、公開 ID、生命週期與框平滑 | `test_tracking.py` |
 | SAM3 prompt、官方前處理、原圖框與分數 | `test_sam3.py` |
 | Cat2Real 前處理、patch 特徵、圖庫與 DINO／Lab 分類 | `test_cat2real.py`、`test_patches.py`、`test_reference_gallery.py`、`test_grounded.py`、`test_lab_similarity.py` |
-| 分類快取與節點辨識流程 | `test_tracked_recognition.py` |
+| 單次辨識、分類沿用與節點辨識流程 | `test_tracked_recognition.py` |
 | 共享影格租約、IPC 失敗／逾時與清理 | `test_frame_pool.py`、`test_grounding_ipc.py` |
 | 深度、3D 框、點雲篩選及背景刷新 | `test_depth_*.py`、`test_bbox3d_fit.py`、`test_cloud_filter.py`、`test_async_bbox3d*.py` |
 | ROS 訊息、疊圖、即時排程與影像串流 | `test_apriltag.py`、`test_bbox_visualization.py`、`test_realtime.py`、`test_image_stream.py`、`test_timing.py` |
@@ -32,6 +37,12 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 dinov3_ws/.venv/bin/python -m pytest -q dinov3_
 ```bash
 node --test dinov3_ws/tests/test_images_ui.cjs dinov3_ws/tests/test_sam3_roi_ui.cjs
 ```
+
+2026-11-03 套件整理後完整 pytest：**488 通過、12 項既有失敗**；整理前為 480 通過、12 失敗，新增 8 項啟動設定測試通過。失敗名稱相同，未排除測試。Node.js 測試因環境缺少 `node` 未執行。詳見 [維護狀態](../src/dinov3_cases/docs/maintenance.md)。
+
+2026-11-03 移除資源監控後，完整 pytest：**477 通過、10 項既有失敗**，失敗皆位於 `test_surface_pose.py`。移除的專屬測試原有 11 項通過、2 項失敗；沒有新增失敗或 skip／xfail。
+
+2026-11-03 移除未使用的多平面模組與專屬測試後，完整 pytest：**474 通過、0 失敗**（14.37 秒）。現用 RANSAC／CUDA、深度框、追蹤、ROS 與 HTTP 測試均保留，未新增 skip／xfail。多平面專屬測試移除前為 3 通過、10 失敗。
 
 ## GPU 整合檢查
 
@@ -70,7 +81,7 @@ dinov3_ws/.venv/bin/python dinov3_ws/tests/profile_gpu_pipeline.py --samples /tm
 
 2026-11-02 改為 ROS Image／MJPEG 後：**476 通過、12 項既有失敗**（完整 pytest，未排除測試）。舊編碼器專屬測試已移除，raw Image／疊圖測試保留於 `test_image_stream.py`，並新增 MJPEG 多觀看者、背景 JPEG、來源重設與真實 ROS topic 接收測試。真實模型 `check_grounded_trt_pipeline.py` 的繪圖阻塞／ROS Image smoke 已通過。Node.js／瀏覽器與真實相機端到端尚未驗證。
 
-2026-11-02 整理前完整回歸基準：489 通過、12 失敗。`test_resource_web.py` 的兩項測試要求目前未註冊的 `/api/resources`；`test_surface_pose.py` 的十項失敗使用舊多平面介面，與目前單平面 `_surface_rotation` 的參數、回傳值及 method 不一致。這兩個測試檔與 `surface_pose.py` 均已受 Git 追蹤，先保留供確認需求；不應排除測試後宣稱完整回歸通過。詳見 [整理報告](../../REPOSITORY_AUDIT.md)。
+2026-11-02 整理前完整回歸基準：489 通過、12 失敗。`test_resource_web.py` 的兩項測試要求目前未註冊的 `/api/resources`；`test_surface_pose.py` 的十項失敗使用舊多平面介面，與目前單平面 `_surface_rotation` 的參數、回傳值及 method 不一致。此為歷史基準；2026-11-03 已依使用者要求移除資源監控及專屬測試，同日確認只使用 RANSAC 後，亦移除未使用的多平面模組與專屬測試；現用 RANSAC 測試保留。不應排除現有測試後宣稱完整回歸通過。詳見 [整理報告](../../REPOSITORY_AUDIT.md)。
 
 保留的工具依問題選用，使用相同環境，執行 `--help` 查看必要參數：
 

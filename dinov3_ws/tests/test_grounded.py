@@ -123,22 +123,22 @@ def test_gallery_multi_class_unknown_and_filesystem_updates(tmp_path):
     assert not gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
     red_hist = compute_lab_histogram(Image.new("RGB", (32, 32), "red"))
     shared_hist = (red_hist + compute_lab_histogram(Image.new("RGB", (32, 32), "blue"))) / 2
-    red = gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)
+    red = gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, lab_histogram=red_hist)
     assert red["label"] == "red" and red["margin"] is None
-    assert gallery.classify(torch.tensor([0.0, 1.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["reason"] == "low_similarity"
+    assert gallery.classify(torch.tensor([0.0, 1.0, 0.0]), 0.75, lab_histogram=red_hist)["reason"] == "low_similarity"
     shared = torch.nn.functional.normalize(torch.tensor([1.0, 0.0, 1.0]), dim=0)
-    assert gallery.classify(shared, 0.6, 0.05, lab_histogram=shared_hist)["reason"] == "matched"
+    assert gallery.classify(shared, 0.6, lab_histogram=shared_hist)["reason"] == "matched"
     # Additional views of the same class must not occupy both top-two slots.
     Image.new("RGB", (32, 48), "red").save(tmp_path / "red/two.png")
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["label"] == "red"
+    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, lab_histogram=red_hist)["label"] == "red"
     (tmp_path / "blue/one.png").unlink()
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, 0.05, lab_histogram=red_hist)["margin"] is None
+    assert gallery.classify(torch.tensor([1.0, 0.0, 0.0]), 0.75, lab_histogram=red_hist)["margin"] is None
     for path in (tmp_path / "red").iterdir():
         path.unlink()
     assert gallery.refresh(tmp_path, ColorEncoder(), 64, 16)
-    assert gallery.classify(shared, 0.75, 0.05, lab_histogram=shared_hist)["reason"] == "empty_gallery"
+    assert gallery.classify(shared, 0.75, lab_histogram=shared_hist)["reason"] == "empty_gallery"
 
 
 def test_roi_coordinates_identity_and_ros_header(tmp_path):
@@ -155,7 +155,7 @@ def test_roi_coordinates_identity_and_ros_header(tmp_path):
     proposals = clean_proposals(
         [[0, 0, 50, 50], [50, 0, 100, 50]], [0.9, 0.8], ["box", "bottle"], image.size
     )
-    result = recognize_objects(image, proposals, encoder, gallery, 64, 16, 0.75, 0.05)
+    result = recognize_objects(image, proposals, encoder, gallery, 64, 16, 0.75)
     assert [item["label"] for item in result] == ["a", "b"]
     assert [item["bbox"] for item in result] == [p["bbox"] for p in proposals]
     header = Header(frame_id="camera")
@@ -213,7 +213,7 @@ def test_object_heatmap_reuses_forward_and_best_reference(tmp_path):
     roi = Image.new("RGB", (843, 1079), "red")
     proposals = clean_proposals([[0, 0, 843, 1079]], [0.9], ["bottle"], roi.size)
     diagnostics = []
-    result = recognize_objects(roi, proposals, encoder, gallery, 64, 16, 0.75, 0.05, diagnostics)
+    result = recognize_objects(roi, proposals, encoder, gallery, 64, 16, 0.75, diagnostics)
     assert encoder.calls == 1
     assert result[0]["reference"] == dict(case="red", name="one.png")
     assert "_reference_index" not in result[0]
@@ -249,7 +249,7 @@ def test_empty_gallery_and_large_crop_visualizations():
     diagnostics = []
     proposal = dict(bbox=[0, 0, 1500, 3000], detection_score=0.9, detection_label="box")
     result = recognize_objects(
-        roi, [proposal], ColorEncoder(), ObjectGallery(), 64, 16, 0.75, 0.05, diagnostics
+        roi, [proposal], ColorEncoder(), ObjectGallery(), 64, 16, 0.75, diagnostics
     )
     assert result[0]["reason"] == "empty_gallery"
     assert set(diagnostics[0]["views"]) == {"crop", "grid"}
@@ -297,7 +297,7 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
         [[0, 0, 32, 32], [32, 0, 64, 32]], [0.9, 0.8], ["box"] * 2, target.size
     )
     diagnostics = []
-    results = recognize_objects(target, proposals, encoder, gallery, 32, 16, 0.6, 0.05, diagnostics)
+    results = recognize_objects(target, proposals, encoder, gallery, 32, 16, 0.6, diagnostics)
     snapshot = ObjectVisualizationSnapshot(results, diagnostics, gallery, 32, 16)
     calls = encoder.calls
     automatic, _ = snapshot.render()
@@ -361,7 +361,6 @@ def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
         32,
         16,
         0.75,
-        0.05,
         diagnostics,
         defer_diagnostics=True,
     )
@@ -457,6 +456,14 @@ def test_web_settings_accept_interval_and_reject_invalid_values(tmp_path, monkey
     for value in (0, -1, True, 1.5, "5"):
         assert client.post("/api/grounding", json={"detection_interval": value}).status_code == 400
     assert node.generation == 1
+    # Legacy clients can still send margin, but classification no longer consumes it.
+    response = client.post("/api/grounding", json={"margin": 2})
+    assert response.status_code == 200 and response.json["grounding"]["margin"] == 2
+    assert response.json["grounding"]["recognition_threshold"] == .75
+    assert node.generation == 2
+    for value in (-1, 2.1, True, "0.05"):
+        assert client.post("/api/grounding", json={"margin": value}).status_code == 400
+    assert node.generation == 2
 
 
 def test_overlapping_boxes_below_containment_threshold_are_kept():
@@ -474,6 +481,6 @@ def test_batched_gallery_preserves_single_object_ranking_and_order(tmp_path):
     gallery=ObjectGallery();gallery.refresh(tmp_path,encoder,64,16)
     descriptors=torch.tensor([[1.,0.,0.],[0.,0.,1.],[0.,1.,0.]])
     histograms=[compute_lab_histogram(Image.new('RGB',(20,20),c)) for c in ('red','blue','green')]
-    expected=[gallery.classify(d,.75,.05,lab_histogram=h) for d,h in zip(descriptors,histograms)]
-    actual=gallery.classify_batch(descriptors,.75,.05,lab_histograms=histograms)
+    expected=[gallery.classify(d,.75,lab_histogram=h) for d,h in zip(descriptors,histograms)]
+    actual=gallery.classify_batch(descriptors,.75,lab_histograms=histograms)
     assert actual==expected

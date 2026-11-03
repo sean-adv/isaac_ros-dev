@@ -1,4 +1,4 @@
-"""Classification lifetime follows NvDCF sets, not numeric IDs or moving boxes."""
+"""Single-shot seed recognition and NvDCF classification/diagnostic lifetime."""
 from unittest.mock import Mock
 
 import numpy as np
@@ -6,7 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
-from dinov3_cases.grounded import ObjectGallery, TrackedObjectRecognizer
+from dinov3_cases.grounded import ObjectGallery, recognize_objects
 from dinov3_cases.timing import ModelTimings
 
 
@@ -31,7 +31,7 @@ def setup(tmp_path):
     pixels = np.zeros((40, 80, 3), dtype=np.uint8)
     pixels[:, :40] = [255, 0, 0]
     pixels[:, 40:] = [0, 0, 255]
-    return TrackedObjectRecognizer(), encoder, gallery, pixels
+    return encoder, gallery, pixels
 
 
 def proposal(x=0):
@@ -39,122 +39,31 @@ def proposal(x=0):
                 detection_score=.9, detection_label='box')
 
 
-def run(setup, proposals, token, revision=1, threshold=.75):
-    cache, encoder, gallery, pixels = setup
-    return cache.update(pixels, proposals, encoder, gallery, 32, 16,
-                        threshold, .05, token=token, gallery_revision=revision)
+def test_single_shot_recognition_uses_current_crop_order_and_empty_results(setup):
+    encoder, gallery, pixels = setup
+    image = Image.fromarray(pixels)
+    first = recognize_objects(image, [proposal(), proposal(45)], encoder, gallery, 32, 16, .75)
+    assert [item['label'] for item in first] == ['red', 'blue']
+    diagnostics = []
+    second = recognize_objects(image, [proposal(45)], encoder, gallery, 32, 16, .75,
+                               diagnostics=diagnostics, defer_diagnostics=True)
+    assert second[0]['label'] == 'blue' and encoder.calls == 3
+    assert diagnostics[0]['context']['roi'].getpixel((0, 0)) == (0, 0, 255)
+    assert recognize_objects(image, [], encoder, gallery, 32, 16, .75) == []
+    assert encoder.calls == 3
 
 
-def test_nvdcf_frames_reuse_identity_but_keep_current_bbox_and_fresh_depth_inputs(setup):
-    cache, encoder, _, _ = setup
-    token = object()
-    first, diagnostics, changed = run(setup, [proposal()], token)
-    assert changed and cache.encoded and first[0]['label'] == 'red'
-    first[0].update(bbox3d={'position': [1, 2, 3]}, track_id=99, bbox_visible=False)
-    # Deliberately move onto a blue region: no DINO rerun within this set.
-    moved = dict(proposal(45), bbox_source='nvdcf')
-    current, reused, changed = run(setup, [moved], token)
-    assert encoder.calls == 1 and not changed and not cache.encoded
-    assert current[0]['label'] == 'red' and current[0]['bbox'] == moved['bbox']
-    assert current[0]['bbox_source'] == 'nvdcf'
-    assert not {'track_id', 'bbox3d', 'bbox_visible'} & current[0].keys()
-    assert reused is diagnostics
-    assert cache.diagnostic_detections[0]['bbox'] == proposal()['bbox']
-
-
-def test_new_set_reclassifies_even_with_same_count_and_reordered_objects(setup):
-    cache, encoder, _, _ = setup
-    first, _, _ = run(setup, [proposal(), proposal(45)], object())
-    assert [p['label'] for p in first] == ['red', 'blue']
-    second, _, changed = run(setup, [proposal(45), proposal()], object())
-    assert changed and cache.encoded and encoder.calls == 4
-    assert [p['label'] for p in second] == ['blue', 'red']
-
-
-def test_tracking_loss_drops_labels_and_diagnostic_crops(setup):
-    cache, encoder, _, _ = setup
-    token = object()
-    run(setup, [proposal()], token)
-    assert run(setup, [], token) == ([], [], True)
-    assert cache.diagnostic_detections == []
-    assert encoder.calls == 1
-    assert run(setup, [], token) == ([], [], False)
-    fresh, _, changed = run(setup, [proposal(45)], object())
-    assert changed and fresh[0]['label'] == 'blue' and encoder.calls == 2
-
-
-def test_gallery_and_threshold_changes_reclassify_descriptors_without_forward(setup):
-    cache, encoder, gallery, _ = setup
-    token = object()
-    run(setup, [proposal()], token)
-    red_index = gallery.labels.index('red')
-    gallery.labels[red_index] = 'renamed_red'
-    updated, _, changed = run(setup, [proposal(1)], token, revision=2)
-    assert changed and not cache.encoded and encoder.calls == 1
-    assert updated[0]['label'] == 'renamed_red'
-    gallery.features[red_index] *= .5
-    updated, _, changed = run(setup, [proposal(2)], token, revision=2, threshold=.9)
-    assert changed and updated[0]['label'] == 'unknown' and encoder.calls == 1
-
-
-def test_same_tracker_in_synchronous_mode_uses_frame_token(setup):
-    active = object()
-    run(setup, [proposal()], (active, 1))
-    second, _, changed = run(setup, [proposal(45)], (active, 2))
-    assert changed and second[0]['label'] == 'blue' and setup[1].calls == 2
-
-
-def test_partial_failed_new_set_never_commits_or_reuses_old_classification(setup):
-    cache, encoder, _, _ = setup
-    run(setup, [proposal()], object())
-    token = object()
+def test_failed_recognition_can_retry_without_retaining_partial_labels(setup):
+    encoder, gallery, pixels = setup
     original = encoder.encode
     encoder.encode = Mock(side_effect=[torch.ones((4, 3)), RuntimeError('GPU failure')])
     with pytest.raises(RuntimeError, match='GPU failure'):
-        run(setup, [proposal(), proposal(45)], token)
+        recognize_objects(Image.fromarray(pixels), [proposal(), proposal(45)],
+                          encoder, gallery, 32, 16, .75)
     encoder.encode = original
-    result, _, changed = run(setup, [proposal(45)], token)
-    assert changed and cache.encoded and result[0]['label'] == 'blue'
-
-
-def test_count_changes_reencode_current_crops_without_reusing_old_labels(setup):
-    cache, encoder, _, _ = setup
-    token = object()
-    run(setup, [proposal(), proposal(45)], token)
-    # First object disappears. The surviving blue object must not inherit red.
-    result, diagnostics, changed = run(setup, [proposal(45)], token)
-    assert changed and cache.encoded and encoder.calls == 3
+    result = recognize_objects(Image.fromarray(pixels), [proposal(45)],
+                               encoder, gallery, 32, 16, .75)
     assert result[0]['label'] == 'blue'
-    assert result[0]['dino_score'] == pytest.approx(1)
-    assert result[0]['lab_score'] == pytest.approx(1)
-    assert diagnostics[0]['context']['roi'].getpixel((0, 0)) == (0, 0, 255)
-    result, _, changed = run(setup, [proposal(45), proposal()], token)
-    assert changed and cache.encoded and encoder.calls == 5
-    assert [item['label'] for item in result] == ['blue', 'red']
-    assert not run(setup, [proposal(45), proposal()], token)[2]
-    assert encoder.calls == 5
-
-
-def test_empty_set_can_recover_with_the_same_tracker_token(setup):
-    token = object()
-    run(setup, [proposal()], token)
-    run(setup, [], token)
-    result, _, changed = run(setup, [proposal(45)], token)
-    assert changed and setup[0].encoded and result[0]['label'] == 'blue'
-
-
-def test_failed_count_change_discards_invalid_cache_before_retry(setup):
-    cache, encoder, _, _ = setup
-    token = object()
-    run(setup, [proposal(), proposal(45)], token)
-    original = encoder.encode
-    encoder.encode = Mock(side_effect=RuntimeError('GPU failure'))
-    with pytest.raises(RuntimeError, match='GPU failure'):
-        run(setup, [proposal(45)], token)
-    assert cache.classifications is None and cache.diagnostic_detections == []
-    encoder.encode = original
-    result, _, changed = run(setup, [proposal(45)], token)
-    assert changed and result[0]['label'] == 'blue'
 
 
 @pytest.mark.parametrize('scenario', ['handoff', 'same_frame', 'partial_loss', 'total_loss'])
@@ -166,7 +75,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     from dinov3_cases.frame_pool import SharedFramePool
     from dinov3_cases.tracking import BBoxSmoother
 
-    _, encoder, gallery, pixels = setup
+    encoder, gallery, pixels = setup
     encoder.device, encoder.description = 'cpu', 'counting encoder'
     encoder.model = object()
     gallery.refresh = Mock(return_value=False)

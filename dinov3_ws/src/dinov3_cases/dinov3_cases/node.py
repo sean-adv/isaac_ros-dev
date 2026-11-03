@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import ExternalShutdownException
@@ -23,16 +24,10 @@ from .encoder import Encoder
 from .grounding_ipc import SharedMemoryGroundingDetector
 from .frame_pool import SharedFramePool
 from .tracking import BBoxSmoother
-from .nvdcf import check_nvdcf, DEFAULT_CONFIG
-from .async_nvdcf import AsyncNvDCFProposals, validate_missed_frames
-from .async_bbox3d import AsyncBBox3D, validate_bbox3d_schedule
-from .runtime import (
-    CASES_DIR,
-    DINO_ENGINE,
-    GROUNDING_ENGINE,
-    GROUNDING_PYTHON,
-    INPUT_SIZE,
-)
+from .config import default_parameters, validate_parameters
+from .async_nvdcf import AsyncNvDCFProposals
+from .async_bbox3d import AsyncBBox3D
+from .runtime import INPUT_SIZE
 from vision_msgs.msg import Detection2DArray, Detection3DArray
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
 from .apriltag import apriltag_message
@@ -45,12 +40,8 @@ from .web import create_app
 from .visualization import render_display_overlay
 from .object_visualization import ObjectVisualizationSnapshot
 from .grounded import (
-    DEFAULT_PROMPT,
     ObjectGallery,
-    validate_settings,
-    validate_bbox_limits,
-    validate_containment_threshold,
-    TrackedObjectRecognizer,
+    recognize_objects,
     recognition_message,
 )
 
@@ -58,110 +49,19 @@ from .grounded import (
 class CaseNode(Node):
     def __init__(self):
         super().__init__("dinov3_cases")
-        defaults = dict(
-            cases_dir=str(CASES_DIR),
-            grounding_worker_python=str(GROUNDING_PYTHON),
-            grounding_ipc_timeout=60.0,
-            grounding_engine_path=str(GROUNDING_ENGINE),
-            grounding_prompt=DEFAULT_PROMPT,
-            grounding_box_threshold=0.3,
-            grounding_containment_threshold=0.95,
-            grounding_max_detections=20,
-            grounding_detection_interval=1,
-            bbox_smoothing_frames=3,
-            opencv_num_threads=0,
-            nvdcf_config=str(DEFAULT_CONFIG),
-            nvdcf_width=640,
-            nvdcf_height=384,
-            nvdcf_max_missed_detections=3,
-            nvdcf_max_missed_frames=30,
-            grounding_min_bbox_width=0,
-            grounding_min_bbox_height=0,
-            grounding_min_bbox_area=0,
-            sam3_roi_width=0,
-            sam3_roi_height=0,
-            sam3_roi_center_x=-1,
-            sam3_roi_center_y=-1,
-            recognition_threshold=0.75,
-            recognition_margin=0.05,
-            image_topic="/camera/color/image_raw",
-            annotated_image_topic="/medicine_recognition/image_annotated",
-            tag_topic="/tag_detections",
-            pose_enabled=True,
-            depth_topic="/camera/depth/image_raw",
-            depth_camera_info_topic="/camera/depth/camera_info",
-            pose_sync_tolerance=0.05,
-            pose_min_depth=0.1,
-            pose_max_depth=5.0,
-            bbox3d_interval=5,
-            bbox3d_max_age=1.5,
-            bbox3d_depth_band=0.08,
-            bbox3d_min_points=80,
-            bbox3d_quantile=0.02,
-            bbox3d_plane_backend="cuda",
-            bbox3d_min_cloud_coverage=0.15,
-            bbox3d_min_coverage_ratio=0.35,
-            bbox3d_max_depth_jump=0.10,
-            bbox3d_depth_confirmations=3,
-            engine_path=str(DINO_ENGINE),
-            port=8090,
-            host="127.0.0.1",
-            video_fps=30,
-            bbox_visualization_mode="3d",
-        )
+        defaults = default_parameters()
         for k, v in defaults.items():
             self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
         self.sam3_roi = validate_roi(*(self.param("sam3_roi_" + key)
                                      for key in ("width", "height", "center_x", "center_y")))
+        self.grounding_settings = validate_parameters(self.param)
         self.bbox_visualization_mode = self.param("bbox_visualization_mode")
-        if self.bbox_visualization_mode not in ("2d", "3d"):
-            raise ValueError("bbox_visualization_mode must be 2d or 3d.")
-        opencv_threads = self.param("opencv_num_threads")
-        if isinstance(opencv_threads, bool) or not isinstance(opencv_threads, int) or opencv_threads < 0:
-            raise ValueError("opencv_num_threads must be an integer >= 0 (0 keeps the OpenCV default).")
         # Set the global OpenCV pool before starting inference/render workers.
+        opencv_threads = self.param("opencv_num_threads")
         if opencv_threads > 0:
             cv2.setNumThreads(opencv_threads)
         self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
-        self.grounding_settings = dict(
-            prompt=self.param("grounding_prompt"),
-            box_threshold=self.param("grounding_box_threshold"),
-            recognition_threshold=self.param("recognition_threshold"),
-            margin=self.param("recognition_margin"),
-            detection_interval=self.param("grounding_detection_interval"),
-        )
-        self.grounding_settings["prompt"] = validate_settings(**self.grounding_settings)
-        validate_missed_frames(self.param("nvdcf_max_missed_frames"))
-        if self.grounding_settings["detection_interval"] > 1:
-            check_nvdcf(self.param("nvdcf_config"))
-        validate_containment_threshold(self.param("grounding_containment_threshold"))
-        if not 1 <= self.param("grounding_max_detections") <= 100:
-            raise ValueError("grounding_max_detections must be between 1 and 100.")
-        validate_bbox_limits(
-            self.param("grounding_min_bbox_width"),
-            self.param("grounding_min_bbox_height"),
-            self.param("grounding_min_bbox_area"),
-        )
-        if (
-            not np.isfinite(self.param("grounding_ipc_timeout"))
-            or self.param("grounding_ipc_timeout") <= 0
-        ):
-            raise ValueError("grounding_ipc_timeout must be positive.")
-        fps = self.param("video_fps")
-        if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not np.isfinite(fps) or not 1 <= fps <= 30:
-            raise ValueError("video_fps must be between 1 and 30.")
-        for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
-            if not np.isfinite(self.param(name)) or self.param(name) <= 0:
-                raise ValueError(f"{name} must be finite and positive.")
-        if not 0 <= self.param("bbox3d_quantile") < 0.5:
-            raise ValueError("bbox3d_quantile must be in [0, 0.5).")
-        if (not isinstance(self.param("bbox3d_min_points"), int)
-                or self.param("bbox3d_min_points") < 5):
-            raise ValueError("bbox3d_min_points must be an integer >= 5.")
-        if self.param("pose_min_depth") >= self.param("pose_max_depth"):
-            raise ValueError("pose_min_depth must be less than pose_max_depth.")
-        validate_bbox3d_schedule(self.param("bbox3d_interval"), self.param("bbox3d_max_age"))
         self.cloud_filter = CloudFilter(
             min_coverage=self.param("bbox3d_min_cloud_coverage"),
             min_coverage_ratio=self.param("bbox3d_min_coverage_ratio"),
@@ -173,7 +73,6 @@ class CaseNode(Node):
         self.bridge = CvBridge()
         self.lock = threading.Lock()
         self.image_changed = threading.Event()
-        self.depth_changed = threading.Condition(self.lock)
         self.depth_frames = deque(maxlen=30)
         self.depth_infos = deque(maxlen=8)
         self.depth_ray_cache = ProjectionRayCache()
@@ -257,8 +156,6 @@ class CaseNode(Node):
         self.renderer_worker = threading.Thread(target=self.run_rendering, daemon=True)
         self.renderer_worker.start()
         plane_backend = self.param("bbox3d_plane_backend")
-        if plane_backend not in ("cuda", "cpu"):
-            raise ValueError("bbox3d_plane_backend must be cuda or cpu")
         self.plane_fitter = None
         if self.param("pose_enabled") and plane_backend == "cuda":
             from .gpu_geometry import CudaPlaneFitter
@@ -290,20 +187,18 @@ class CaseNode(Node):
             self.image_changed.set()
 
     def on_depth(self, msg):
-        with self.depth_changed:
+        with self.lock:
             self.depth_frames.append(msg)
-            self.depth_changed.notify_all()
 
     def on_depth_info(self, msg):
-        with self.depth_changed:
+        with self.lock:
             self.depth_infos.append(msg)
-            self.depth_changed.notify_all()
 
     def depth_inputs_for(self, frame):
         """Retain a matching depth snapshot without waiting in the RGB loop."""
         if not self.param("pose_enabled") or not isinstance(frame, ImageMsg):
             return None
-        with self.depth_changed:
+        with self.lock:
             return matched_inputs(
                 frame.header, frame.width, frame.height, self.depth_frames,
                 self.depth_infos, self.param("pose_sync_tolerance")
@@ -682,14 +577,15 @@ class CaseNode(Node):
                     # All gallery GPU work and diagnostics stay off the NvDCF loop.
                     started = time.monotonic()
                     gallery.refresh(self.root, encoder, max_side, stride)
-                    recognizer = TrackedObjectRecognizer()
-                    detections, diagnostics, _ = recognizer.update(
-                        seed_pixels, proposals, encoder, gallery, max_side, stride,
-                        settings["recognition_threshold"], settings["margin"],
-                        token=seed_key, gallery_revision=0,
+                    diagnostics = []
+                    detections = recognize_objects(
+                        Image.fromarray(seed_pixels), proposals, encoder, gallery, max_side, stride,
+                        settings["recognition_threshold"], diagnostics=diagnostics,
+                        defer_diagnostics=True,
                     )
                     snapshot = ObjectVisualizationSnapshot(
-                        recognizer.diagnostic_detections, diagnostics, gallery, max_side, stride
+                        [dict(item, bbox=list(item["bbox"])) for item in detections],
+                        diagnostics, gallery, max_side, stride,
                     )
                     return detections, dict(
                         frame_id=seed_key[1] if proposals else None,

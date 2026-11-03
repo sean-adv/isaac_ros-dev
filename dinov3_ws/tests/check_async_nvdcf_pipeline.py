@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 import rclpy
 
-from dinov3_cases.node import CaseNode, TrackedObjectRecognizer
+from dinov3_cases.node import CaseNode, recognize_objects
 from dinov3_cases.runtime import ARTIFACTS
 
 
@@ -19,14 +19,14 @@ def main():
     image = Image.open(ARTIFACTS / 'validation/person.jpg').convert('RGB')
     entered, release = threading.Event(), threading.Event()
     dino_entered, dino_release = threading.Event(), threading.Event()
-    real_recognize = TrackedObjectRecognizer.update
+    real_recognize = recognize_objects
 
-    def gated_recognize(self, *args, **kwargs):
+    def gated_recognize(*args, **kwargs):
         dino_entered.set()
         assert dino_release.wait(30), 'Stalled DINO was never released'
-        return real_recognize(self, *args, **kwargs)
+        return real_recognize(*args, **kwargs)
 
-    patcher = patch.object(TrackedObjectRecognizer, 'update', gated_recognize)
+    patcher = patch('dinov3_cases.node.recognize_objects', gated_recognize)
     patcher.start()
     with tempfile.TemporaryDirectory() as directory:
         folder = Path(directory) / 'sample'

@@ -5,7 +5,7 @@ import torch
 from PIL import Image
 
 from dinov3_cases.grounded import (
-    ObjectGallery, TrackedObjectRecognizer, compute_lab_histogram,
+    ObjectGallery, recognize_objects, compute_lab_histogram,
 )
 
 
@@ -27,7 +27,7 @@ def test_lab_histogram_normalization_transparency_and_size():
         compute_lab_histogram(Image.new('RGBA', (1, 1)))
 
 
-def test_dino_threshold_and_lab_winner_drive_debug_and_cached_results(tmp_path):
+def test_dino_threshold_and_lab_winner_drive_results_and_diagnostics(tmp_path):
     for label in ('blue', 'red'):
         (tmp_path / label).mkdir()
         Image.new('RGB', (32, 32), label).save(tmp_path / label / 'ref.png')
@@ -37,7 +37,7 @@ def test_dino_threshold_and_lab_winner_drive_debug_and_cached_results(tmp_path):
     gallery.features[gallery.labels.index('red')] = torch.tensor([.9, 0.])
     histogram = compute_lab_histogram(Image.new('RGB', (32, 32), 'red'))
     descriptor = torch.tensor([1., 0.])
-    result = gallery.classify(descriptor, .9, .05, lab_histogram=histogram)
+    result = gallery.classify(descriptor, .9, lab_histogram=histogram)
     assert result['label'] == 'red'
     assert result['dino_score'] == pytest.approx(.9)
     assert result['lab_score'] == pytest.approx(1)
@@ -45,30 +45,25 @@ def test_dino_threshold_and_lab_winner_drive_debug_and_cached_results(tmp_path):
     assert result['margin'] == pytest.approx(1)
     index, score = gallery.best_reference(descriptor, lab_histogram=histogram)
     assert gallery.labels[index] == 'red' and score == pytest.approx(.9)
-    assert gallery.classify(descriptor, .95, .05, lab_histogram=histogram)['label'] == 'blue'
-    assert gallery.classify(descriptor, .9, 2, lab_histogram=histogram)['label'] == 'red'
-    cache = TrackedObjectRecognizer()
-    token = object()
+    assert gallery.classify(descriptor, .95, lab_histogram=histogram)['label'] == 'blue'
     proposal = dict(bbox=[0, 0, 32, 32], detection_label='box', detection_score=.9)
-    pixels = np.asarray(Image.new('RGB', (32, 32), 'red'))
-    args = (pixels, [proposal], SameDescriptorEncoder(), gallery, 32, 16, .9, .05)
-    first, _, _ = cache.update(*args, token=token, gallery_revision=1)
-    second, _, changed = cache.update(*args, token=token, gallery_revision=1)
-    assert second == first and not changed and not cache.encoded
-    third, diagnostics, changed = cache.update(*args, token=token, gallery_revision=2)
-    assert third == first and changed and not cache.encoded
-    previous_context = diagnostics[0]["context"]
-    fourth, diagnostics, changed = cache.update(
-        *args[:6], .95, .05, token=token, gallery_revision=2
-    )
-    assert fourth[0]['label'] == 'blue' and changed and not cache.encoded
+    image = Image.new('RGB', (32, 32), 'red')
+    diagnostics = []
+    first = recognize_objects(image, [proposal], SameDescriptorEncoder(), gallery, 32, 16,
+                              .9, diagnostics=diagnostics, defer_diagnostics=True)
+    assert first[0]['label'] == 'red'
+    previous_context = diagnostics[0]['context']
+    diagnostics = []
+    second = recognize_objects(image, [proposal], SameDescriptorEncoder(), gallery, 32, 16,
+                               .95, diagnostics=diagnostics, defer_diagnostics=True)
+    assert second[0]['label'] == 'blue'
     context = diagnostics[0]['context']
     assert context['recognition_threshold'] == .95
     assert previous_context['recognition_threshold'] == .9
     index, _ = gallery.best_reference(context['descriptor'],
                                       lab_histogram=context['lab_histogram'],
                                       threshold=context['recognition_threshold'])
-    assert gallery.labels[index] == fourth[0]['label']
+    assert gallery.labels[index] == second[0]['label']
 
 
 def make_gallery(scores, histograms, labels=None):
@@ -86,7 +81,7 @@ def test_candidates_are_not_limited_to_top_three_classes():
                            ['a', 'a', 'a', 'b', 'c', 'c', 'd'])
     descriptor = torch.tensor([1.])
     histogram = np.array([1., 0.], dtype=np.float32)
-    result = gallery.classify(descriptor, .9, 2, lab_histogram=histogram)
+    result = gallery.classify(descriptor, .9, lab_histogram=histogram)
     assert result['label'] == 'd'
     assert result['score'] == pytest.approx(.93)
     assert result['lab_score'] == pytest.approx(1)
@@ -94,7 +89,7 @@ def test_candidates_are_not_limited_to_top_three_classes():
     index, score = gallery.best_reference(descriptor, lab_histogram=histogram, threshold=.9)
     assert index == 6 and score == pytest.approx(.93)
     # Raising the DINO threshold excludes d, even though its Lab score is perfect.
-    result = gallery.classify(descriptor, .94, 0, lab_histogram=histogram)
+    result = gallery.classify(descriptor, .94, lab_histogram=histogram)
     assert result['label'] == 'c'
     assert result['reference']['name'] == '4.png'
     index, _ = gallery.best_reference(descriptor, lab_histogram=histogram, threshold=.94)
@@ -106,7 +101,7 @@ def test_candidates_are_not_limited_to_top_three_classes():
 
 def test_threshold_applies_to_each_reference_before_lab_class_selection():
     gallery = make_gallery([.99, .5, .9], [[0., 1.], [1., 0.], [.81, .19]], ['a', 'a', 'b'])
-    result = gallery.classify(torch.tensor([1.]), .8, 0, lab_histogram=np.array([1., 0.]))
+    result = gallery.classify(torch.tensor([1.]), .8, lab_histogram=np.array([1., 0.]))
     assert result['label'] == 'b'
     assert result['lab_score'] == pytest.approx(.9)
     assert result['score'] == pytest.approx(.9)
@@ -115,7 +110,7 @@ def test_threshold_applies_to_each_reference_before_lab_class_selection():
 @pytest.mark.parametrize('scores', [[-.1], [-.1, -.2], [-.1, -.2, -.3]])
 def test_no_dino_candidates_returns_unknown_even_with_perfect_lab(scores):
     gallery = make_gallery(scores, [[1.]] * len(scores))
-    result = gallery.classify(torch.tensor([1.]), 0, 0, lab_histogram=np.ones(1))
+    result = gallery.classify(torch.tensor([1.]), 0, lab_histogram=np.ones(1))
     assert result['label'] == 'unknown'
     assert result['reason'] == 'low_similarity'
     assert result['candidate'] == 'a'
@@ -127,12 +122,12 @@ def test_no_dino_candidates_returns_unknown_even_with_perfect_lab(scores):
 def test_single_candidate_needs_no_lab_threshold_and_ties_are_deterministic():
     gallery = make_gallery([.75, .7], [[0., 1.], [1., 0.]], ['b', 'a'])
     histogram = np.array([1., 0.])
-    result = gallery.classify(torch.tensor([1.]), .75, 2, lab_histogram=histogram)
+    result = gallery.classify(torch.tensor([1.]), .75, lab_histogram=histogram)
     assert result['label'] == 'b'  # Equality passes, even with zero Lab similarity.
     assert result['lab_score'] == 0
     assert result['margin'] is None
     gallery.lab_histograms[:] = [1., 0.]
-    assert gallery.classify(torch.tensor([1.]), .7, 2, lab_histogram=histogram)['label'] == 'b'
+    assert gallery.classify(torch.tensor([1.]), .7, lab_histogram=histogram)['label'] == 'b'
     gallery.features[:] = .75
-    result = gallery.classify(torch.tensor([1.]), .7, 2, lab_histogram=histogram)
+    result = gallery.classify(torch.tensor([1.]), .7, lab_histogram=histogram)
     assert result['label'] == 'a' and result['margin'] == 0

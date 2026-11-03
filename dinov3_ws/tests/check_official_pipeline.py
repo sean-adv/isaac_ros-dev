@@ -52,7 +52,7 @@ def main():
     encoder=Encoder()
     gallery=ObjectGallery();gallery.refresh(CASES_DIR,encoder,INPUT_SIZE,16)
     assert gallery.features.shape[-1]==1024 and torch.isfinite(gallery.features).all()
-    results=recognize_objects(image,single,encoder,gallery,INPUT_SIZE,16,.8,.05)
+    results=recognize_objects(image,single,encoder,gallery,INPUT_SIZE,16,.8)
     assert len(results)==1 and np.isfinite(results[0]['score'])
     worker=SharedMemoryGroundingDetector(GROUNDING_ENGINE,'cuda:0',python=sys.executable)
     try:
