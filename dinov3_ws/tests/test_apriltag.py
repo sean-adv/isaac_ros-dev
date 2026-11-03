@@ -11,6 +11,7 @@ from rclpy.serialization import serialize_message, deserialize_message
 from std_msgs.msg import Header
 
 from dinov3_cases.apriltag import apriltag_message
+from dinov3_cases.depth_bbox import bboxes3d_message
 
 
 def object_detection(**changes):
@@ -51,6 +52,41 @@ def test_topic_z_is_camera_depth_without_modifying_source(position):
     assert (output.x, output.y) == tuple(position[:2])
     assert output.z == pytest.approx(position[2])
     assert item["bbox3d"]["position"] == position
+
+
+@pytest.mark.parametrize("rotation, expected", [
+    ([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]],
+     [0., 0., 2 ** -.5, 2 ** -.5]),
+    ([[1., 0., 0.], [0., -1., 0.], [0., 0., -1.]], [1., 0., 0., 0.]),
+    ([[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]], [0., 0., 0., 1.]),
+])
+def test_measured_rotation_survives_serialization_and_matches_detection3d(rotation, expected):
+    item = object_detection(bbox3d=dict(position=[.1, -.2, 1.3],
+                                       size=[.2, .3, .1], rotation=rotation))
+    header = Header(frame_id="camera_color_optical_frame")
+    message = apriltag_message([item], header)
+    received = deserialize_message(serialize_message(message), AprilTagDetectionArray)
+    orientation = received.detections[0].pose.pose.pose.orientation
+    actual = [orientation.x, orientation.y, orientation.z, orientation.w]
+    # q and -q encode the same rotation.
+    assert min(sum((a - e) ** 2 for a, e in zip(actual, expected)),
+               sum((a + e) ** 2 for a, e in zip(actual, expected))) < 1e-12
+    assert sum(value ** 2 for value in actual) == pytest.approx(1.)
+    assert orientation == bboxes3d_message([item], header).detections[0].bbox.center.orientation
+
+
+def test_cached_pose_retains_measurement_header_and_current_pixel_bounds_header():
+    header = Header(frame_id="current_camera")
+    header.stamp.sec = 20
+    item = object_detection(bbox3d_source=dict(
+        frame_id="measurement_camera", stamp=dict(sec=19, nanosec=123)))
+    message = apriltag_message([item], header)
+    received = deserialize_message(serialize_message(message), AprilTagDetectionArray)
+    assert received.header == header
+    pose_header = received.detections[0].pose.header
+    assert pose_header.frame_id == "measurement_camera"
+    assert (pose_header.stamp.sec, pose_header.stamp.nanosec) == (19, 123)
+    assert header.stamp.sec == 20
 
 
 @pytest.mark.parametrize("label", ["medicine", "unknown"])

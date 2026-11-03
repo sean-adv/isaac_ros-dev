@@ -1,7 +1,7 @@
 dinov3_cases:
   ros__parameters:
     # SAM3: 1–4 comma-separated class names; text features cached per prompt.
-    grounding_prompt: 'box.'
+    grounding_prompt: 'box, can.'
     grounding_box_threshold: 0.8
     # After NvDCF tracking: intersection / smaller-box area >= threshold keeps the
     # larger box and immediately removes the smaller track. One final pass only.
@@ -67,7 +67,7 @@ dinov3_cases:
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 80
     # Trim box-local axes at the configured quantiles; 0 uses full bounds.
-    bbox3d_quantile: 0.03
+    bbox3d_quantile: 0.10
     bbox3d_plane_backend: cuda  # use cpu to compare the original Open3D RANSAC
     # Reject sparse/depth-jumping components after Z quantile trimming, before RANSAC.
     bbox3d_min_cloud_coverage: 0.15  # retained points / clipped bbox pixels

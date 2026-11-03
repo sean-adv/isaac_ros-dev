@@ -158,6 +158,11 @@ RGB 主迴圈不等待深度到達；它保留當下可配對的深度，若推�
 `bbox3d_source` 記錄來源 RGB 影格、座標框架和時間戳，`bbox3d_age_seconds` 記錄量測年齡。
 ROS 每筆 `Detection3D.header` 保留該量測的來源時間，陣列 header 使用其中最新的量測時間；
 2D 辨識與疊圖影像仍使用各自目前影格的時間。
+`/tag_detections` 借用 AprilTag 訊息格式發布物件資料；每筆 `pose` 的 XYZ 與 quaternion
+沿用 `Detection3D` 的框中心及旋轉，`pose.header` 保留來源量測時間與座標系。
+陣列 header 與水平／垂直的 2D `corners` 仍對應目前影格。
+朝向是深度表面估算，保留 180°／近正方形方向歧義；平面失敗時使用相機對齊旋轉，
+缺少旋轉的舊資料也使用單位 quaternion。Covariance 未估算，保留訊息預設值。
 `/api/status` 的 `performance.bbox3d_schedule` 顯示獨立間隔與背景量測耗時；`bbox3d_ms` 則是前景提交／讀取快取的耗時。
 參數在啟動時讀入，修改 YAML 後需重啟節點。
 
