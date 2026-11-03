@@ -3,7 +3,7 @@ import ctypes as C
 from pathlib import Path
 import threading
 import numpy as np
-from .runtime import PROJECT
+from dinov3_cases.runtime import PROJECT
 
 LIBRARY = PROJECT / 'artifacts/cuda/libgpu_geometry.so'
 if not LIBRARY.is_file():

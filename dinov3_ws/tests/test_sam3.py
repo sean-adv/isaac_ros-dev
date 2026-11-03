@@ -7,7 +7,7 @@ from PIL import Image
 import torch
 from transformers import BatchEncoding
 
-from dinov3_cases.sam3_trt import Sam3Detector, parse_prompts, prepare_sam3_pixels
+from dinov3_cases.inference.sam3_trt import Sam3Detector, parse_prompts, prepare_sam3_pixels
 
 
 @pytest.mark.parametrize('prompt', ['', 'a,b,c,d,e', None])

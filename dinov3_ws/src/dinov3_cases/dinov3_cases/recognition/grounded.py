@@ -9,10 +9,10 @@ from PIL import Image, ImageOps
 import torch
 import torch.nn.functional as F
 
-from .gallery_files import gallery_groups, gallery_images
-from .object_visualization import build_object_diagnostic
+from dinov3_cases.recognition.gallery_files import gallery_groups, gallery_images
+from dinov3_cases.recognition.object_visualization import build_object_diagnostic
 
-from .nvdcf import validate_detection_interval
+from dinov3_cases.tracking.nvdcf import validate_detection_interval
 
 
 DEFAULT_PROMPT = "medicine bottle, medicine box."
@@ -280,28 +280,3 @@ def recognize_objects(
             )
         results.append(result)
     return results
-
-
-def recognition_message(items, header=None):
-    from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
-
-    message = Detection2DArray()
-    if header is not None:
-        message.header = header
-    for item in items:
-        if item["label"] == "unknown":
-            continue
-        x0, y0, x1, y1 = item["bbox"]
-        detection = Detection2D()
-        detection.header = message.header
-        detection.id = str(item.get("track_id", ""))
-        detection.bbox.center.position.x = (x0 + x1) / 2.0
-        detection.bbox.center.position.y = (y0 + y1) / 2.0
-        detection.bbox.size_x = float(x1 - x0)
-        detection.bbox.size_y = float(y1 - y0)
-        hypothesis = ObjectHypothesisWithPose()
-        hypothesis.hypothesis.class_id = item["label"]
-        hypothesis.hypothesis.score = item["score"] if item["score"] is not None else 0.0
-        detection.results = [hypothesis]
-        message.detections.append(detection)
-    return message

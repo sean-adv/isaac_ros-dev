@@ -15,46 +15,46 @@ Flask 由 ROS 節點內的 threaded Werkzeug server 提供，預設 `127.0.0.1:8
 
 | 頁面／操作 | 資料流與介面 | 程式碼 |
 | --- | --- | --- |
-| `/` 即時辨識 | 顯示相機／上傳圖片、偵測分類與公開 track ID、3D 狀態、輸入／處理 FPS、模型耗時 | `templates/cases.html`、`static/cases.js`、`web.py` |
-| 文字 prompt、門檻與偵測間隔 | `POST /api/grounding`；更新設定並使舊 generation 結果失效；間隔 >1 檢查 NvDCF | `web.py`、`recognition_state.py`、`grounded.py` |
-| SAM3 區域套用／重設／本機預覽 | `GET/POST /api/sam3-roi`；完整原圖座標、只留下完全包含的框；預覽只影響瀏覽器 | `sam3_roi.py`、`static/sam3_roi.js` |
-| 切換 ROS 相機／上傳目標 | `POST /api/source` multipart；上傳解碼後才切換狀態 | `web.py`、`recognition_state.py` |
-| 新增參考圖、選擇瀏覽圖庫 | `POST /api/cases`、`POST /api/select`；選擇僅影響圖庫瀏覽，分類仍使用整個 gallery | `web.py`、`grounded.ObjectGallery` |
-| 參考圖 patch 網格 | `GET /api/references?case=…`、`GET /api/references/grid/<group>/<filename>` | `web.py`、`patches.py`、`cat2real.py` |
-| 偵測列表與狀態輪詢 | `GET /api/status`、`GET /api/detections`；狀態含 worker／排程／錯誤／SAM3 事件 | `web.py`、`node.py` |
+| `/` 即時辨識 | 顯示相機／上傳圖片、偵測分類與公開 track ID、3D 狀態、輸入／處理 FPS、模型耗時 | `templates/cases.html`、`static/cases.js`、`api/web.py` |
+| 文字 prompt、門檻與偵測間隔 | `POST /api/grounding`；更新設定並使舊 generation 結果失效；間隔 >1 檢查 NvDCF | `api/web.py`、`recognition/recognition_state.py`、`recognition/grounded.py` |
+| SAM3 區域套用／重設／本機預覽 | `GET/POST /api/sam3-roi`；完整原圖座標、只留下完全包含的框；預覽只影響瀏覽器 | `inference/sam3_roi.py`、`static/sam3_roi.js` |
+| 切換 ROS 相機／上傳目標 | `POST /api/source` multipart；上傳解碼後才切換狀態 | `api/web.py`、`recognition/recognition_state.py` |
+| 新增參考圖、選擇瀏覽圖庫 | `POST /api/cases`、`POST /api/select`；選擇僅影響圖庫瀏覽，分類仍使用整個 gallery | `api/web.py`、`grounded.ObjectGallery` |
+| 參考圖 patch 網格 | `GET /api/references?case=…`、`GET /api/references/grid/<group>/<filename>` | `api/web.py`、`inference/patches.py`、`inference/cat2real.py` |
+| 偵測列表與狀態輪詢 | `GET /api/status`、`GET /api/detections`；狀態含 worker／排程／錯誤／SAM3 事件 | `api/web.py`、`ros/node.py` |
 | SAM3 推論間隔圖與清除顯示歷史 | 使用 status 的 `sam3_inference_events`；清除只作用於目前瀏覽器 | `static/sam3_intervals.js` |
-| 按需物件診斷、切換檢視／參考分類 | `GET /api/object_visualizations?reference_case=…`、`GET /debug/objects/<revision>/<index>/<view>.jpg`；crop/grid/patches/similarity/heatmap/reference | `object_visualization.py`、`web.py` |
-| `/images` 圖庫管理 | 分類建立／選擇、上傳、重新整理、圖片選取與刪除 | `templates/images.html`、`static/images.js`、`image_manager.py` |
-| 相機 SAM3 框預覽與擷取 | `POST /api/images/camera-preview`、`POST /api/images/capture`；同一張原始 RGB 送 SAM3 並裁切儲存，套用相機 ROI | `web.capture_camera`、`image_manager.py` |
+| 按需物件診斷、切換檢視／參考分類 | `GET /api/object_visualizations?reference_case=…`、`GET /debug/objects/<revision>/<index>/<view>.jpg`；crop/grid/patches/similarity/heatmap/reference | `recognition/object_visualization.py`、`api/web.py` |
+| `/images` 圖庫管理 | 分類建立／選擇、上傳、重新整理、圖片選取與刪除 | `templates/images.html`、`static/images.js`、`api/image_manager.py` |
+| 相機 SAM3 框預覽與擷取 | `POST /api/images/camera-preview`、`POST /api/images/capture`；同一張原始 RGB 送 SAM3 並裁切儲存，套用相機 ROI | `web.capture_camera`、`api/image_manager.py` |
 | HSV 點選去背 | `POST /api/images/preview` 預覽，`POST /api/images/cutout` 另存透明 PNG；支援色相／飽和／明度／羽化／連通區 | `image_manager.remove_background` |
-| 共用即時影像 | `GET /image_annotated.mjpg`；兩個頁面共用 annotated ROS Image、背景 JPEG、斷線重連 | `image_stream.py`、`static/image_stream.js` |
+| 共用即時影像 | `GET /image_annotated.mjpg`；兩個頁面共用 annotated ROS Image、背景 JPEG、斷線重連 | `api/image_stream.py`、`static/image_stream.js` |
 
 圖庫其餘必要介面：`GET /api/images?case=…`、`POST /api/images/labels`、
 `POST /api/images/upload`、`GET/DELETE /api/images/file/<group>/<filename>`。
 `/static/*` 由 Flask 提供。所有現用 API 均保留原本路徑、欄位與行為。
-圖片路徑驗證、禁止 symlink、EXIF 方向與格式篩選集中於 `gallery_files.py`。
+圖片路徑驗證、禁止 symlink、EXIF 方向與格式篩選集中於 `recognition/gallery_files.py`。
 圖片可寫資料是 `dinov3_ws/data/gallery/`，不可當作 dead code 清除。
 
 ## 主要運算流程
 
 1. `node.CaseNode` 接收最新 RGB、registered depth 與 CameraInfo；
-   `depth_sync.py` 按時間與尺寸配對深度，`frame_pool.py` 管理共享影格租約。
+   `geometry/depth_sync.py` 按時間與尺寸配對深度，`frame_pool.py` 管理共享影格租約。
 2. `grounding_ipc.SharedMemoryGroundingDetector` 以同一 Python 環境啟動
-   `python -m dinov3_cases.grounding_ipc` 子程序。影像經共享記憶體、指令經 socket 傳遞；
+   `python -m dinov3_cases.inference.grounding_ipc` 子程序。影像經共享記憶體、指令經 socket 傳遞；
    `sam3_trt.Sam3Detector` 使用官方 SAM3 TensorRT FP16 vision 與 PyTorch bbox/text head。
    文字支援 1–4 類別；沒有 mask 或 SAM3 tracking 流程。
-3. 間隔 1 為同步 SAM3／辨識；間隔 >1 由 `async_nvdcf.py` 單一背景工作執行偵測，
+3. 間隔 1 為同步 SAM3／辨識；間隔 >1 由 `tracking/async_nvdcf.py` 單一背景工作執行偵測，
    在 seed frame 建立 NvDCF，再補追至共同影格並先交接框。前景 NvDCF 持續追蹤；
    DINO 分類稍後只更新仍存活的 seed owner，不覆寫最新框。
-4. `encoder.py` 使用 Cat2Real FP32 pooler descriptor 與 patch features。
+4. `inference/encoder.py` 使用 Cat2Real FP32 pooler descriptor 與 patch features。
    圖庫單張編碼使用 `encode_object`；候選框走 `encode_regions`，同影格微批次，
    不等待其他影格。前處理為 384×384 置中白色補邊；CUDA ROI 與 CPU 圖庫路徑皆必要。
 5. `grounded.ObjectGallery` 依檔名／mtime／size 更新完整圖庫。
    分類先套用 DINO cosine 門檻，再選 Lab 相似度最高的參考圖；無候選輸出 unknown。
    回傳 `score` 是所選參考圖 DINO 分數，`margin` 是不同候選分類的 Lab gap。
-6. `tracking.py` 維持公開身分、幾何配對與平滑；NvDCF 保留漏偵測／失追寬限。
+6. `tracking/identities.py` 維持公開身分、幾何配對與平滑；NvDCF 保留漏偵測／失追寬限。
    失追期間隱藏舊框、避免提交舊框量測；重獲後可沿用 ID／分類。
-7. `async_bbox3d.py` 獨立背景量測，`depth_bbox.py` 與 `cloud_filter.py`
+7. `geometry/async_bbox3d.py` 獨立背景量測，`geometry/depth_bbox.py` 與 `geometry/cloud_filter.py`
    做深度連通區、單平面 RANSAC、平面內方向與 2D 投影擬合。
    `gpu_geometry.py` 的 CUDA 及 CPU Open3D 路徑都由現用設定選擇。
 8. 結構化 ROS 發布、疊圖、Image 發布、JPEG 轉換各有背景工作；pending 只保留最新資料。
@@ -91,12 +91,12 @@ Flask 由 ROS 節點內的 threaded Werkzeug server 提供，預設 `127.0.0.1:8
 | `dinov3_ws/run.sh` → `launch_pipeline.py` → `node:main` | 載入 ROS、venv、LD_LIBRARY_PATH、DDS、thread defaults；載入 YAML、模型預設並轉送 ROS arguments |
 | `src/dinov3_cases/setup.py`、`package.xml` | ament／console entry `case_recognition`；打包 Python、static、templates；wheel 單獨不包含 workspace config／模型 |
 | `setup_all.sh`、`setup_env.sh` | Thor ARM64 系統依賴、Python 環境、native 建置；不自動下載／重建模型 |
-| `build_models.py`、`model_modules.py` | 取得固定 revision 權重、編譯與數值驗證；runtime 也使用 model wrappers |
+| `build_models.py`、`inference/model_modules.py` | 取得固定 revision 權重、編譯與數值驗證；runtime 也使用 model wrappers |
 | `native/build.sh`、`CMakeLists.txt` | 唯一原生建置流程，targets `all`／`gpu_geometry`／`nvdcf_bridge` |
 | `native/install_deps.sh`、`Dockerfile` | DeepStream 9.1／編譯依賴與原生 runtime image |
 | `config/` | ROS 部署覆寫、Fast DDS 大影像 localhost transport、NvDCF 原生設定 |
 
-必要的非直接 import 依賴：SAM3 Python 子程序；NvDCF C++ 子程序（`nvdcf.py`）；
+必要的非直接 import 依賴：SAM3 Python 子程序；NvDCF C++ 子程序（`tracking/nvdcf.py`）；
 `ctypes.CDLL` CUDA helper（`gpu_geometry.py`）；DeepStream tracker `dlopen`（native bridge）；
 Torch-TensorRT import 的反序列化 operator 註冊；本機 engine 與同名 JSON metadata；
 processor/tokenizer source assets；ROS 訊息與外部 Orbbec launch。

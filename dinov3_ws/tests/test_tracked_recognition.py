@@ -6,7 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
-from dinov3_cases.grounded import ObjectGallery, recognize_objects
+from dinov3_cases.recognition.grounded import ObjectGallery, recognize_objects
 from dinov3_cases.timing import ModelTimings
 from encoder_stub import ColorEncoder
 
@@ -62,9 +62,9 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     import threading
     from types import SimpleNamespace
     from unittest.mock import patch
-    from dinov3_cases.node import CaseNode
+    from dinov3_cases.ros.node import CaseNode
     from dinov3_cases.frame_pool import SharedFramePool
-    from dinov3_cases.tracking import BBoxSmoother
+    from dinov3_cases.tracking.identities import BBoxSmoother
 
     encoder, gallery, pixels = setup
     encoder.device, encoder.description = 'cpu', 'counting encoder'
@@ -135,7 +135,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     observations = []
 
     def ticks():
-        from dinov3_cases.visualization import render_display_overlay
+        from dinov3_cases.api.visualization import render_display_overlay
         for seq, positions, _, _, _, _ in rows:
             node.frame_seq = seq
             yield
@@ -151,11 +151,11 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     node.acquire_input_frame = lambda *a, **kw: CaseNode.acquire_input_frame(node, *a, **kw)
     node.worker_ticks = ticks
     try:
-        with patch('dinov3_cases.node.Encoder', return_value=encoder), \
-                patch('dinov3_cases.node.feature_stride', return_value=16), \
-                patch('dinov3_cases.node.SharedMemoryGroundingDetector'), \
-                patch('dinov3_cases.node.ObjectGallery', return_value=gallery), \
-                patch('dinov3_cases.node.AsyncNvDCFProposals', return_value=scheduler):
+        with patch('dinov3_cases.ros.node.Encoder', return_value=encoder), \
+                patch('dinov3_cases.ros.node.feature_stride', return_value=16), \
+                patch('dinov3_cases.ros.node.SharedMemoryGroundingDetector'), \
+                patch('dinov3_cases.ros.node.ObjectGallery', return_value=gallery), \
+                patch('dinov3_cases.ros.node.AsyncNvDCFProposals', return_value=scheduler):
             CaseNode.run_grounded_worker(node)
         assert encoder.calls == sum(len(row[1]) for row in rows if row[4] == 'dino')
         assert [row[0] for row in observations] == [row[3] for row in rows]

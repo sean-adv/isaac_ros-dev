@@ -4,9 +4,7 @@ import pytest
 import torch
 from PIL import Image
 
-from dinov3_cases.grounded import (
-    ObjectGallery, recognize_objects, compute_lab_histogram,
-)
+from dinov3_cases.recognition.grounded import ObjectGallery, recognize_objects, compute_lab_histogram
 
 from encoder_stub import ColorEncoder
 

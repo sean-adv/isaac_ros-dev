@@ -10,10 +10,10 @@ import pytest
 from cv_bridge import CvBridge
 from std_msgs.msg import Header
 
-from dinov3_cases.image_stream import ImageStream
-from dinov3_cases.node import CaseNode
-from dinov3_cases.visualization import render_display_overlay
-from dinov3_cases.web import create_app
+from dinov3_cases.api.image_stream import ImageStream
+from dinov3_cases.ros.node import CaseNode
+from dinov3_cases.api.visualization import render_display_overlay
+from dinov3_cases.api.web import create_app
 
 
 def render_node(audience=True, boxes=True, source='camera'):
@@ -45,7 +45,7 @@ def render_node(audience=True, boxes=True, source='camera'):
 def test_shared_ros_image_is_drawn_once_with_header_and_only_on_demand(web,external,boxes):
     node,frame,_=render_node(audience=web,boxes=boxes)
     node.annotated_image_pub.get_subscription_count.return_value=1+int(external)
-    with patch('dinov3_cases.node.render_display_overlay',wraps=render_display_overlay) as draw:
+    with patch('dinov3_cases.ros.node.render_display_overlay',wraps=render_display_overlay) as draw:
         CaseNode.run_rendering(node)
     assert draw.call_count==int(web or external)
     frame.release.assert_called_once()
@@ -133,8 +133,8 @@ def test_3d_renderer_waits_for_depth_and_never_draws_2d_fallback(pending_dino, n
         job[5] = SimpleNamespace(k=[100., 0., 80., 0., 100., 60., 0., 0., 1.],
                                  d=[], distortion_model='plumb_bob')
         node.pending_render = tuple(job)
-    with patch('dinov3_cases.visualization.cv2.rectangle', wraps=cv2.rectangle) as rectangle, \
-            patch('dinov3_cases.visualization.cv2.putText', wraps=cv2.putText) as text:
+    with patch('dinov3_cases.api.visualization.cv2.rectangle', wraps=cv2.rectangle) as rectangle, \
+            patch('dinov3_cases.api.visualization.cv2.putText', wraps=cv2.putText) as text:
         CaseNode.run_rendering(node)
     rectangle.assert_not_called()
     if depth_ready:
@@ -158,8 +158,8 @@ def test_renderer_paces_frame_starts_without_delay_after_overrun(work_ms,expecte
         clock[0]+=work_ms/1000
         return np.zeros((540,960,3),np.uint8)
     node.stop.wait.side_effect=wait
-    with patch('dinov3_cases.node.time.monotonic',side_effect=lambda:clock[0]), \
-            patch('dinov3_cases.node.render_display_overlay',side_effect=draw):
+    with patch('dinov3_cases.ros.node.time.monotonic',side_effect=lambda:clock[0]), \
+            patch('dinov3_cases.ros.node.render_display_overlay',side_effect=draw):
         CaseNode.run_rendering(node)
     assert waits==pytest.approx([expected_wait_ms] if expected_wait_ms else [])
     frame.release.assert_called_once()
@@ -202,7 +202,7 @@ def test_multiple_http_readers_share_jpeg_and_receive_latest_without_queues(tmp_
         assert stream.readers==2
         for response in clients:
             assert next(response.response)==b'\r\n'
-        with patch('dinov3_cases.image_stream.cv2.imencode',wraps=cv2.imencode) as encode:
+        with patch('dinov3_cases.api.image_stream.cv2.imencode',wraps=cv2.imencode) as encode:
             message=CvBridge().cv2_to_imgmsg(np.full((540,960,3),[30,80,200],np.uint8),encoding='bgr8')
             stream.update(message)
             wait_for(lambda:stream.jpeg is not None)
@@ -258,7 +258,7 @@ def test_no_viewer_does_not_convert_or_encode_ros_images():
 
 def test_both_pages_use_the_image_stream_and_roi_uses_image_dimensions():
     from pathlib import Path
-    root=Path(__file__).parents[1]/'src/dinov3_cases/dinov3_cases'
+    root=Path(__file__).parents[1]/'src/dinov3_cases/dinov3_cases/api'
     for name in ('cases.html','images.html'):
         text=(root/'templates'/name).read_text()
         assert '<img ' in text and 'src="/image_annotated.mjpg"' in text

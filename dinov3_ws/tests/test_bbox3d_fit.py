@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from dinov3_cases.depth_bbox import bbox_vertices, fit_bbox3d_to_2d, project_box_points
+from dinov3_cases.geometry.depth_bbox import bbox_vertices, fit_bbox3d_to_2d, project_box_points
 
 
 def calibration(model="plumb_bob"):
@@ -72,7 +72,7 @@ def test_incompatible_aspect_ratio_reports_approximation_without_changing_axes()
 
 
 def test_solver_failure_retains_original_measurement(monkeypatch):
-    from dinov3_cases import depth_bbox
+    from dinov3_cases.geometry import depth_bbox
     measured = dict(position=[0., 0., 1.], size=[.3, .2, .01])
     def fail(*args, **kwargs):
         raise ValueError("solver failed")

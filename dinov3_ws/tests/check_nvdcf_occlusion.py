@@ -3,8 +3,8 @@ import json
 
 import numpy as np
 
-from dinov3_cases.async_nvdcf import AsyncNvDCFProposals
-from dinov3_cases.nvdcf import NvDCF
+from dinov3_cases.tracking.async_nvdcf import AsyncNvDCFProposals
+from dinov3_cases.tracking.nvdcf import NvDCF
 
 
 def main():

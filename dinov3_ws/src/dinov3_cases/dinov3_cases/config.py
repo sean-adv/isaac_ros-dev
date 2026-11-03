@@ -6,16 +6,11 @@ Keep deployment overrides in config/dinov3_cases.yaml.
 
 import numpy as np
 
-from .runtime import CASES_DIR, DINO_ENGINE, GROUNDING_ENGINE, GROUNDING_PYTHON
-from .nvdcf import check_nvdcf, DEFAULT_CONFIG
-from .async_nvdcf import validate_missed_frames
-from .async_bbox3d import validate_bbox3d_schedule
-from .grounded import (
-    DEFAULT_PROMPT,
-    validate_settings,
-    validate_bbox_limits,
-    validate_containment_threshold,
-)
+from dinov3_cases.runtime import CASES_DIR, DINO_ENGINE, GROUNDING_ENGINE, GROUNDING_PYTHON
+from dinov3_cases.tracking.nvdcf import check_nvdcf, DEFAULT_CONFIG
+from dinov3_cases.tracking.async_nvdcf import validate_missed_frames
+from dinov3_cases.geometry.async_bbox3d import validate_bbox3d_schedule
+from dinov3_cases.recognition.grounded import DEFAULT_PROMPT, validate_settings, validate_bbox_limits, validate_containment_threshold
 
 
 def default_parameters():

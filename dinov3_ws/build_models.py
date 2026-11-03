@@ -8,7 +8,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT/'src/dinov3_cases'))
-from dinov3_cases.cat2real import MODEL_ID as CAT_ID, REVISION as CAT_REVISION
+from dinov3_cases.inference.cat2real import MODEL_ID as CAT_ID, REVISION as CAT_REVISION
 from dinov3_cases.runtime import GROUNDING_MODEL_ID, SAM3_REVISION
 
 SPECS = {
@@ -45,9 +45,9 @@ def build(target, args):
     from transformers import AutoModel, AutoImageProcessor, Sam3Model
     from PIL import Image
     import numpy as np
-    from dinov3_cases.model_modules import Cat2RealFeatures, Sam3VisionFeatures
-    from dinov3_cases.cat2real import prepare_cat2real_image
-    from dinov3_cases.sam3_trt import prepare_sam3_pixels
+    from dinov3_cases.inference.model_modules import Cat2RealFeatures, Sam3VisionFeatures
+    from dinov3_cases.inference.cat2real import prepare_cat2real_image
+    from dinov3_cases.inference.sam3_trt import prepare_sam3_pixels
     spec=SPECS[target];out=args.artifacts/spec['directory'];source=out/'source'
     out.mkdir(parents=True,exist_ok=True)
     if args.download:

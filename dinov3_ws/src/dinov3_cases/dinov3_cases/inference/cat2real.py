@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .runtime import MODEL_ID
+from dinov3_cases.runtime import MODEL_ID
 REVISION = 'a763964f2041722ffcc5bc4c72e3cb241530727e'
 
 

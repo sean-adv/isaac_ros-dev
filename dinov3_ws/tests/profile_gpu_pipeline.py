@@ -24,10 +24,10 @@ def main():
     raw=np.load(args.samples);rgb,depth=raw['rgb'],raw['depth'];meta=json.loads(args.metadata.read_text())
     info=SimpleNamespace(**(meta['info']|{'roi':SimpleNamespace(**meta['info']['roi'])}))
     boxes=[item['bbox'] for item in meta['detections']]
-    from dinov3_cases.depth_bbox import ProjectionRayCache,attach_bboxes3d
+    from dinov3_cases.geometry.depth_bbox import ProjectionRayCache, attach_bboxes3d
     from dinov3_cases.gpu_geometry import CudaPlaneFitter
-    from dinov3_cases.nvdcf import NvDCF
-    from dinov3_cases.visualization import render_display_overlay
+    from dinov3_cases.tracking.nvdcf import NvDCF
+    from dinov3_cases.api.visualization import render_display_overlay
     report=dict(scope='Identical saved-input stage timing, not live camera end-to-end latency',capture_stamps=meta.get('stamps'),stages={})
     stages=report['stages']
     import torch
@@ -70,10 +70,10 @@ def main():
     if args.models:
         import torch
         from PIL import Image
-        from dinov3_cases.encoder import Encoder
-        from dinov3_cases.grounded import encode_object
-        from dinov3_cases.runtime import DINO_ENGINE_SINGLE,DINO_ENGINE_BATCH
-        from dinov3_cases.sam3_trt import prepare_sam3_pixels,prepare_sam3_tensor
+        from dinov3_cases.inference.encoder import Encoder
+        from dinov3_cases.recognition.grounded import encode_object
+        from dinov3_cases.runtime import DINO_ENGINE_SINGLE, DINO_ENGINE_BATCH
+        from dinov3_cases.inference.sam3_trt import prepare_sam3_pixels, prepare_sam3_tensor
         image=Image.fromarray(rgb);selected=boxes[:4]
         for mode,path in [('single',DINO_ENGINE_SINGLE),('batch',DINO_ENGINE_BATCH)]:
             encoder=Encoder(path)

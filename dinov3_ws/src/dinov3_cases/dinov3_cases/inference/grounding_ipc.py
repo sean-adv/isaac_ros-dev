@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 from multiprocessing import shared_memory, resource_tracker
-from .frame_pool import MAX_IMAGE_BYTES, SharedFrame, SharedFramePool
+from dinov3_cases.frame_pool import MAX_IMAGE_BYTES, SharedFrame, SharedFramePool
 import socket
 import struct
 import subprocess
@@ -49,7 +49,7 @@ class SharedMemoryGroundingDetector:
         *,
         python,
         timeout=60.0,
-        worker_module="dinov3_cases.grounding_ipc",
+        worker_module="dinov3_cases.inference.grounding_ipc",
     ):
         self.lock = threading.RLock()
         self.pool = SharedFramePool()
@@ -215,7 +215,7 @@ def worker_main(fd, detector_factory=None, version=None):
             if detector_factory is None:
                 import tensorrt as trt
                 import torch
-                from .sam3_trt import Sam3Detector
+                from dinov3_cases.inference.sam3_trt import Sam3Detector
 
                 if trt.__version__.split(".")[0] != "11":
                     raise RuntimeError(

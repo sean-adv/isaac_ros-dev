@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import pytest
 from sensor_msgs.msg import Image
 
-from dinov3_cases.sam3_roi import DEFAULT_ROI, filter_roi, roi_bounds, validate_roi
-from dinov3_cases.web import create_app
+from dinov3_cases.inference.sam3_roi import DEFAULT_ROI, filter_roi, roi_bounds, validate_roi
+from dinov3_cases.api.web import create_app
 
 
 @pytest.mark.parametrize('region,expected', [

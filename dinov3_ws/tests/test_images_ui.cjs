@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '../src/dinov3_cases/dinov3_cases/static/images.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '../src/dinov3_cases/dinov3_cases/api/static/images.js'), 'utf8');
 
 function page() {
   const elements = new Map();

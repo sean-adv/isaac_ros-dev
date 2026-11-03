@@ -1,7 +1,7 @@
 // Run with node --test dinov3_ws/tests/test_sam3_roi_ui.cjs
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
-const {regionBounds, previewRect} = require('../src/dinov3_cases/dinov3_cases/static/sam3_roi.js');
+const {regionBounds, previewRect} = require('../src/dinov3_cases/dinov3_cases/api/static/sam3_roi.js');
 
 test('zero size, automatic center, explicit zero center and clipped regions', () => {
   assert.deepEqual(regionBounds([1920, 1080], {width: 0, height: 0, center_x: 0, center_y: 0}), [0, 0, 1920, 1080]);

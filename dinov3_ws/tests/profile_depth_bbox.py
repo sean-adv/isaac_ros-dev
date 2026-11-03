@@ -8,7 +8,7 @@ import time
 
 import cv2
 import numpy as np
-from dinov3_cases.depth_bbox import ProjectionRayCache, estimate_bbox3d
+from dinov3_cases.geometry.depth_bbox import ProjectionRayCache, estimate_bbox3d
 
 
 def main():

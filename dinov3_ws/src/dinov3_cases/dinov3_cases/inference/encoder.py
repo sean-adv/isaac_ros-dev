@@ -3,10 +3,10 @@ import numpy as np
 import torch
 from transformers import AutoImageProcessor
 
-from .patches import preprocess_image, patch_features
-from .cat2real import prepare_cat2real_image
-from .runtime import MODEL_ID, DINO_ENGINE, DINO_MODEL, INPUT_SIZE
-from .trt_backend import TRTBackbone
+from dinov3_cases.inference.patches import preprocess_image, patch_features
+from dinov3_cases.inference.cat2real import prepare_cat2real_image
+from dinov3_cases.runtime import MODEL_ID, DINO_ENGINE, DINO_MODEL, INPUT_SIZE
+from dinov3_cases.inference.trt_backend import TRTBackbone
 
 
 class Encoder:
@@ -34,7 +34,7 @@ class Encoder:
     def encode_regions(self, image, boxes):
         """Upload RGB once, prepare all ROIs on CUDA, infer current microbatches."""
         from PIL import Image
-        from .gpu_geometry import prepare_rois
+        from dinov3_cases.gpu_geometry import prepare_rois
         if not boxes:
             return []
         rgb = torch.from_numpy(np.array(image.convert('RGB'), dtype=np.uint8)).to(self.device)

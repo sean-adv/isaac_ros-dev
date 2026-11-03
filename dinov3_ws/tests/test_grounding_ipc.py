@@ -9,7 +9,7 @@ import time
 
 from PIL import Image
 import pytest
-from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
+from dinov3_cases.inference.grounding_ipc import SharedMemoryGroundingDetector
 
 
 @pytest.fixture

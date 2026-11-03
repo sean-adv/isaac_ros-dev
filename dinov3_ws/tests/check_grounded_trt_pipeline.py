@@ -12,14 +12,14 @@ import numpy as np
 from PIL import Image
 import rclpy
 
-from dinov3_cases.node import CaseNode
+from dinov3_cases.ros.node import CaseNode
 from dinov3_cases.runtime import ARTIFACTS
 
 
 def main():
     image = Image.open(ARTIFACTS / 'validation/person.jpg').convert('RGB')
     entered, release = threading.Event(), threading.Event()
-    from dinov3_cases import node as pipeline
+    from dinov3_cases.ros import node as pipeline
     original_render = pipeline.render_display_overlay
 
     def stalled_render(*args, **kwargs):

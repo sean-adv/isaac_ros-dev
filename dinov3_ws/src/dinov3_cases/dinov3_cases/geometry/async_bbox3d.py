@@ -5,7 +5,7 @@ import math
 import threading
 import time
 
-from .tracking import _match_boxes, _iou
+from dinov3_cases.tracking.identities import _match_boxes, _iou
 
 
 def validate_bbox3d_schedule(interval, max_age):

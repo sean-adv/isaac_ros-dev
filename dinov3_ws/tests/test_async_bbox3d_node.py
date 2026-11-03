@@ -9,10 +9,10 @@ import pytest
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
 
-from dinov3_cases.async_bbox3d import AsyncBBox3D
+from dinov3_cases.geometry.async_bbox3d import AsyncBBox3D
 from dinov3_cases.frame_pool import SharedFramePool
-from dinov3_cases.node import CaseNode
-from dinov3_cases.tracking import BBoxSmoother
+from dinov3_cases.ros.node import CaseNode
+from dinov3_cases.tracking.identities import BBoxSmoother
 
 
 @pytest.mark.parametrize('grounding_interval', [1, 10])
@@ -75,11 +75,11 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
     node.worker_ticks = ticks
     encoder = Mock(description='test', device='cpu', model=object())
     try:
-        with patch('dinov3_cases.node.Encoder', return_value=encoder), \
-                patch('dinov3_cases.node.feature_stride', return_value=16), \
-                patch('dinov3_cases.node.SharedMemoryGroundingDetector'), \
-                patch('dinov3_cases.node.ObjectGallery'), \
-                patch('dinov3_cases.node.AsyncNvDCFProposals', return_value=scheduler):
+        with patch('dinov3_cases.ros.node.Encoder', return_value=encoder), \
+                patch('dinov3_cases.ros.node.feature_stride', return_value=16), \
+                patch('dinov3_cases.ros.node.SharedMemoryGroundingDetector'), \
+                patch('dinov3_cases.ros.node.ObjectGallery'), \
+                patch('dinov3_cases.ros.node.AsyncNvDCFProposals', return_value=scheduler):
             CaseNode.run_grounded_worker(node)
         assert len(observed) == 12
         assert measured == [(1, 'calibration')]
@@ -145,11 +145,11 @@ def coalescing_node(tmp_path):
 
     def run(ticks):
         node.worker_ticks = ticks
-        with patch('dinov3_cases.node.Encoder', return_value=encoder), \
-                patch('dinov3_cases.node.feature_stride', return_value=16), \
-                patch('dinov3_cases.node.SharedMemoryGroundingDetector'), \
-                patch('dinov3_cases.node.ObjectGallery'), \
-                patch('dinov3_cases.node.AsyncNvDCFProposals', return_value=scheduler):
+        with patch('dinov3_cases.ros.node.Encoder', return_value=encoder), \
+                patch('dinov3_cases.ros.node.feature_stride', return_value=16), \
+                patch('dinov3_cases.ros.node.SharedMemoryGroundingDetector'), \
+                patch('dinov3_cases.ros.node.ObjectGallery'), \
+                patch('dinov3_cases.ros.node.AsyncNvDCFProposals', return_value=scheduler):
             CaseNode.run_grounded_worker(node)
         node.get_logger.return_value.error.assert_not_called()
 
@@ -256,7 +256,7 @@ def test_paused_camera_flushes_background_once_without_counting_an_extra_rgb(coa
         assert scheduler.update.call_count == 2
         assert node.performance['completed_at'] == completed
 
-    with patch('dinov3_cases.node.ResultRate', return_value=rate), \
+    with patch('dinov3_cases.ros.node.ResultRate', return_value=rate), \
             patch.object(rate, 'update', wraps=rate.update) as count:
         run(ticks)
     assert count.call_count == 1

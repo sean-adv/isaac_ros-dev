@@ -5,8 +5,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from dinov3_cases.cloud_filter import CloudFilter
-from dinov3_cases import depth_bbox
+from dinov3_cases.geometry.cloud_filter import CloudFilter
+from dinov3_cases.geometry import depth_bbox
 from test_depth_bbox import calibration, scene, BOX
 
 

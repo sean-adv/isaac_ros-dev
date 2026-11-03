@@ -5,17 +5,15 @@ from io import BytesIO
 from flask import Flask, jsonify, request, Response, render_template
 from PIL import Image
 from werkzeug.exceptions import ServiceUnavailable
-from .runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
-from .patches import reference_grid_image
-from .grounded import validate_settings
-from .cat2real import prepare_cat2real_image
-from .nvdcf import check_nvdcf
-from .image_manager import register_image_manager
-from .sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
-from . import recognition_state
-from .gallery_files import (
-    group_path as case_path, image_path, load_image, gallery_groups, gallery_images, save_image,
-)
+from dinov3_cases.runtime import MODEL_ID, GROUNDING_MODEL_ID, INPUT_SIZE
+from dinov3_cases.inference.patches import reference_grid_image
+from dinov3_cases.recognition.grounded import validate_settings
+from dinov3_cases.inference.cat2real import prepare_cat2real_image
+from dinov3_cases.tracking.nvdcf import check_nvdcf
+from dinov3_cases.api.image_manager import register_image_manager
+from dinov3_cases.inference.sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
+from dinov3_cases.recognition import recognition_state
+from dinov3_cases.recognition.gallery_files import group_path as case_path, image_path, load_image, gallery_groups, gallery_images, save_image
 
 
 def create_app(node):

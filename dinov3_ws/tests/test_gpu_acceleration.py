@@ -4,8 +4,8 @@ import pytest
 import torch
 from PIL import Image
 
-from dinov3_cases.gpu_geometry import LIBRARY,CudaPlaneFitter,prepare_rois
-from dinov3_cases.cat2real import prepare_cat2real_image
+from dinov3_cases.gpu_geometry import LIBRARY, CudaPlaneFitter, prepare_rois
+from dinov3_cases.inference.cat2real import prepare_cat2real_image
 
 pytestmark=pytest.mark.skipif(not torch.cuda.is_available() or not LIBRARY.exists(),
                              reason='Thor CUDA helpers not built')
@@ -47,7 +47,7 @@ def test_cuda_roi_rejects_bounds_before_kernel_launch():
 
 
 def test_native_tracker_shared_rgb_agrees_with_legacy_pipe():
-    from dinov3_cases.nvdcf import BRIDGE,NvDCF
+    from dinov3_cases.tracking.nvdcf import BRIDGE, NvDCF
     if not BRIDGE.exists():pytest.skip('Native tracker not built')
     pixels=np.zeros((480,640,3),np.uint8)
     pixels[100:300,150:350]=[200,60,20]

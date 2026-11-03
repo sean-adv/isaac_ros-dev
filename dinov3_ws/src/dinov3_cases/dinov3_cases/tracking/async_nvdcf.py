@@ -4,8 +4,8 @@ import queue
 import threading
 import time
 
-from .nvdcf import NvDCF, DEFAULT_CONFIG, validate_detection_interval
-from .tracking import TrackIdentities, TrackLifecycle, contained_track_ids
+from dinov3_cases.tracking.nvdcf import NvDCF, DEFAULT_CONFIG, validate_detection_interval
+from dinov3_cases.tracking.identities import TrackIdentities, TrackLifecycle, contained_track_ids
 
 
 def validate_missed_frames(value):

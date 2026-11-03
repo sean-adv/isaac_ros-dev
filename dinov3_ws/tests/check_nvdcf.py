@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 
-from dinov3_cases.nvdcf import NvDCF
+from dinov3_cases.tracking.nvdcf import NvDCF
 
 
 def main():

@@ -2,6 +2,7 @@
 
 此 repository 的維護範圍以 `dinov3_ws/` 與根目錄容器／啟動設定為主。辨識流程使用 SAM3、DeepStream NvDCF、Cat2Real DINOv3 與 RGB-D 3D 框，提供 ROS 2 和 HTTP／MJPEG 介面。
 
+- [Python 套件重整：完整檔案盤點、相依關係與驗證](docs/PYTHON_PACKAGE_REFACTOR.md)
 - [目前實際功能地圖](docs/CURRENT_FUNCTIONALITY.md)
 - [本輪清理分類、變更與驗證](docs/CLEANUP_REPORT.md)
 - [應用操作與環境設定](dinov3_ws/README.md)

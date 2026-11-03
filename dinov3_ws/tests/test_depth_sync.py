@@ -11,8 +11,8 @@ from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
 from builtin_interfaces.msg import Time
 
-from dinov3_cases.depth_sync import matched_inputs
-from dinov3_cases.node import CaseNode
+from dinov3_cases.geometry.depth_sync import matched_inputs
+from dinov3_cases.ros.node import CaseNode
 
 
 def header(seconds=10.0, frame="camera_color_optical_frame"):
@@ -41,8 +41,8 @@ def test_sync_rejects_stale_unregistered_and_wrong_size_depth():
 def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     values = dict(pose_min_depth=.1, pose_max_depth=5., pose_enabled=True,
                   pose_sync_tolerance=.05, bbox3d_depth_band=.08, bbox3d_min_points=80, bbox3d_quantile=.02)
-    from dinov3_cases.depth_bbox import ProjectionRayCache
-    from dinov3_cases.cloud_filter import CloudFilter
+    from dinov3_cases.geometry.depth_bbox import ProjectionRayCache
+    from dinov3_cases.geometry.cloud_filter import CloudFilter
     node = SimpleNamespace(cloud_filter=CloudFilter(), depth_ray_cache=ProjectionRayCache(),
                            param=values.__getitem__, bridge=Mock(), stop=threading.Event(),
                            lock=threading.Lock(), depth_frames=deque(),

@@ -4,7 +4,7 @@ import argparse
 import os
 import time
 
-import dinov3_cases.grounding_ipc as ipc
+import dinov3_cases.inference.grounding_ipc as ipc
 
 
 class Detector:

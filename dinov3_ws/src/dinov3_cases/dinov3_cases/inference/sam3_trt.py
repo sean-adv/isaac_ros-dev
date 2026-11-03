@@ -10,7 +10,7 @@ from PIL import Image
 import torch
 from transformers import CLIPTokenizer, Sam3Model
 
-from .model_modules import Sam3BboxHead
+from dinov3_cases.inference.model_modules import Sam3BboxHead
 
 
 def parse_prompts(prompt):
@@ -103,7 +103,7 @@ class Sam3Detector:
     @torch.inference_mode()
     def detect(self, image, prompt, box_threshold, limit,
                *, min_width=0, min_height=0, min_area=0, containment_threshold=0.95):
-        from .grounded import clean_proposals
+        from dinov3_cases.recognition.grounded import clean_proposals
         with self.lock:
             labels = self.validate_prompt(prompt)
             features, mask = self._text_features(labels)

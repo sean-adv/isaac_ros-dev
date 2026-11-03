@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dinov3_cases.web import create_app
+from dinov3_cases.api.web import create_app
 
 
 @pytest.fixture
@@ -112,7 +112,7 @@ def test_unavailable_camera_or_detector(camera, attribute, value):
 
 
 def test_label_validation_and_standalone_mode(tmp_path):
-    from dinov3_cases.image_manager import create_app as standalone
+    from dinov3_cases.api.image_manager import create_app as standalone
     client = standalone(tmp_path).test_client()
     for label in ['', '../escape', 'a/b']:
         assert client.post('/api/images/labels', json={'case': label}).status_code == 400

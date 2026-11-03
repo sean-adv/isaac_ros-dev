@@ -1,16 +1,18 @@
 # dinov3_cases 程式導覽
 
-目前部署入口是 `node.py:main`，使用 SAM3 找候選物件，再以 DINOv3 特徵與 Lab 色彩直方圖比對圖庫。HTTP 網頁與 ROS 訂閱共用同一個節點狀態。
+目前部署入口是 `ros/node.py:main`，使用 SAM3 找候選物件，再以 DINOv3 特徵與 Lab 色彩直方圖比對圖庫。HTTP 網頁與 ROS 訂閱共用同一個節點狀態。
+
+完整新結構、舊檔案對照與驗證結果見 [Python 套件重整紀錄](../../../docs/PYTHON_PACKAGE_REFACTOR.md)。
 
 ## 資料流程
 
-1. `node.py` 接收最新 RGB 影格，先配對深度，再取得 `frame_pool.py` 的共享影像租約。
-2. `async_nvdcf.py` 決定同步偵測或背景偵測；`grounding_ipc.py` 將影像交給同一份 `.venv` 的 TensorRT 11 子程序中的 `sam3_trt.py`，使用官方 TensorRT vision 與 PyTorch bbox head。主程序使用 Cat2Real FP32 Torch-TensorRT。
+1. `ros/node.py` 接收最新 RGB 影格，先配對深度，再取得 `frame_pool.py` 的共享影像租約。
+2. `tracking/async_nvdcf.py` 決定同步偵測或背景偵測；`inference/grounding_ipc.py` 將影像交給同一份 `.venv` 的 TensorRT 11 子程序中的 `inference/sam3_trt.py`，使用官方 TensorRT vision 與 PyTorch bbox head。主程序使用 Cat2Real FP32 Torch-TensorRT。
 3. 非同步模式每 `grounding_detection_interval` 個已處理影格提交背景 SAM3＋DINO 工作。前景 NvDCF 持續追蹤；背景 SAM3 出框後，先在偵測原圖建立候選 NvDCF，再補追最新快照，前景補追至共同影格後立即交接框；此時不等待 DINO。DINO 隨後辨識同一張 seed-frame 的裁切，只依不可變的 seed ownership key 更新仍存活物件的分類，不覆寫目前框。未識別物件一律只顯示 SAM3 名稱，包含等待 DINO 與完成後仍為 unknown 的情況，避免每次辨識時文字切換；已配對物件暫時沿用舊類別，不加上待辨識或更新中的字樣。交接逐物件配對：配對成功者由新 context 接手，漏偵測但追蹤有效者保留原 context 與標籤；連續 `nvdcf_max_missed_detections` 次已提交 SAM3 結果漏偵測才移除（預設 3），空偵測也只計一次漏偵測。靜態上傳每秒可刷新；間隔 1 停用 NvDCF。
-4. `tracking.py` 平滑候選框並在共同影格關聯公開身分。已辨識物件變為 `unknown` 時移除該追蹤；初始 unknown 仍可顯示。NvDCF 原生 ID 用於 context 內的標籤綁定，公開 `track_id` 延續跨偵測回合的幾何關聯。
-5. `encoder.py` 將 Cat2Real 裁切圖置中補白至 384，從一次 forward 保留 pooler 描述向量與 patch 熱圖特徵；`grounded.py` 建立圖庫並執行單次辨識；分類結果由 `async_nvdcf.py` 綁定至追蹤物件並沿用。先以 `recognition_threshold` 篩選 DINO cosine 分數，再從候選參考圖中選 Lab Bhattacharyya 分數最高者的分類；無候選時為 unknown。`score` 為所選參考圖的 DINO 分數，不再計算加權分數。
-6. `async_bbox3d.py` 獨立排程背景深度工作，透過 `depth_bbox.py` 計算中心、尺寸與旋轉；預設每 5 個處理影格量測一次。ROS 發布和疊圖各用獨立 worker，待處理輸出只保留最新一份；共享影格池滿時，先釋放尚未開始的舊疊圖工作，讓新推論繼續。
-7. `object_visualization.py` 在網頁要求時才產生物件診斷圖；`visualization.py` 負責 2D／3D 疊圖。
+4. `tracking/identities.py` 平滑候選框並在共同影格關聯公開身分。已辨識物件變為 `unknown` 時移除該追蹤；初始 unknown 仍可顯示。NvDCF 原生 ID 用於 context 內的標籤綁定，公開 `track_id` 延續跨偵測回合的幾何關聯。
+5. `inference/encoder.py` 將 Cat2Real 裁切圖置中補白至 384，從一次 forward 保留 pooler 描述向量與 patch 熱圖特徵；`recognition/grounded.py` 建立圖庫並執行單次辨識；分類結果由 `tracking/async_nvdcf.py` 綁定至追蹤物件並沿用。先以 `recognition_threshold` 篩選 DINO cosine 分數，再從候選參考圖中選 Lab Bhattacharyya 分數最高者的分類；無候選時為 unknown。`score` 為所選參考圖的 DINO 分數，不再計算加權分數。
+6. `geometry/async_bbox3d.py` 獨立排程背景深度工作，透過 `geometry/depth_bbox.py` 計算中心、尺寸與旋轉；預設每 5 個處理影格量測一次。ROS 發布和疊圖各用獨立 worker，待處理輸出只保留最新一份；共享影格池滿時，先釋放尚未開始的舊疊圖工作，讓新推論繼續。
+7. `recognition/object_visualization.py` 在網頁要求時才產生物件診斷圖；`api/visualization.py` 負責 2D／3D 疊圖。
 
 ## 修改位置
 
@@ -32,18 +34,18 @@ SAM3 bbox 必須完整位於區域內才交給後續辨識；NvDCF 追蹤框移�
 | 要修改的功能 | 主要檔案 |
 | --- | --- |
 | ROS 參數預設值與啟動驗證 | `config.py` |
-| ROS 輸入、排程、發布 | `node.py` |
-| 網頁設定／來源切換與結果失效 | `recognition_state.py` |
-| 分類分數、unknown 規則、單次辨識 | `grounded.py` |
-| 模型輸入與推論 | `encoder.py`、`patches.py`、`trt_backend.py`、`sam3_trt.py` |
-| 偵測間隔、背景補追與交接 | `async_nvdcf.py` |
-| NvDCF 子程序、影像轉換與原生 API | `nvdcf.py`、`../../native/nvdcf_bridge.cpp` |
-| 背景 3D 框間隔、快取、深度與旋轉 | `async_bbox3d.py`、`depth_bbox.py` |
-| 圖庫路徑驗證、支援格式、檔案列舉、讀圖 | `gallery_files.py` |
-| HTTP 狀態與辨識操作 | `web.py` |
-| 圖庫上傳、相機裁切、HSV 去背 | `image_manager.py` |
-| 診斷圖與比較參考圖 | `object_visualization.py` |
-| 網頁互動與外觀 | `static/`、`templates/` |
+| ROS 輸入、排程、發布 | `ros/node.py` |
+| 網頁設定／來源切換與結果失效 | `recognition/recognition_state.py` |
+| 分類分數、unknown 規則、單次辨識 | `recognition/grounded.py` |
+| 模型輸入與推論 | `inference/encoder.py`、`inference/patches.py`、`inference/trt_backend.py`、`inference/sam3_trt.py` |
+| 偵測間隔、背景補追與交接 | `tracking/async_nvdcf.py` |
+| NvDCF 子程序、影像轉換與原生 API | `tracking/nvdcf.py`、`../../native/nvdcf_bridge.cpp` |
+| 背景 3D 框間隔、快取、深度與旋轉 | `geometry/async_bbox3d.py`、`geometry/depth_bbox.py` |
+| 圖庫路徑驗證、支援格式、檔案列舉、讀圖 | `recognition/gallery_files.py` |
+| HTTP 狀態與辨識操作 | `api/web.py` |
+| 圖庫上傳、相機裁切、HSV 去背 | `api/image_manager.py`、`recognition/images.py` |
+| 診斷圖與比較參考圖 | `recognition/object_visualization.py` |
+| 網頁互動與外觀 | `api/static/`、`api/templates/` |
 
 
 測試命令見 [測試說明](../../tests/README.md)。
@@ -54,7 +56,7 @@ SAM3 bbox 必須完整位於區域內才交給後續辨識；NvDCF 追蹤框移�
 - [3D 深度框、點雲篩選、2D 邊界擬合與背景量測](docs/depth-bbox.md)
 - [維護狀態與相容性](docs/maintenance.md)
 
-`recognition_state.py` 集中網頁造成的辨識狀態更新；呼叫端必須持有
+`recognition/recognition_state.py` 集中網頁造成的辨識狀態更新；呼叫端必須持有
 `node.lock`，並在更新前完成參數驗證或圖片解碼。更新設定／來源與
 遞增 `generation` 必須在同一個鎖定區段內完成，避免發布舊工作的結果。
 

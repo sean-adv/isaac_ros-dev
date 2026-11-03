@@ -6,9 +6,9 @@ from PIL import Image
 import pytest
 import torch
 
-from dinov3_cases.cat2real import MODEL_ID, prepare_cat2real_image
-from dinov3_cases.grounded import encode_object
-from dinov3_cases.object_visualization import object_debug_views
+from dinov3_cases.inference.cat2real import MODEL_ID, prepare_cat2real_image
+from dinov3_cases.recognition.grounded import encode_object
+from dinov3_cases.recognition.object_visualization import object_debug_views
 
 
 def test_center_white_padding_and_exact_content_geometry():
@@ -51,7 +51,7 @@ def test_encode_object_uses_explicit_embedding_instead_of_patch_mean():
 
 
 def test_cat2real_encoder_keeps_patches_and_pooler_from_one_forward(monkeypatch):
-    import dinov3_cases.encoder as module
+    import dinov3_cases.inference.encoder as module
     monkeypatch.setattr(module,'MODEL_ID',MODEL_ID)
     class Model:
         config=SimpleNamespace(patch_size=16,num_register_tokens=4)
@@ -73,8 +73,8 @@ def test_cat2real_encoder_keeps_patches_and_pooler_from_one_forward(monkeypatch)
 
 
 def test_encoder_regions_preserves_batch_order_pooler_and_previews(monkeypatch):
-    from dinov3_cases.encoder import Encoder
-    from dinov3_cases.patches import preprocess_image
+    from dinov3_cases.inference.encoder import Encoder
+    from dinov3_cases.inference.patches import preprocess_image
 
     image = Image.new('RGB', (64, 48), 'red')
     image.paste((0, 0, 255), (32, 0, 64, 48))

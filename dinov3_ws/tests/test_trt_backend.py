@@ -1,5 +1,5 @@
 import pytest
-from dinov3_cases.trt_backend import MODEL_ID, TRTBackbone, validate_shape
+from dinov3_cases.inference.trt_backend import MODEL_ID, TRTBackbone, validate_shape
 
 
 @pytest.mark.parametrize(

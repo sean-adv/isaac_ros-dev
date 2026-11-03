@@ -18,32 +18,30 @@ from sensor_msgs.msg import Image as ImageMsg, CameraInfo
 from std_msgs.msg import Header, String
 from werkzeug.serving import make_server
 
-from .timing import ResultRate, ModelTimings
-from .patches import feature_stride
-from .encoder import Encoder
-from .grounding_ipc import SharedMemoryGroundingDetector
-from .frame_pool import SharedFramePool
-from .tracking import BBoxSmoother
-from .config import default_parameters, validate_parameters
-from .async_nvdcf import AsyncNvDCFProposals
-from .async_bbox3d import AsyncBBox3D
-from .runtime import INPUT_SIZE
+from dinov3_cases.timing import ResultRate, ModelTimings
+from dinov3_cases.inference.patches import feature_stride
+from dinov3_cases.inference.encoder import Encoder
+from dinov3_cases.inference.grounding_ipc import SharedMemoryGroundingDetector
+from dinov3_cases.frame_pool import SharedFramePool
+from dinov3_cases.tracking.identities import BBoxSmoother
+from dinov3_cases.config import default_parameters, validate_parameters
+from dinov3_cases.tracking.async_nvdcf import AsyncNvDCFProposals
+from dinov3_cases.geometry.async_bbox3d import AsyncBBox3D
+from dinov3_cases.runtime import INPUT_SIZE
 from vision_msgs.msg import Detection2DArray, Detection3DArray
 from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
-from .apriltag import apriltag_message
-from .depth_sync import matched_inputs
-from .sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
-from .image_stream import ImageStream
-from .cloud_filter import CloudFilter
-from .depth_bbox import ProjectionRayCache, attach_bboxes3d, bboxes3d_message
-from .web import create_app
-from .visualization import render_display_overlay
-from .object_visualization import ObjectVisualizationSnapshot
-from .grounded import (
-    ObjectGallery,
-    recognize_objects,
-    recognition_message,
-)
+from dinov3_cases.ros.messages import apriltag_message
+from dinov3_cases.geometry.depth_sync import matched_inputs
+from dinov3_cases.inference.sam3_roi import DEFAULT_ROI, validate_roi, roi_bounds, filter_roi
+from dinov3_cases.api.image_stream import ImageStream
+from dinov3_cases.geometry.cloud_filter import CloudFilter
+from dinov3_cases.geometry.depth_bbox import ProjectionRayCache, attach_bboxes3d
+from dinov3_cases.ros.messages import bboxes3d_message
+from dinov3_cases.api.web import create_app
+from dinov3_cases.api.visualization import render_display_overlay
+from dinov3_cases.recognition.object_visualization import ObjectVisualizationSnapshot
+from dinov3_cases.recognition.grounded import ObjectGallery, recognize_objects
+from dinov3_cases.ros.messages import recognition_message
 
 
 class CaseNode(Node):
@@ -158,7 +156,7 @@ class CaseNode(Node):
         plane_backend = self.param("bbox3d_plane_backend")
         self.plane_fitter = None
         if self.param("pose_enabled") and plane_backend == "cuda":
-            from .gpu_geometry import CudaPlaneFitter
+            from dinov3_cases.gpu_geometry import CudaPlaneFitter
             self.plane_fitter = CudaPlaneFitter()
         self.bbox3d_worker = AsyncBBox3D(
             self.estimate_bboxes3d, interval=self.param("bbox3d_interval"),

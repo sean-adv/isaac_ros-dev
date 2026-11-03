@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 import rclpy
 
-from dinov3_cases.node import CaseNode, recognize_objects
+from dinov3_cases.ros.node import CaseNode, recognize_objects
 from dinov3_cases.runtime import ARTIFACTS
 
 
@@ -26,7 +26,7 @@ def main():
         assert dino_release.wait(30), 'Stalled DINO was never released'
         return real_recognize(*args, **kwargs)
 
-    patcher = patch('dinov3_cases.node.recognize_objects', gated_recognize)
+    patcher = patch('dinov3_cases.ros.node.recognize_objects', gated_recognize)
     patcher.start()
     with tempfile.TemporaryDirectory() as directory:
         folder = Path(directory) / 'sample'

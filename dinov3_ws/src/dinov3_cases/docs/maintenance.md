@@ -4,11 +4,11 @@
 
 ## 現用流程
 
-部署入口為 `node.py:main`；SAM3、NvDCF、Cat2Real、深度量測與 HTTP
+部署入口為 `ros/node.py:main`；SAM3、NvDCF、Cat2Real、深度量測與 HTTP
 共用節點狀態。`config.py` 定義程式預設值與啟動驗證，部署覆寫在
 [config/dinov3_cases.yaml](../../../config/dinov3_cases.yaml)。網頁設定不寫回 YAML。
 
-同步模式直接呼叫 `recognize_objects`；非同步模式由 `async_nvdcf.py` 負責
+同步模式直接呼叫 `recognize_objects`；非同步模式由 `tracking/async_nvdcf.py` 負責
 背景 SAM3／DINO、分類沿用及 seed ownership 綁定。診斷快照保存 seed-frame
 裁切與完整舊圖庫版本，按需繪製。深度佇列使用既有 `node.lock`。
 
@@ -30,7 +30,7 @@
 
 ## 深度與影像輸出
 
-`depth_bbox.py` 使用單平面 RANSAC 與平面內最小面積矩形長邊方向；CPU Open3D
+`geometry/depth_bbox.py` 使用單平面 RANSAC 與平面內最小面積矩形長邊方向；CPU Open3D
 及 CUDA fitter 都是現用路徑。測試涵蓋傾斜平面、離群點、方向歧義、擬合回退、
 ROS quaternion 與繪圖一致性。
 

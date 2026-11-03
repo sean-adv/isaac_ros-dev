@@ -4,11 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from dinov3_cases.patches import (
-    patch_features,
-    preprocess_image,
-    compute_similarity_maps,
-)
+from dinov3_cases.inference.patches import patch_features, preprocess_image, compute_similarity_maps
 
 
 class SpatialProbe(torch.nn.Module):

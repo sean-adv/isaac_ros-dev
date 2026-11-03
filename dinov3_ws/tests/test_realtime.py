@@ -7,8 +7,8 @@ import threading
 
 import pytest
 
-from dinov3_cases.node import CaseNode
-from dinov3_cases.web import create_app
+from dinov3_cases.ros.node import CaseNode
+from dinov3_cases.api.web import create_app
 
 
 def test_model_timings_topic_contains_only_latest_milliseconds():
@@ -123,7 +123,7 @@ def test_camera_input_fps_counts_arrivals_independently_of_result_fps():
         source='camera', frame_seq=0, performance={'result_fps': 20.0},
     )
     frame = SimpleNamespace(header=SimpleNamespace(frame_id='rgb'))
-    with patch('dinov3_cases.node.time.monotonic', side_effect=[10., 10.+1/30, 10.+2/30]):
+    with patch('dinov3_cases.ros.node.time.monotonic', side_effect=[10., 10.+1/30, 10.+2/30]):
         for _ in range(3):
             CaseNode.on_image(node, frame)
     assert node.camera_fps == pytest.approx(30.)
@@ -180,7 +180,7 @@ def test_ros_publication_timing_follows_its_frame(current_frame):
     node.recognition_pub.publish.side_effect = lambda _: stop.set()
     node.bbox3d_pub.get_subscription_count.return_value = 0
     node.tag_pub.get_subscription_count.return_value = 0
-    with patch('dinov3_cases.node.time.monotonic', side_effect=[20., 21.]):
+    with patch('dinov3_cases.ros.node.time.monotonic', side_effect=[20., 21.]):
         CaseNode.run_publications(node)
     assert node.last_publication['callback_to_publish_ms'] == 11000.
     assert node.last_publication['result_to_publish_ms'] == 2000.

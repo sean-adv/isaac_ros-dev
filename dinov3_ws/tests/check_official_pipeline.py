@@ -12,10 +12,10 @@ import numpy as np
 from PIL import Image
 import torch
 
-from dinov3_cases.encoder import Encoder
-from dinov3_cases.grounded import ObjectGallery, recognize_objects
-from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
-from dinov3_cases.sam3_trt import Sam3Detector
+from dinov3_cases.inference.encoder import Encoder
+from dinov3_cases.recognition.grounded import ObjectGallery, recognize_objects
+from dinov3_cases.inference.grounding_ipc import SharedMemoryGroundingDetector
+from dinov3_cases.inference.sam3_trt import Sam3Detector
 from dinov3_cases.runtime import PROJECT, DINO_ENGINE, DINO_MODEL, GROUNDING_ENGINE, SAM3_MODEL, CASES_DIR, INPUT_SIZE
 
 

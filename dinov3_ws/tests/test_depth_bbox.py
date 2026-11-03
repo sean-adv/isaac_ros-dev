@@ -6,7 +6,8 @@ import pytest
 from sensor_msgs.msg import CameraInfo
 from std_msgs.msg import Header
 
-from dinov3_cases.depth_bbox import estimate_bbox3d, attach_bboxes3d, bboxes3d_message
+from dinov3_cases.geometry.depth_bbox import estimate_bbox3d, attach_bboxes3d
+from dinov3_cases.ros.messages import bboxes3d_message
 
 
 def calibration():
@@ -224,7 +225,7 @@ def test_invalid_segmentation_options(option, value, error):
 ])
 @pytest.mark.parametrize("dtype, scale", [(np.uint16, .001), (np.float32, 1.)])
 def test_roi_conversion_and_cached_rays_preserve_all_output_fields(model, coefficients, dtype, scale):
-    from dinov3_cases.depth_bbox import ProjectionRayCache
+    from dinov3_cases.geometry.depth_bbox import ProjectionRayCache
     info = calibration()
     info.distortion_model, info.d = model, coefficients
     raw = (scene() / scale).astype(dtype)
@@ -246,7 +247,7 @@ def test_roi_conversion_and_cached_rays_preserve_all_output_fields(model, coeffi
 
 
 def test_ray_cache_reuses_map_and_rebuilds_for_mutated_calibration():
-    from dinov3_cases.depth_bbox import ProjectionRayCache
+    from dinov3_cases.geometry.depth_bbox import ProjectionRayCache
     cache = ProjectionRayCache()
     info = calibration()
     def run():
@@ -274,7 +275,7 @@ def test_ray_cache_reuses_map_and_rebuilds_for_mutated_calibration():
 
 
 def test_roi_conversion_preserves_holes_and_depth_band_boundaries():
-    from dinov3_cases.depth_bbox import ProjectionRayCache
+    from dinov3_cases.geometry.depth_bbox import ProjectionRayCache
     raw = scene().astype(np.float32)
     raw[45, 40:44] = [np.nan, np.inf, 0., .92]
     expected = estimate_bbox3d(raw.astype(np.float64), calibration(), BOX)
@@ -299,7 +300,7 @@ def tilted_rectangle(roll, tilt):
 
 @pytest.mark.parametrize("roll, tilt", [(0., 0.), (.55, .25), (-.7, -.3), (1.4, .2)])
 def test_recovers_long_edge_normal_and_bounds_of_tilted_rectangle(roll, tilt):
-    from dinov3_cases.depth_bbox import bbox_vertices, _rotation_quaternion
+    from dinov3_cases.geometry.depth_bbox import bbox_vertices, _rotation_quaternion
     depth, expected, mask = tilted_rectangle(roll, tilt)
     # Missing samples and submillimeter noise, plus in-band depth outliers.
     rng = np.random.default_rng(7)
@@ -345,7 +346,7 @@ def test_square_surface_marks_in_plane_ambiguity():
 
 
 def test_ros_quaternion_and_wireframe_share_nonidentity_rotation():
-    from dinov3_cases.depth_bbox import bbox_vertices
+    from dinov3_cases.geometry.depth_bbox import bbox_vertices
     from rclpy.serialization import serialize_message, deserialize_message
     from vision_msgs.msg import Detection3DArray
     depth, expected, _ = tilted_rectangle(.6, .25)
@@ -367,7 +368,7 @@ def test_ros_quaternion_and_wireframe_share_nonidentity_rotation():
 
 @pytest.mark.parametrize("axis", np.eye(3))
 def test_quaternion_handles_half_turn(axis):
-    from dinov3_cases.depth_bbox import _rotation_quaternion
+    from dinov3_cases.geometry.depth_bbox import _rotation_quaternion
     rotation, _ = cv2.Rodrigues(axis * np.pi)
     q = np.array(_rotation_quaternion(rotation))
     assert abs(np.dot(q[:3], axis)) == pytest.approx(1.)
@@ -376,7 +377,7 @@ def test_quaternion_handles_half_turn(axis):
 
 def test_open3d_failure_keeps_explicit_camera_aligned_fallback(monkeypatch):
     from types import SimpleNamespace
-    from dinov3_cases import depth_bbox
+    from dinov3_cases.geometry import depth_bbox
 
     def fail(**options):
         raise RuntimeError('native segmentation failed')
@@ -390,7 +391,7 @@ def test_open3d_failure_keeps_explicit_camera_aligned_fallback(monkeypatch):
 
 
 def test_open3d_degenerate_plane_does_not_produce_invalid_orientation():
-    from dinov3_cases.depth_bbox import _surface_rotation
+    from dinov3_cases.geometry.depth_bbox import _surface_rotation
     points = np.column_stack((np.linspace(-.2, .2, 100), np.zeros(100), np.ones(100)))
     with pytest.raises(ValueError, match='degenerate_plane'):
         _surface_rotation(points, .005, 80)

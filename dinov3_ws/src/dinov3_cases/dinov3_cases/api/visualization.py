@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
-from .depth_bbox import bbox_vertices, project_box_points
+from dinov3_cases.geometry.depth_bbox import bbox_vertices, project_box_points
 
 
 def draw_bbox3d(image, data, info, color):

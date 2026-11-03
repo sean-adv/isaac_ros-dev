@@ -10,7 +10,7 @@ from multiprocessing import shared_memory
 import cv2
 import numpy as np
 
-from .runtime import PROJECT
+from dinov3_cases.runtime import PROJECT
 
 DEEPSTREAM = Path('/opt/nvidia/deepstream/deepstream-9.1')
 BRIDGE = PROJECT / 'artifacts/nvdcf/nvdcf_bridge'

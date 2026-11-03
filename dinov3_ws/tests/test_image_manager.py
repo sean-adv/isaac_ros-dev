@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dinov3_cases.image_manager import create_app, remove_background
+from dinov3_cases.api.image_manager import create_app
+from dinov3_cases.recognition.images import remove_background
 
 
 def options(**overrides):
@@ -171,7 +172,7 @@ def test_upload_preserves_alpha_and_rejects_invalid_image(gallery):
 
 def test_reference_change_callback(tmp_path):
     from flask import Flask
-    from dinov3_cases.image_manager import register_image_manager
+    from dinov3_cases.api.image_manager import register_image_manager
 
     app = Flask(__name__)
     changes = []

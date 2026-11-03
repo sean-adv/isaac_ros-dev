@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 from PIL import Image
 
-from dinov3_cases.web import create_app
+from dinov3_cases.api.web import create_app
 
 
 def picture(color="red"):

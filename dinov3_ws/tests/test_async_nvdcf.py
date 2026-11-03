@@ -4,7 +4,7 @@ import threading
 import numpy as np
 import pytest
 
-from dinov3_cases.async_nvdcf import AsyncNvDCFProposals
+from dinov3_cases.tracking.async_nvdcf import AsyncNvDCFProposals
 
 
 class FakeNvDCF:
@@ -516,7 +516,7 @@ def test_blocked_cleanup_does_not_stall_handoff_or_live_tracking(pixels):
 
 
 def test_shutdown_drains_cleanup_even_when_a_retired_close_fails(pixels, caplog):
-    from dinov3_cases.async_nvdcf import _TrackerReaper
+    from dinov3_cases.tracking.async_nvdcf import _TrackerReaper
     reaper = _TrackerReaper()
     entered, release, done = threading.Event(), threading.Event(), threading.Event()
 

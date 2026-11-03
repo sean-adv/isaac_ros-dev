@@ -5,7 +5,7 @@ import threading
 from types import SimpleNamespace
 
 import torch
-from .runtime import MODEL_ID, DINO_ENGINE
+from dinov3_cases.runtime import MODEL_ID, DINO_ENGINE
 
 
 def validate_shape(shape, minimum, maximum):

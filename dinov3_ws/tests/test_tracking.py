@@ -2,7 +2,7 @@
 
 import pytest
 
-from dinov3_cases.tracking import BBoxSmoother, TrackIdentities, TrackLifecycle
+from dinov3_cases.tracking.identities import BBoxSmoother, TrackIdentities, TrackLifecycle
 
 
 def test_bbox_smoothing_averages_last_three_raw_frames():
@@ -103,7 +103,7 @@ def test_unknown_retirement_follows_recovered_identity_and_forgets_history():
 
 def test_missing_classification_is_not_unknown_and_expired_history_is_pruned(monkeypatch):
     now = [0.0]
-    monkeypatch.setattr('dinov3_cases.tracking.time.monotonic', lambda: now[0])
+    monkeypatch.setattr('dinov3_cases.tracking.identities.time.monotonic', lambda: now[0])
     identities = TrackIdentities()
     first, _ = identities.assign([box()], [])
     identities.retire_unknown(first)
@@ -202,7 +202,7 @@ def test_invalid_lifecycle_limits_are_rejected(options):
 
 def test_lost_identity_expires_without_displaying_stale_boxes(monkeypatch):
     now = [0.0]
-    monkeypatch.setattr('dinov3_cases.tracking.time.monotonic', lambda: now[0])
+    monkeypatch.setattr('dinov3_cases.tracking.identities.time.monotonic', lambda: now[0])
     identities = TrackIdentities()
     first, _ = identities.assign([box()], [])
     now[0] = .5
@@ -241,8 +241,8 @@ def test_same_frame_identity_change_replaces_smoothing_history():
 
 def test_ros_2d_and_3d_use_same_tracking_id():
     from std_msgs.msg import Header
-    from dinov3_cases.grounded import recognition_message
-    from dinov3_cases.depth_bbox import bboxes3d_message
+    from dinov3_cases.ros.messages import recognition_message
+    from dinov3_cases.ros.messages import bboxes3d_message
 
     item = box()
     item.update(track_id=42, score=.9, bbox3d=dict(

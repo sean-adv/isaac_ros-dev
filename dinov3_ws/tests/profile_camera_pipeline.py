@@ -5,9 +5,9 @@ from pathlib import Path
 import time
 import numpy as np
 import rclpy
-from dinov3_cases import node as pipeline
+from dinov3_cases.ros import node as pipeline
 from dinov3_cases.runtime import GROUNDING_ENGINE, DINO_ENGINE, GROUNDING_PYTHON, PROJECT
-from dinov3_cases.trt_backend import TRTBackbone
+from dinov3_cases.inference.trt_backend import TRTBackbone
 
 
 def main():

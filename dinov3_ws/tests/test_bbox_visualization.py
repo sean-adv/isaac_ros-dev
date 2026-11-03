@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from sensor_msgs.msg import CameraInfo
 
-from dinov3_cases.visualization import draw_bbox3d, render_bbox_overlay
-from dinov3_cases.web import create_app
+from dinov3_cases.api.visualization import draw_bbox3d, render_bbox_overlay
+from dinov3_cases.api.web import create_app
 
 
 def calibration(model="plumb_bob"):
@@ -29,7 +29,7 @@ def item():
 
 def test_projects_twelve_edges_with_perspective_and_metric_dimensions():
     image = np.zeros((120, 160, 3), np.uint8)
-    with patch("dinov3_cases.visualization.cv2.line", wraps=cv2.line) as line:
+    with patch("dinov3_cases.api.visualization.cv2.line", wraps=cv2.line) as line:
         assert draw_bbox3d(image, box(), calibration(), (60, 220, 80))
     assert line.call_count == 12
     segments = [(call.args[1], call.args[2]) for call in line.call_args_list]
@@ -41,7 +41,7 @@ def test_projects_twelve_edges_with_perspective_and_metric_dimensions():
 
 def test_fisheye_projection_and_clipped_edges():
     image = np.zeros((120, 160, 3), np.uint8)
-    with patch("dinov3_cases.visualization.cv2.fisheye.projectPoints",
+    with patch("dinov3_cases.api.visualization.cv2.fisheye.projectPoints",
                wraps=cv2.fisheye.projectPoints) as project:
         assert draw_bbox3d(image, box(), calibration("equidistant"), (60, 220, 80))
     assert project.call_count == 1
@@ -111,14 +111,14 @@ def test_2d_and_3d_share_visibility_for_all_labels(label, visible):
 @pytest.mark.parametrize("model", ["plumb_bob", "equidistant"])
 def test_browser_projection_scales_pixels_without_changing_metric_data(model):
     from copy import deepcopy
-    from dinov3_cases.visualization import render_display_overlay
+    from dinov3_cases.api.visualization import render_display_overlay
 
     image = np.zeros((120, 160, 3), np.uint8)
     detection, info = item(), calibration(model)
     info.d = [.1, -.02, .001, .002] + ([] if model == "equidistant" else [.005])
     original_detection, original_info = deepcopy(detection), deepcopy(info)
-    project_name = ("dinov3_cases.visualization.cv2.fisheye.projectPoints"
-                    if model == "equidistant" else "dinov3_cases.visualization.cv2.projectPoints")
+    project_name = ("dinov3_cases.api.visualization.cv2.fisheye.projectPoints"
+                    if model == "equidistant" else "dinov3_cases.api.visualization.cv2.projectPoints")
     project = cv2.fisheye.projectPoints if model == "equidistant" else cv2.projectPoints
     projections = []
 
@@ -128,7 +128,7 @@ def test_browser_projection_scales_pixels_without_changing_metric_data(model):
         return result
 
     with patch(project_name, side_effect=capture), \
-            patch("dinov3_cases.visualization.render_bbox_overlay",
+            patch("dinov3_cases.api.visualization.render_bbox_overlay",
                   wraps=render_bbox_overlay) as render:
         render_bbox_overlay(image, [detection], info, "3d")
         display = render_display_overlay(image, [detection], info, "3d")
@@ -142,12 +142,12 @@ def test_browser_projection_scales_pixels_without_changing_metric_data(model):
 
 
 def test_browser_2d_coordinates_and_resize_before_color_conversion():
-    from dinov3_cases.visualization import render_display_overlay
+    from dinov3_cases.api.visualization import render_display_overlay
 
     rgb = np.full((1080, 1920, 3), [200, 80, 30], dtype=np.uint8)
     detection = item()
-    with patch("dinov3_cases.visualization.cv2.cvtColor", wraps=cv2.cvtColor) as convert, \
-            patch("dinov3_cases.visualization.cv2.rectangle", wraps=cv2.rectangle) as rectangle:
+    with patch("dinov3_cases.api.visualization.cv2.cvtColor", wraps=cv2.cvtColor) as convert, \
+            patch("dinov3_cases.api.visualization.cv2.rectangle", wraps=cv2.rectangle) as rectangle:
         display = render_display_overlay(rgb, [detection], mode="2d")
     assert convert.call_args.args[0].shape == (540, 960, 3)
     assert rectangle.call_args.args[1:3] == ((20, 10), (60, 50))
@@ -159,7 +159,7 @@ def test_wireframe_projects_rotated_local_axes():
     image = np.zeros((120, 160, 3), np.uint8)
     data = dict(position=[0., 0., 1.], size=[.2, .1, .2],
                 rotation=[[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
-    with patch("dinov3_cases.visualization.cv2.line", wraps=cv2.line) as line:
+    with patch("dinov3_cases.api.visualization.cv2.line", wraps=cv2.line) as line:
         assert draw_bbox3d(image, data, calibration(), (60, 220, 80))
     segments = [(call.args[1], call.args[2]) for call in line.call_args_list]
     # Local X edge is vertical after a 90-degree rotation about camera Z.

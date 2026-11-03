@@ -5,8 +5,8 @@ import pytest
 from builtin_interfaces.msg import Time
 from std_msgs.msg import Header
 
-from dinov3_cases.async_bbox3d import AsyncBBox3D, validate_bbox3d_schedule
-from dinov3_cases.depth_bbox import bboxes3d_message
+from dinov3_cases.geometry.async_bbox3d import AsyncBBox3D, validate_bbox3d_schedule
+from dinov3_cases.ros.messages import bboxes3d_message
 
 
 def detection(x=0, label="medicine"):
@@ -161,7 +161,7 @@ def test_failed_measurement_replaces_previous_success():
 def test_depth_failures_retain_valid_box_without_renewing_age(failure, monkeypatch):
     completed = threading.Event()
     clock = [10.]
-    monkeypatch.setattr('dinov3_cases.async_bbox3d.time.monotonic', lambda: clock[0])
+    monkeypatch.setattr('dinov3_cases.geometry.async_bbox3d.time.monotonic', lambda: clock[0])
 
     def measure(items, inputs):
         if inputs and inputs[0] == 'valid':
@@ -206,7 +206,7 @@ def test_depth_failures_retain_valid_box_without_renewing_age(failure, monkeypat
 
 def test_age_expiry_uses_source_capture_time_and_ros_preserves_measurement_stamp(worker, monkeypatch):
     pipeline, entered, release, completed, _, _ = worker
-    monkeypatch.setattr('dinov3_cases.async_bbox3d.time.monotonic', lambda: 10.)
+    monkeypatch.setattr('dinov3_cases.geometry.async_bbox3d.time.monotonic', lambda: 10.)
     queued, _, _ = submit(pipeline, captured_at=9.)
     assert entered.wait(1)
     release.set()
@@ -217,7 +217,7 @@ def test_age_expiry_uses_source_capture_time_and_ros_preserves_measurement_stamp
     assert message.header.stamp.sec == 1
     assert message.detections[0].header.stamp.sec == 1
     assert message.detections[0].results[0].pose.pose == message.detections[0].bbox.center
-    monkeypatch.setattr('dinov3_cases.async_bbox3d.time.monotonic', lambda: 11.)
+    monkeypatch.setattr('dinov3_cases.geometry.async_bbox3d.time.monotonic', lambda: 11.)
     stale, _ = pipeline.latest(queued)
     assert stale[0]['bbox3d_status'] == 'stale_background_measurement'
     assert 'bbox3d' not in stale[0]

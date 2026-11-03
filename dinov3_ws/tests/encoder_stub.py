@@ -2,8 +2,8 @@
 import numpy as np
 import torch
 
-from dinov3_cases.cat2real import prepare_cat2real_image
-from dinov3_cases.grounded import encode_object
+from dinov3_cases.inference.cat2real import prepare_cat2real_image
+from dinov3_cases.recognition.grounded import encode_object
 
 
 class ColorEncoder:

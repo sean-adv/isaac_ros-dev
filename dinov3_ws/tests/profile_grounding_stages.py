@@ -5,9 +5,9 @@ from pathlib import Path
 import time
 import numpy as np
 from PIL import Image
-from dinov3_cases.grounded import DEFAULT_PROMPT
+from dinov3_cases.recognition.grounded import DEFAULT_PROMPT
 from dinov3_cases.runtime import GROUNDING_ENGINE, GROUNDING_PYTHON
-from dinov3_cases.grounding_ipc import SharedMemoryGroundingDetector
+from dinov3_cases.inference.grounding_ipc import SharedMemoryGroundingDetector
 
 
 def main():

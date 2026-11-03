@@ -25,7 +25,7 @@ def main():
             sys.executable,
             "-u",
             "-m",
-            "dinov3_cases.node",
+            "dinov3_cases.ros.node",
             "--ros-args",
             "--params-file",
             str(config),

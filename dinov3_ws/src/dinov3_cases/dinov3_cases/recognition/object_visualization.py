@@ -11,7 +11,7 @@ import torch
 
 def object_debug_views(roi, prepared, features, reference_patches, max_side, stride, roi_size=None):
     """Use the existing forward's patch tokens; remove input padding before ROI mapping."""
-    from .patches import compute_similarity_maps, reference_grid_image
+    from dinov3_cases.inference.patches import compute_similarity_maps, reference_grid_image
 
     gh, gw = prepared.height // stride, prepared.width // stride
     roi_size = roi.size if roi_size is None else roi_size

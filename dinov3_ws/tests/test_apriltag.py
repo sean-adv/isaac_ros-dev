@@ -10,8 +10,8 @@ from isaac_ros_apriltag_interfaces.msg import AprilTagDetectionArray
 from rclpy.serialization import serialize_message, deserialize_message
 from std_msgs.msg import Header
 
-from dinov3_cases.apriltag import apriltag_message
-from dinov3_cases.depth_bbox import bboxes3d_message
+from dinov3_cases.ros.messages import apriltag_message
+from dinov3_cases.ros.messages import bboxes3d_message
 
 
 def object_detection(**changes):
@@ -100,7 +100,7 @@ def test_missing_depth_and_empty_frames_do_not_invent_positions(label):
 
 
 def test_publication_worker_publishes_empty_array_to_clear_previous_objects():
-    from dinov3_cases.node import CaseNode
+    from dinov3_cases.ros.node import CaseNode
 
     stop = threading.Event()
     tag_pub = Mock()

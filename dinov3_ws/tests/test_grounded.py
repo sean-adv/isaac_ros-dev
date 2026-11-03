@@ -1,6 +1,6 @@
 """Object identity, rejection, duplicate proposals, and gallery lifecycle contracts."""
 
-from dinov3_cases.object_visualization import object_debug_views, ObjectVisualizationSnapshot
+from dinov3_cases.recognition.object_visualization import object_debug_views, ObjectVisualizationSnapshot
 
 from types import SimpleNamespace
 
@@ -9,18 +9,11 @@ import pytest
 import torch
 from PIL import Image
 
-from dinov3_cases.grounded import (
-    ObjectGallery,
-    compute_lab_histogram,
-    clean_proposals,
-    recognize_objects,
-    validate_settings,
-    validate_bbox_limits,
-    recognition_message,
-)
+from dinov3_cases.recognition.grounded import ObjectGallery, compute_lab_histogram, clean_proposals, recognize_objects, validate_settings, validate_bbox_limits
+from dinov3_cases.ros.messages import recognition_message
 
 from encoder_stub import ColorEncoder
-from dinov3_cases.cat2real import prepare_cat2real_image
+from dinov3_cases.inference.cat2real import prepare_cat2real_image
 
 
 def test_clip_suppress_duplicates_without_merging_adjacent_objects():
@@ -325,7 +318,7 @@ def test_selected_label_compares_every_object_and_all_reference_images_without_f
 
 
 def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
-    import dinov3_cases.grounded as grounded
+    import dinov3_cases.recognition.grounded as grounded
 
     image = Image.new("RGB", (32, 32), "red")
     proposals = clean_proposals([[0, 0, 32, 32]], [0.9], ["box"], image.size)
@@ -338,7 +331,7 @@ def test_deferred_diagnostics_do_not_render_until_requested(monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(grounded, "build_object_diagnostic", render)
-    monkeypatch.setattr("dinov3_cases.object_visualization.build_object_diagnostic", render)
+    monkeypatch.setattr("dinov3_cases.recognition.object_visualization.build_object_diagnostic", render)
     gallery = ObjectGallery()
     results = recognize_objects(
         image,
@@ -425,10 +418,10 @@ def test_invalid_containment_threshold(value):
 def test_web_settings_accept_interval_and_reject_invalid_values(tmp_path, monkeypatch):
     import threading
     from unittest.mock import Mock
-    from dinov3_cases.web import create_app
+    from dinov3_cases.api.web import create_app
 
     check_nvdcf = Mock()
-    monkeypatch.setattr("dinov3_cases.web.check_nvdcf", check_nvdcf)
+    monkeypatch.setattr("dinov3_cases.api.web.check_nvdcf", check_nvdcf)
 
     node = SimpleNamespace(
         root=tmp_path, lock=threading.Lock(), image_changed=threading.Event(),

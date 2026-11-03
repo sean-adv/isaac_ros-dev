@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from dinov3_cases.web import create_app
-from dinov3_cases.patches import reference_grid_image
+from dinov3_cases.api.web import create_app
+from dinov3_cases.inference.patches import reference_grid_image
 from dinov3_cases.runtime import INPUT_SIZE
 
 
