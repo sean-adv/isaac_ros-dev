@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
                 if (!input_surface || input_surface->surfaceList[0].width != header[3]
                                    || input_surface->surfaceList[0].height != header[4]) {
                     if (input_surface) NvBufSurfaceDestroy(input_surface);
-    if (rgba_surface) NvBufSurfaceDestroy(rgba_surface);
+                    // RGBA stays at tracker resolution and lives until shutdown.
                     input_surface = nullptr;
                     NvBufSurfaceCreateParams input_params{};
                     input_params.gpuId = 0; input_params.width = header[3]; input_params.height = header[4];
@@ -190,6 +190,10 @@ int main(int argc, char** argv) {
             require(fflush(protocol) == 0, "protocol flush failed");
         }
         deinit(context); context = nullptr;
+        if (input_surface) NvBufSurfaceDestroy(input_surface);
+        if (rgba_surface) NvBufSurfaceDestroy(rgba_surface);
+        if (shared_pixels != MAP_FAILED) munmap(shared_pixels, shared_bytes);
+        if (shared_fd >= 0) close(shared_fd);
         NvBufSurfaceDestroy(surface); surface = nullptr;
         dlclose(library);
         fclose(protocol);
@@ -198,10 +202,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "NvDCF bridge: %s\n", error.what());
         if (context && deinit) deinit(context);
         if (input_surface) NvBufSurfaceDestroy(input_surface);
-    if (rgba_surface) NvBufSurfaceDestroy(rgba_surface);
-    if (shared_pixels != MAP_FAILED) munmap(shared_pixels, shared_bytes);
-    if (shared_fd >= 0) close(shared_fd);
-    if (surface) NvBufSurfaceDestroy(surface);
+        if (rgba_surface) NvBufSurfaceDestroy(rgba_surface);
+        if (shared_pixels != MAP_FAILED) munmap(shared_pixels, shared_bytes);
+        if (shared_fd >= 0) close(shared_fd);
+        if (surface) NvBufSurfaceDestroy(surface);
         return 1;
     }
 }

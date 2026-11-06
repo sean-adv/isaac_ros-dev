@@ -8,6 +8,29 @@ import numpy as np
 from dinov3_cases.tracking.nvdcf import NvDCF
 
 
+def check_stationary_shared_input():
+    """A fixed image must not drift, including after source-size reallocation."""
+    texture = np.random.default_rng(42).integers(30, 255, (100, 80, 3), dtype=np.uint8)
+    tracker = NvDCF(transport="shm")
+    errors = []
+    try:
+        for index in range(80):
+            # RGBA tracker resolution remains fixed while the RGB surface changes.
+            shape = (480, 640, 3) if index < 40 else (540, 960, 3)
+            image = np.full(shape, 25, dtype=np.uint8)
+            image[160:260, 250:330] = texture
+            detections = [dict(bbox=[250, 160, 330, 260], detection_score=.95)] if index in (0, 40) else None
+            output = tracker.update(image, index, detections)
+            assert len(output) == 1, (index, output)
+            x0, y0, x1, y1 = output[0]['bbox']
+            error = float(np.hypot((x0+x1)/2-290, (y0+y1)/2-210))
+            errors.append(error)
+            assert error < 25, (index, output[0]['bbox'], error)
+        print(json.dumps(dict(stationary_frames=80, max_center_error_px=max(errors))))
+    finally:
+        tracker.close()
+
+
 def main():
     # Reproduce the model process's pip TensorRT preference. Native overrides it.
     os.environ['LD_LIBRARY_PATH'] = os.path.abspath(
@@ -53,3 +76,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+    check_stationary_shared_input()
