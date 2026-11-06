@@ -13,7 +13,7 @@ import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image as ImageMsg, CameraInfo
 from std_msgs.msg import Header, String
 from werkzeug.serving import make_server
@@ -47,6 +47,14 @@ from dinov3_cases.ros.messages import recognition_message
 class CaseNode(Node):
     def __init__(self):
         super().__init__("dinov3_cases")
+        self.readiness_lock = threading.Lock()
+        self.readiness = dict(state="loading", message="Loading DINOv3…")
+        self.readiness_pub = self.create_publisher(
+            String, "/medicine_recognition/status",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.readiness_timer = self.create_timer(1.0, self.publish_readiness)
+        self.publish_readiness()
         defaults = default_parameters()
         for k, v in defaults.items():
             self.declare_parameter(k, v)
@@ -166,6 +174,22 @@ class CaseNode(Node):
         self.worker = threading.Thread(target=self.run_grounded_worker, daemon=True)
         self.worker.start()
         self.get_logger().info(f"Browser: http://{self.param('host')}:{self.param('port')}")
+
+    def set_readiness(self, state, message):
+        with self.readiness_lock:
+            payload = dict(state=state, message=message)
+            if self.readiness == payload:
+                return
+            self.readiness = payload
+        self.publish_readiness()
+
+    def publish_readiness(self):
+        with self.readiness_lock:
+            payload = dict(self.readiness)
+        worker = getattr(self, "worker", None)
+        if worker is not None and not worker.is_alive() and payload["state"] != "error":
+            payload = dict(state="error", message="Recognition worker stopped")
+        self.readiness_pub.publish(String(data=json.dumps(payload)))
 
     def publish_model_timings(self):
         payload = self.model_timings.milliseconds()
@@ -453,6 +477,7 @@ class CaseNode(Node):
                 self.reference_stride = stride
                 self.backend_description = encoder.description
                 self.status = "Loading official SAM3 model…"
+            self.set_readiness("loading", "Loading SAM3…")
             detector = SharedMemoryGroundingDetector(
                 self.param("grounding_engine_path"), encoder.device,
                 python=self.param("grounding_worker_python"),
@@ -469,6 +494,7 @@ class CaseNode(Node):
             self.close_grounding_worker()
             with self.lock:
                 self.status = f"Model load failed: {type(error).__name__}: {error}"
+            self.set_readiness("error", self.status)
             self.get_logger().error(self.status)
             return
         gallery = ObjectGallery()
@@ -489,6 +515,7 @@ class CaseNode(Node):
             model_timings=self.model_timings,
         )
         self.proposal_tracker = proposal_tracker
+        self.set_readiness("warming_up", "Models loaded; waiting for an image to initialize tracking and recognition…")
         last_recognition = None
         had_detections = False
         result_rate = ResultRate(window_seconds=3.0)
@@ -598,6 +625,10 @@ class CaseNode(Node):
                     with self.model_timings.measure("dinov3", seed_key, revision):
                         return implementation(seed_pixels, proposals, seed_key)
 
+                with self.readiness_lock:
+                    starting = self.readiness["state"] == "warming_up"
+                if starting:
+                    self.set_readiness("warming_up", "Preparing first SAM3 / NvDCF / DINOv3 result…")
                 result = proposal_tracker.update(
                     shared_frame.pixels, (gen, seq), context,
                     settings["detection_interval"], detect, frame=shared_frame, recognize=recognize,
@@ -718,6 +749,10 @@ class CaseNode(Node):
                                            seq, bbox3d_info, completed_at)
                     self.render_changed.set()
                     self.publish_changed.set()
+                if proposal_tracker.recognition_error:
+                    self.set_readiness("error", "Recognition failed: " + proposal_tracker.recognition_error)
+                elif recognition is not None:
+                    self.set_readiness("ready", "Recognition ready")
                 processed = (gen, seq)
             except Exception as error:
                 with self.lock:
@@ -727,6 +762,7 @@ class CaseNode(Node):
                         self.video_at = None
                         self.image_stream.reset()
                         self.status = f"Error: {type(error).__name__}: {error}"
+                self.set_readiness("error", f"Recognition failed: {error}")
                 self.get_logger().error(str(error))
                 # Retry failed files/model calls at a bounded rate, including static uploads.
                 self.stop.wait(1.0)
