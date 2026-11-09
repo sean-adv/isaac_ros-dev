@@ -1,5 +1,6 @@
 """DeepStream 9.1 NvDCF in a native process isolated from Torch/TensorRT libraries."""
 from pathlib import Path
+import math
 import os
 import select
 import struct
@@ -30,6 +31,20 @@ def check_nvdcf(config=DEFAULT_CONFIG):
             raise ValueError(f'NvDCF dependency missing: {path}. Run bash dinov3_ws/setup_all.sh.')
 
 
+def _min_tracker_confidence(config):
+    storage = cv2.FileStorage(str(config), cv2.FILE_STORAGE_READ)
+    try:
+        node = storage.getNode('TargetManagement').getNode('minTrackerConfidence')
+        if node.empty():
+            raise ValueError('NvDCF config must define TargetManagement.minTrackerConfidence')
+        value = node.real()
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError('NvDCF minTrackerConfidence must be in [0, 1]')
+        return value
+    finally:
+        storage.release()
+
+
 class NvDCF:
     """One chronological, whole-frame multi-object tracker context.
 
@@ -42,6 +57,7 @@ class NvDCF:
         self.transport = transport
         self.input_shm = None
         check_nvdcf(config)
+        self.min_tracker_confidence = _min_tracker_confidence(config)
         if any(type(v) is not int or v < 32 or v > 4096 or v % 32 for v in (width, height)):
             raise ValueError('nvdcf width/height must be multiples of 32 in [32, 4096]')
         self.width, self.height, self.timeout = width, height, timeout
@@ -142,6 +158,11 @@ class NvDCF:
             if 0 <= detection < len(items):
                 self.metadata[native_id] = dict(items[detection])
             if native_id not in self.metadata:
+                continue
+            # Hide unreliable native output immediately, even on a detector
+            # frame. Keep metadata so the existing hidden-track grace can
+            # recover the same ID without displaying a stale box.
+            if not math.isfinite(confidence) or confidence < self.min_tracker_confidence:
                 continue
             box = [max(0, min(width, round(x/sx))), max(0, min(height, round(y/sy))),
                    max(0, min(width, round((x+w)/sx))), max(0, min(height, round((y+h)/sy)))]

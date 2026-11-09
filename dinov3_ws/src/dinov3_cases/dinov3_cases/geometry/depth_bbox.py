@@ -154,14 +154,17 @@ def estimate_bbox3d(depth, info, bbox, *, min_depth=0.1, max_depth=5.0,
     if not valid.any():
         raise ValueError("no_valid_bbox_depth")
 
-    # Central patch spans roughly 20% of the ROI in each dimension.
+    # Try the central 20% first; widen to 40% only if fewer than 5 valid seeds.
     rh, rw = roi.shape
     cy, cx = rh // 2, rw // 2
-    dy, dx = max(1, rh // 10), max(1, rw // 10)
-    patch = (slice(max(0, cy-dy), min(rh, cy+dy+1)),
-             slice(max(0, cx-dx), min(rw, cx+dx+1)))
-    seeds = roi[patch][valid[patch]]
-    if seeds.size < 5:
+    for divisor in (10, 5):
+        dy, dx = max(1, rh // divisor), max(1, rw // divisor)
+        patch = (slice(max(0, cy-dy), min(rh, cy+dy+1)),
+                 slice(max(0, cx-dx), min(rw, cx+dx+1)))
+        seeds = roi[patch][valid[patch]]
+        if seeds.size >= 5:
+            break
+    else:
         raise ValueError("no_valid_center_depth")
     seed_depth = float(np.median(seeds))
     # Compare bounds directly to avoid arithmetic on NaN/Inf holes.

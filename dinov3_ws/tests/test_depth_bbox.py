@@ -120,9 +120,28 @@ def test_missing_depth_does_not_invent_distance(value):
     assert not bboxes3d_message(items, Header()).detections
 
 
-def test_missing_center_and_small_components_fail_explicitly():
+@pytest.mark.parametrize("valid_center_points", [0, 4])
+def test_missing_center_expands_to_40_percent(valid_center_points):
     depth = scene()
     depth[50:71, 65:96] = 0.
+    depth[60, 80:80+valid_center_points] = 1.
+    data = estimate_bbox3d(depth, calibration(), BOX)
+    assert data["seed_depth"] == 1.
+    # Isolated center samples are excluded from the larger surrounding component.
+    assert data["point_count"] == 3600 - 21 * 31
+
+
+def test_valid_center_keeps_20_percent_sampling():
+    depth = np.full((120, 160), 2.)
+    depth[54:67, 69:92] = 1.
+    data = estimate_bbox3d(depth, calibration(), BOX)
+    assert data["seed_depth"] == 1.
+    assert data["point_count"] == 13 * 23
+
+
+def test_missing_center_and_small_components_fail_explicitly():
+    depth = scene()
+    depth[48:73, 58:103] = 0.
     with pytest.raises(ValueError, match="no_valid_center_depth"):
         estimate_bbox3d(depth, calibration(), BOX)
     depth[:] = 0.

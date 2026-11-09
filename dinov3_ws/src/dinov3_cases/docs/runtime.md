@@ -70,6 +70,8 @@ MJPEG 與 raw Image 的頻寬可能較高；實際 CPU、頻寬及端到端延�
 
 ## NvDCF 執行環境
 
+NvDCF 每次更新後，Python 輸出端也會檢查 `nvdcf.yaml` 的 `TargetManagement.minTrackerConfidence`（啟動時讀取）。沒有原生輸出、信心低於門檻或信心非有限值時，該框立即隱藏，不等待 SAM3 結果；即使同次有偵測輸入也適用。隱藏軌跡沿用下述保留與恢復規則。若 NvDCF 對背景仍有高於門檻的信心，此規則無法判定物體實際已離開。
+
 已解除所有權的 NvDCF context 由單一背景 worker 回收，交接不等待舊子程序退出；最多排隊 8 個，滿載時施加背壓，停機時等待全部回收。仍有可見或遮擋保留物件的 context 不會提前回收。候選框補追到共同影格後先交接，seed-frame 的分類完成後再更新；延後分類不能重新建立已移除的物件，也不能貼到新的偵測回合。`grounding_schedule` 另外提供 `candidate_create_ms`、`candidate_seed_ms`、`candidate_catchup_ms`，用來區分候選準備成本；`geometry_ready_ms` 是框就緒時間，`job_ms` 在 DINO 完成後更新為整件背景工作時間。DINO 失敗保留框，錯誤可從 `recognition_error` 查看。
 
 短暫遮擋使 NvDCF 不再輸出物件時，`nvdcf_max_missed_frames` 保留其原 context、公開 ID 與分類 metadata（預設 30，設 0 停用）。以不同的已處理 RGB 影格計數，同影格重跑不累計；容忍 N 次連續缺失，第 N+1 次仍缺失才移除。失追期間不顯示過期框，也不提交舊框做 3D 量測，該物件的 SAM3 miss 計數暫停。原生輸出恢復時沿用原生及公開 ID；若由新 SAM3 結果重新配對，保留公開 ID，但可換用新的原生 context。任何物件剛失追時會提前要求 SAM3；仍有隱藏物件時，以 `min(grounding_detection_interval, max(1, nvdcf_max_missed_frames // 3))` 個處理影格重試，預設最多每 10 幀一次。原生 shadow 存活期另外受 `maxShadowTrackingAge` 限制，跨遮擋重新配對使用幾何位置而非 ReID，無法保證大幅位移後仍配對正確。包含框過濾與已知轉 unknown 的立即退場規則仍適用於可見物件。
