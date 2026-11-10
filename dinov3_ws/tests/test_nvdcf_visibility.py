@@ -44,16 +44,16 @@ for confidence in (0.9, 0.1, float('nan'), None, 0.8, 0.2):
     try:
         seed = dict(bbox=[2, 3, 12, 15], label='medicine', track_id=42)
         assert tracker.update(pixels, 1, [seed])[0]['track_id'] == 42
-        tracks = _NvDCFTracks([tracker], serial=1, max_missed_frames=15)
+        tracks = _NvDCFTracks([tracker], now=1., max_missed_seconds=15.)
         # No further SAM3 results: even a native record must disappear at low
         # confidence. Non-finite confidence and absent output also hide it.
         for frame in (2, 3, 4):
-            tracks.update(pixels, frame)
+            tracks.update(pixels, frame, now=float(frame))
             assert tracks.proposals == []
             assert tracks.hidden[0]['track_id'] == 42
             assert tracks.last_seen[42] == 1
         for frame in (5, 6):
-            tracks.update(pixels, frame)
+            tracks.update(pixels, frame, now=float(frame))
             assert tracks.proposals[0]['track_id'] == 42
             assert tracks.proposals[0]['label'] == 'medicine'
             assert tracks.hidden == []
@@ -67,3 +67,17 @@ def test_invalid_visibility_threshold_is_rejected(tmp_path, threshold):
     config.write_text(f'%YAML:1.0\nTargetManagement:\n  minTrackerConfidence: {threshold}\n')
     with pytest.raises(ValueError, match='minTrackerConfidence'):
         nvdcf._min_tracker_confidence(config)
+
+
+def test_duplicate_visible_frame_does_not_renew_last_seen_time():
+    from types import SimpleNamespace
+    item = dict(bbox=[0, 0, 10, 10], track_id=1)
+    tracker = SimpleNamespace(proposals=[item], metadata={0: item}, frame_key=1,
+                              update=lambda pixels, serial: [item], close=lambda: None)
+    tracks = _NvDCFTracks([tracker], now=10., max_missed_seconds=.5)
+    tracks.update(None, 1, now=10.4)
+    assert tracks.last_seen[1] == 10.
+    tracker.update = lambda pixels, serial: []
+    tracks.update(None, 2, now=10.6)
+    assert tracks.expired == {1}
+    assert tracks.hidden == []

@@ -175,8 +175,7 @@ def create_app(node):
         with node.lock:
             settings = {**node.grounding_settings, **payload}
             settings["prompt"] = validate_settings(**settings)
-            if settings.get("detection_interval", 1) > 1:
-                check_nvdcf(node.param("nvdcf_config"))
+            check_nvdcf(node.param("nvdcf_config"))
             detector = getattr(node, "grounding_detector", None)
             if detector is None and "prompt" in payload:
                 return jsonify(error="SAM3 is loading. Please try again once it is ready."), 503

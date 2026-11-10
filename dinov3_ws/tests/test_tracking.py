@@ -2,16 +2,16 @@
 
 import pytest
 
-from dinov3_cases.tracking.identities import BBoxSmoother, TrackIdentities, TrackLifecycle
+from dinov3_cases.tracking.identities import BBoxSmoother, TrackIdentities
 
 
-def test_bbox_smoothing_averages_last_three_raw_frames():
-    smoother = BBoxSmoother()
+def test_bbox_smoothing_averages_raw_boxes_within_seconds_window():
+    smoother = BBoxSmoother(.25)
     # 0, 6, 12 average to 6; fourth frame evicts 0, averaging 6, 12, 24 to 14.
     expected = [0, 3, 6, 14]
     for seq, (x, mean) in enumerate(zip((0, 6, 12, 24), expected)):
         raw = [box(x)]
-        result = smoother.update(raw, seq, "camera")
+        result = smoother.update(raw, seq, "camera", now=seq * .1)
         assert result[0]["bbox"] == [mean, 0, mean + 100, 100]
         assert result[0]["area"] == 10000
         assert raw[0]["bbox"][0] == x
@@ -44,8 +44,8 @@ def test_bbox_smoothing_clears_missing_and_context_changed_objects():
     assert smoother.update([box(1000)], 4, "upload")[0]["bbox"][0] == 1000
 
 
-def test_bbox_smoothing_one_frame_disables_averaging():
-    smoother = BBoxSmoother(1)
+def test_bbox_smoothing_zero_seconds_disables_averaging():
+    smoother = BBoxSmoother(0)
     smoother.update([box(0)], 1, "camera")
     assert smoother.update([box(10)], 2, "camera")[0]["bbox"] == box(10)["bbox"]
 
@@ -74,9 +74,9 @@ def test_bbox_smoothing_rounds_outwards_and_updates_area():
     assert result["area"] == 10201
 
 
-@pytest.mark.parametrize("window", [0, -1, True, 1.5, "3", None])
+@pytest.mark.parametrize("window", [-1, True, float("nan"), float("inf"), "3", None])
 def test_bbox_smoothing_rejects_invalid_window(window):
-    with pytest.raises(ValueError, match="bbox_smoothing_frames"):
+    with pytest.raises(ValueError, match="bbox_smoothing_seconds"):
         BBoxSmoother(window)
 
 
@@ -114,90 +114,6 @@ def test_missing_classification_is_not_unknown_and_expired_history_is_pruned(mon
     identities.observe([])
     assert identities.recognized == set()
     assert identities.recent == {}
-
-
-def test_new_track_uses_same_miss_allowance_as_established_tracks():
-    lifecycle = TrackLifecycle()
-    item = dict(box(), track_id=1)
-    first, _ = lifecycle.update([item], {1}, now=0)
-    assert first[0]['track_status'] == 'confirmed'
-    # NvDCF callbacks cannot count as supporting detections.
-    for _ in range(10):
-        tracked, _ = lifecycle.update(first, now=.5)
-        assert tracked[0]['sam3_hits'] == 1
-    for now in (1, 2):
-        coasting, retired = lifecycle.update(first, set(), now=now)
-        assert not retired and coasting[0]['sam3_misses'] == now
-        assert coasting[0]['track_status'] == 'coasting'
-    assert lifecycle.update(first, set(), now=3) == ([], {1})
-
-
-def test_confirmed_track_tolerates_isolated_miss_then_retires_after_three():
-    lifecycle = TrackLifecycle()
-    item = dict(box(), track_id=1)
-    lifecycle.update([item], {1}, now=0)
-    confirmed, _ = lifecycle.update([item], {1}, now=1)
-    assert confirmed[0]['track_status'] == 'confirmed'
-    coasting, _ = lifecycle.update([item], set(), now=2)
-    assert coasting[0]['track_status'] == 'coasting'
-    assert coasting[0]['sam3_misses'] == 1
-    # Repeated camera frames do not increment misses or renew detector age.
-    for _ in range(10):
-        tracked, _ = lifecycle.update(coasting, now=2.5)
-        assert tracked[0]['sam3_misses'] == 1
-        assert tracked[0]['sam3_age_seconds'] == 1.5
-    restored, _ = lifecycle.update([item], {1}, now=3)
-    assert restored[0]['sam3_misses'] == 0
-    assert restored[0]['track_status'] == 'confirmed'
-    assert lifecycle.update([item], set(), now=4)[0]
-    assert lifecycle.update([item], set(), now=5)[0]
-    assert lifecycle.update([item], set(), now=6) == ([], {1})
-
-
-def test_elapsed_time_without_detector_results_does_not_retire_track():
-    lifecycle = TrackLifecycle()
-    item = dict(box(), track_id=1)
-    lifecycle.update([item], {1}, detected_at=0, now=.4)
-    for now in (5, 60, 3600):
-        tracked, retired = lifecycle.update([item], now=now)
-        assert not retired
-        assert tracked[0]['sam3_age_seconds'] == now
-        assert tracked[0]['sam3_misses'] == 0
-    # Long gaps do not disable the consecutive committed-miss limit.
-    assert lifecycle.update([item], set(), now=3601)[0]
-    assert lifecycle.update([item], set(), now=7200)[0]
-    assert lifecycle.update([item], set(), now=10800) == ([], {1})
-
-
-def test_delayed_detection_retains_original_age_without_time_based_retirement():
-    lifecycle = TrackLifecycle()
-    tracked, retired = lifecycle.update([dict(box(), track_id=1)], {1}, detected_at=0, now=6)
-    assert not retired
-    assert tracked[0]['sam3_age_seconds'] == 6
-    assert tracked[0]['sam3_hits'] == 1
-
-
-def test_track_lifetime_is_independent_for_each_object_and_unknown_is_allowed():
-    lifecycle = TrackLifecycle()
-    items = [dict(box(), track_id=1), dict(box(300, 'unknown'), track_id=2)]
-    lifecycle.update(items, {1, 2}, now=0)
-    lifecycle.update(items, {1, 2}, now=.5)
-    lifecycle.update(items, {2}, now=1)
-    lifecycle.update(items, {2}, now=2)
-    remaining, retired = lifecycle.update(items, {2}, now=3)
-    assert retired == {1}
-    assert [item['track_id'] for item in remaining] == [2]
-    assert remaining[0]['label'] == 'unknown'
-    assert remaining[0]['sam3_misses'] == 0
-
-
-@pytest.mark.parametrize('options', [
-    {'max_missed_detections': True}, {'max_missed_detections': -1},
-    {'max_missed_detections': 0}, {'max_missed_detections': 1.5},
-])
-def test_invalid_lifecycle_limits_are_rejected(options):
-    with pytest.raises(ValueError, match='nvdcf_'):
-        TrackLifecycle(**options)
 
 
 def test_lost_identity_expires_without_displaying_stale_boxes(monkeypatch):
@@ -274,3 +190,18 @@ def test_same_frame_correction_replaces_sample_without_biasing_average():
     assert smoother.update([box(12)], 2, 'camera')[0]['bbox'][0] == 6
     assert smoother.update([box(12)], 2, 'camera')[0]['bbox'][0] == 6
     assert smoother.update([box(24)], 3, 'camera')[0]['bbox'][0] == 12
+
+
+def test_smoothing_expires_by_time_even_when_only_one_new_frame_arrives():
+    smoother = BBoxSmoother(.2)
+    smoother.update([box(0)], 1, 'camera', now=0.)
+    assert smoother.update([box(10)], 2, 'camera', now=.1)[0]['bbox'][0] == 5
+    assert smoother.update([box(20)], 3, 'camera', now=1.)[0]['bbox'][0] == 20
+
+
+def test_same_frame_smoothing_refresh_expires_old_samples_without_renewing_latest():
+    smoother = BBoxSmoother(.2)
+    smoother.update([box(0)], 1, 'camera', now=0.)
+    assert smoother.update([box(10)], 2, 'camera', now=.1)[0]['bbox'][0] == 5
+    assert smoother.update([box(10)], 2, 'camera', now=.3)[0]['bbox'][0] == 10
+    assert smoother.histories[0][0][0] == .1

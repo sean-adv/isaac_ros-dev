@@ -16,7 +16,9 @@ from dinov3_cases.tracking.identities import BBoxSmoother
 
 
 @pytest.mark.parametrize('grounding_interval', [1, 10])
-def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, grounding_interval):
+def test_node_keeps_seconds_measurements_independent_of_grounding(tmp_path, grounding_interval, monkeypatch):
+    clock = [0.]
+    monkeypatch.setattr("dinov3_cases.geometry.async_bbox3d.time.monotonic", lambda: clock[0])
     entered, release = threading.Event(), threading.Event()
     pixels = np.zeros((80, 100, 3), dtype=np.uint8)
     measured = []
@@ -28,23 +30,23 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
         for item in items:
             item['bbox3d_status'] = 'test_measurement'
 
-    boxes = AsyncBBox3D(measure)
+    boxes = AsyncBBox3D(measure, interval=.625)
     recognition = dict(frame_id=1, snapshot=None, class_count=1, reference_count=1, recognize_ms=0.)
-    scheduler = Mock(last_recognition=recognition, last_metrics={}, lock=threading.Lock())
+    scheduler = Mock(recognition_error=None, last_recognition=recognition, last_metrics={}, lock=threading.Lock())
     scheduler.has_result.return_value = True
     scheduler.scheduler_metrics.return_value = {}
     scheduler.update.return_value = ([dict(bbox=[20, 20, 60, 40], label='medicine', score=.9)], 'nvdcf')
     params = dict(engine_path='unused', grounding_engine_path='unused',
                   grounding_worker_python='unused', grounding_ipc_timeout=1.,
                   nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
-                  nvdcf_max_missed_detections=3,
-                  nvdcf_max_missed_frames=30,
+                  nvdcf_max_missed_seconds=1.0,
                       grounding_max_detections=20,
                       grounding_containment_threshold=.95,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                   grounding_min_bbox_area=0, pose_enabled=True)
     from dinov3_cases.timing import ModelTimings
-    node = SimpleNamespace(model_timings=ModelTimings(),
+    node = SimpleNamespace(set_readiness=Mock(), readiness_lock=threading.Lock(),
+        readiness=dict(state="ready"), model_timings=ModelTimings(),
         lock=threading.Lock(), generation=0, source='camera', root=tmp_path,
         frame=Image(width=100, height=80, header=Header(frame_id='camera')), frame_seq=1,
         camera_received_at=time.monotonic(), stop=threading.Event(), image_changed=threading.Event(),
@@ -63,11 +65,12 @@ def test_node_keeps_five_frame_measurements_independent_of_grounding(tmp_path, g
 
     def ticks():
         for seq in (1, 2, 3, 4, 5, 5, 6, 7, 8, 9, 10, 11):
+            clock[0] = seq * .125
             node.frame_seq = seq
             yield
             if seq == 1:
                 assert entered.wait(1)
-            assert node.performance['bbox3d_schedule']['interval'] == 5
+            assert node.performance['bbox3d_schedule']['interval'] == .625
             assert node.performance['detection_interval'] == grounding_interval
             observed.append(seq)
         assert boxes.pending[4]['frame_key'] == [0, 11]
@@ -98,7 +101,7 @@ def coalescing_node(tmp_path):
     pixels = np.zeros((80, 100, 3), dtype=np.uint8)
     flags = dict(proposals=False, depth=False)
     recognition = dict(frame_id=1, snapshot=None, class_count=1, reference_count=1, recognize_ms=0.)
-    scheduler = Mock(last_recognition=recognition, last_metrics={}, lock=threading.Lock())
+    scheduler = Mock(recognition_error=None, last_recognition=recognition, last_metrics={}, lock=threading.Lock())
     scheduler.force_detection = False
     scheduler.has_result.side_effect = lambda: flags['proposals'] or scheduler.force_detection
     scheduler.scheduler_metrics.return_value = {}
@@ -120,13 +123,13 @@ def coalescing_node(tmp_path):
 
     boxes.update.side_effect = depth_update
     params = dict(engine_path='unused', grounding_engine_path='unused', grounding_worker_python='unused',
-                  grounding_ipc_timeout=1., nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
-                  nvdcf_max_missed_detections=3, nvdcf_max_missed_frames=30,
+                  grounding_ipc_timeout=1., nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384, nvdcf_max_missed_seconds=1.0,
                   grounding_containment_threshold=.8, grounding_max_detections=20,
                   grounding_min_bbox_width=0, grounding_min_bbox_height=0, grounding_min_bbox_area=0,
                   pose_enabled=True)
     from dinov3_cases.timing import ModelTimings
-    node = SimpleNamespace(model_timings=ModelTimings(),
+    node = SimpleNamespace(set_readiness=Mock(), readiness_lock=threading.Lock(),
+        readiness=dict(state="ready"), model_timings=ModelTimings(),
         lock=threading.Lock(), generation=0, source='camera', root=tmp_path,
         frame=Image(width=100, height=80, header=Header(frame_id='camera')), frame_seq=1,
         camera_received_at=time.monotonic(), frame_pool=SharedFramePool(),

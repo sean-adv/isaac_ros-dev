@@ -8,10 +8,10 @@
 
 1. `ros/node.py` 接收最新 RGB 影格，先配對深度，再取得 `frame_pool.py` 的共享影像租約。
 2. `tracking/async_nvdcf.py` 決定同步偵測或背景偵測；`inference/grounding_ipc.py` 將影像交給同一份 `.venv` 的 TensorRT 11 子程序中的 `inference/sam3_trt.py`，使用官方 TensorRT vision 與 PyTorch bbox head。主程序使用 Cat2Real FP32 Torch-TensorRT。
-3. 非同步模式每 `grounding_detection_interval` 個已處理影格提交背景 SAM3＋DINO 工作。前景 NvDCF 持續追蹤；背景 SAM3 出框後，先在偵測原圖建立候選 NvDCF，再補追最新快照，前景補追至共同影格後立即交接框；此時不等待 DINO。DINO 隨後辨識同一張 seed-frame 的裁切，只依不可變的 seed ownership key 更新仍存活物件的分類，不覆寫目前框。未識別物件一律只顯示 SAM3 名稱，包含等待 DINO 與完成後仍為 unknown 的情況，避免每次辨識時文字切換；已配對物件暫時沿用舊類別，不加上待辨識或更新中的字樣。交接逐物件配對：配對成功者由新 context 接手，漏偵測但追蹤有效者保留原 context 與標籤；連續 `nvdcf_max_missed_detections` 次已提交 SAM3 結果漏偵測才移除（預設 3），空偵測也只計一次漏偵測。靜態上傳每秒可刷新；間隔 1 停用 NvDCF。
+3. 以 `grounding_detection_interval` 秒為最小啟動間隔提交背景 SAM3＋DINO 工作，0.0 表示空閒且有新影格時提交。前景 NvDCF 持續追蹤；背景 SAM3 出框後，先在偵測原圖建立候選 NvDCF，再補追最新快照，前景補追至共同影格後立即交接框；此時不等待 DINO。DINO 隨後辨識同一張 seed-frame 的裁切，只依不可變的 seed ownership key 更新仍存活物件的分類，不覆寫目前框。未識別物件一律只顯示 SAM3 名稱，包含等待 DINO 與完成後仍為 unknown 的情況，避免每次辨識時文字切換；已配對物件暫時沿用舊類別，不加上待辨識或更新中的字樣。交接逐物件配對：配對成功者由新 context 接手，漏偵測但追蹤有效者保留原 context 與標籤；SAM3 漏偵測不再淘汰原生追蹤仍有效的物件。靜態上傳每秒可刷新；所有間隔均維持 NvDCF，1.0 表示每秒一次偵測。
 4. `tracking/identities.py` 平滑候選框並在共同影格關聯公開身分。已辨識物件變為 `unknown` 時移除該追蹤；初始 unknown 仍可顯示。NvDCF 原生 ID 用於 context 內的標籤綁定，公開 `track_id` 延續跨偵測回合的幾何關聯。
 5. `inference/encoder.py` 將 Cat2Real 裁切圖置中補白至 384，從一次 forward 保留 pooler 描述向量與 patch 熱圖特徵；`recognition/grounded.py` 建立圖庫並執行單次辨識；分類結果由 `tracking/async_nvdcf.py` 綁定至追蹤物件並沿用。先以 `recognition_threshold` 篩選 DINO cosine 分數，再從候選參考圖中選 Lab Bhattacharyya 分數最高者的分類；無候選時為 unknown。`score` 為所選參考圖的 DINO 分數，不再計算加權分數。
-6. `geometry/async_bbox3d.py` 獨立排程背景深度工作，透過 `geometry/depth_bbox.py` 計算中心、尺寸與旋轉；預設每 5 個處理影格量測一次。ROS 發布和疊圖各用獨立 worker，待處理輸出只保留最新一份；共享影格池滿時，先釋放尚未開始的舊疊圖工作，讓新推論繼續。
+6. `geometry/async_bbox3d.py` 獨立排程背景深度工作，透過 `geometry/depth_bbox.py` 計算中心、尺寸與旋轉；預設最小間隔約 0.167 秒；部署設定 0.0 表示每個新處理影格提交一次。ROS 發布和疊圖各用獨立 worker，待處理輸出只保留最新一份；共享影格池滿時，先釋放尚未開始的舊疊圖工作，讓新推論繼續。
 7. `recognition/object_visualization.py` 在網頁要求時才產生物件診斷圖；`api/visualization.py` 負責 2D／3D 疊圖。
 
 ## 修改位置

@@ -13,6 +13,7 @@ import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image as ImageMsg, CameraInfo
 from std_msgs.msg import Header, String
@@ -24,7 +25,7 @@ from dinov3_cases.inference.encoder import Encoder
 from dinov3_cases.inference.grounding_ipc import SharedMemoryGroundingDetector
 from dinov3_cases.frame_pool import SharedFramePool
 from dinov3_cases.tracking.identities import BBoxSmoother
-from dinov3_cases.config import default_parameters, validate_parameters
+from dinov3_cases.config import SECONDS_PARAMETERS, default_parameters, validate_parameters
 from dinov3_cases.tracking.async_nvdcf import AsyncNvDCFProposals
 from dinov3_cases.geometry.async_bbox3d import AsyncBBox3D
 from dinov3_cases.runtime import INPUT_SIZE
@@ -57,7 +58,11 @@ class CaseNode(Node):
         self.publish_readiness()
         defaults = default_parameters()
         for k, v in defaults.items():
-            self.declare_parameter(k, v)
+            if k in SECONDS_PARAMETERS:
+                self.declare_parameter(k, v, ParameterDescriptor(
+                    dynamic_typing=True, description="Duration in seconds; independent of video_fps."))
+            else:
+                self.declare_parameter(k, v)
         self.param = lambda k: self.get_parameter(k).value
         self.sam3_roi = validate_roi(*(self.param("sam3_roi_" + key)
                                      for key in ("width", "height", "center_x", "center_y")))
@@ -67,7 +72,7 @@ class CaseNode(Node):
         opencv_threads = self.param("opencv_num_threads")
         if opencv_threads > 0:
             cv2.setNumThreads(opencv_threads)
-        self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_frames"))
+        self.bbox_smoother = BBoxSmoother(self.param("bbox_smoothing_seconds"))
         self.cloud_filter = CloudFilter(
             min_coverage=self.param("bbox3d_min_cloud_coverage"),
             min_coverage_ratio=self.param("bbox3d_min_coverage_ratio"),
@@ -168,7 +173,8 @@ class CaseNode(Node):
             self.plane_fitter = CudaPlaneFitter()
         self.bbox3d_worker = AsyncBBox3D(
             self.estimate_bboxes3d, interval=self.param("bbox3d_interval"),
-            max_age=self.param("bbox3d_max_age"), wake=self.image_changed.set,
+            max_age=self.param("bbox3d_max_age"),
+            wake=self.image_changed.set,
             on_error=lambda error: self.get_logger().error(f"Background 3D boxes failed: {error}"),
         )
         self.worker = threading.Thread(target=self.run_grounded_worker, daemon=True)
@@ -509,8 +515,7 @@ class CaseNode(Node):
             width=self.param("nvdcf_width"),
             height=self.param("nvdcf_height"),
             containment_threshold=self.param("grounding_containment_threshold"),
-            max_missed_detections=self.param("nvdcf_max_missed_detections"),
-            max_missed_frames=self.param("nvdcf_max_missed_frames"),
+            max_missed_seconds=self.param("nvdcf_max_missed_seconds"),
             defer_recognition=True,
             model_timings=self.model_timings,
         )

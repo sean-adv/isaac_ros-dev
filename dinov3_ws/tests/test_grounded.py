@@ -438,7 +438,7 @@ def test_web_settings_accept_interval_and_reject_invalid_values(tmp_path, monkey
     check_nvdcf.assert_called_once_with("nvdcf.yaml")
     assert response.json["grounding"]["detection_interval"] == 5
     assert node.generation == 1
-    for value in (0, -1, True, 1.5, "5"):
+    for value in (-1, True, float("inf"), "5"):
         assert client.post("/api/grounding", json={"detection_interval": value}).status_code == 400
     assert node.generation == 1
     # Legacy clients can still send margin, but classification no longer consumes it.

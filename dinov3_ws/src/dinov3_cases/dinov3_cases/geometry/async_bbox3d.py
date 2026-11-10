@@ -1,4 +1,4 @@
-"""Periodic full depth-box measurements with one active and one latest job."""
+"""Timed full depth-box measurements with one active and one latest job."""
 
 import copy
 import math
@@ -9,8 +9,8 @@ from dinov3_cases.tracking.identities import _match_boxes, _iou
 
 
 def validate_bbox3d_schedule(interval, max_age):
-    if type(interval) is not int or interval < 1:
-        raise ValueError("bbox3d_interval must be an integer >= 1.")
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not math.isfinite(interval) or interval < 0:
+        raise ValueError("bbox3d_interval must be finite seconds >= 0.")
     if (isinstance(max_age, bool) or not isinstance(max_age, (int, float))
             or not math.isfinite(max_age) or max_age <= 0):
         raise ValueError("bbox3d_max_age must be finite and > 0.")
@@ -19,12 +19,14 @@ def validate_bbox3d_schedule(interval, max_age):
 class AsyncBBox3D:
     """Foreground owns object association; the worker only measures snapshots.
 
+    interval and max_age are seconds, independent of camera and output FPS.
+
     IDs are private, geometric associations between adjacent sets, independent
     of detector refreshes and list ordering. Lost IDs are never reused. Crossing
     or indistinguishable objects still need a persistent visual tracker ID.
     """
 
-    def __init__(self, measure, *, interval=5, max_age=1.5, wake=None, on_error=None):
+    def __init__(self, measure, *, interval=0.167, max_age=1.5, wake=None, on_error=None):
         validate_bbox3d_schedule(interval, max_age)
         self.measure = measure
         self.interval, self.max_age = interval, max_age
@@ -35,7 +37,7 @@ class AsyncBBox3D:
         self.context = None
         self.epoch = 0
         self.frame_key = None
-        self.frame_count = 0
+        self.last_submitted_at = None
         self.next_id = 0
         self.previous = []
         self.ids = []
@@ -53,14 +55,14 @@ class AsyncBBox3D:
             return self.version != self.consumed
 
     def update(self, detections, inputs, *, header, frame_key, context, captured_at=None):
-        """Nonblocking submit/read; first frame then every N unique frames."""
+        """Nonblocking submit/read; submit new frames when the seconds interval elapses."""
         now = time.monotonic()
         with self.condition:
             if context != self.context:
                 self.context = context
                 self.epoch += 1
                 self.frame_key = None
-                self.frame_count = 0
+                self.last_submitted_at = None
                 self.previous, self.ids = [], []
                 self.cache.clear()
                 self.cloud_states.clear()
@@ -88,13 +90,14 @@ class AsyncBBox3D:
             self.cache = {key: value for key, value in self.cache.items() if key in live}
             self.cloud_states = {key: value for key, value in self.cloud_states.items() if key in live}
             changed = frame_key != self.frame_key
-            due = changed and self.frame_count % self.interval == 0
+            due = changed and (self.last_submitted_at is None
+                               or now - self.last_submitted_at >= self.interval)
             if changed:
-                self.frame_count += 1
                 self.frame_key = frame_key
             if not ids:
                 self.pending = None
             elif due and not self.closed:
+                self.last_submitted_at = now
                 # ROS messages and detections are immutable after submission in
                 # the node. Copy small metadata, retain owned depth message bytes.
                 proposals = [dict(bbox=list(item["bbox"])) for item in detections]
@@ -112,7 +115,7 @@ class AsyncBBox3D:
             return output, self.camera_info, metrics
 
     def latest(self, detections):
-        """Refresh at render/publish time without advancing the frame counter."""
+        """Refresh at render/publish time without submitting another measurement."""
         with self.condition:
             return self._latest_locked(detections, time.monotonic()), self.camera_info
 

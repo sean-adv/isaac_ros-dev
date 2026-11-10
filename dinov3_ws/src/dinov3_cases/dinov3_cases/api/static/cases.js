@@ -35,8 +35,6 @@ async function refreshDetections() {
     row.textContent = (item.track_id == null ? '' : 'ID ' + item.track_id + ' · ') + item.label + ' · ' + item.detection_label + ' · det ' + item.detection_score.toFixed(2) + ' · DINO ' + (item.score === null ? '—' : item.score.toFixed(3)) + ' · ' + item.reason + (item.label === 'unknown' && item.candidate ? ' · closest match ' + item.candidate : '') + (item.margin === null ? '' : ' · Lab gap ' + item.margin.toFixed(3));
     if (item.track_status) {
       row.textContent += ' · track: ' + item.track_status;
-      if (Number.isFinite(item.sam3_age_seconds)) row.textContent += ' · SAM3 ' + item.sam3_age_seconds.toFixed(1) + 's ago';
-      if (item.sam3_misses) row.textContent += ' · missed ' + item.sam3_misses + ' refresh(es)';
     }
     if (item.bbox3d_status) {
       row.textContent += ' · 3D: ' + item.bbox3d_status;

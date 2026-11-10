@@ -14,13 +14,17 @@ def detection(x=0, label="medicine"):
 
 
 def submit(worker, frame=1, items=None, context="camera", inputs=(1, "calibration"), **options):
+    if hasattr(worker, "test_clock"):
+        worker.test_clock[0] = frame * .125
     return worker.update([detection()] if items is None else items, inputs,
                          header=Header(frame_id="camera", stamp=Time(sec=frame)),
                          frame_key=(0, frame), context=context, **options)
 
 
 @pytest.fixture
-def worker():
+def worker(monkeypatch):
+    clock = [0.]
+    monkeypatch.setattr("dinov3_cases.geometry.async_bbox3d.time.monotonic", lambda: clock[0])
     entered, release, completed = threading.Event(), threading.Event(), threading.Event()
     calls, errors = [], []
 
@@ -35,13 +39,14 @@ def worker():
                                       size=[.2, .1, .01],
                                       rotation=[[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
 
-    pipeline = AsyncBBox3D(measure, wake=completed.set, on_error=errors.append)
+    pipeline = AsyncBBox3D(measure, interval=.625, wake=completed.set, on_error=errors.append)
+    pipeline.test_clock = clock
     yield pipeline, entered, release, completed, calls, errors
     release.set()
     pipeline.close()
 
 
-def test_five_unique_frame_cadence_and_nonblocking_full_measurement(worker):
+def test_elapsed_seconds_cadence_and_nonblocking_full_measurement(worker):
     pipeline, entered, release, completed, calls, errors = worker
     first, _, _ = submit(pipeline)
     assert first[0]['bbox3d_status'] == 'pending_background_measurement'
@@ -49,7 +54,7 @@ def test_five_unique_frame_cadence_and_nonblocking_full_measurement(worker):
     for frame in (1, 2, 2, 3, 4, 5):
         output, _, metrics = submit(pipeline, frame)
         assert 'bbox3d' not in output[0]
-        assert metrics['interval'] == 5
+        assert metrics['interval'] == .625
     assert len(calls) == 1 and pipeline.pending is None
     release.set()
     assert completed.wait(1)
@@ -172,7 +177,7 @@ def test_depth_failures_retain_valid_box_without_renewing_age(failure, monkeypat
         else:
             items[0]['bbox3d_status'] = failure
 
-    pipeline = AsyncBBox3D(measure, interval=1, wake=completed.set)
+    pipeline = AsyncBBox3D(measure, interval=0., wake=completed.set)
     try:
         queued, _, _ = submit(pipeline, inputs=('valid', 'calibration'), captured_at=10.)
         assert completed.wait(1)
@@ -223,7 +228,7 @@ def test_age_expiry_uses_source_capture_time_and_ros_preserves_measurement_stamp
     assert 'bbox3d' not in stale[0]
 
 
-@pytest.mark.parametrize('interval', [True, 0, -1, 1.5])
+@pytest.mark.parametrize('interval', [True, -1, float('nan'), float('inf')])
 def test_invalid_interval(interval):
     with pytest.raises(ValueError, match='bbox3d_interval'):
         validate_bbox3d_schedule(interval, 1.)
@@ -246,7 +251,7 @@ def test_cloud_histories_follow_object_identity_and_reset_on_context_change():
             state['accepted'] = item['bbox'][0]
             item['bbox3d_status'] = 'ok'
 
-    pipeline = AsyncBBox3D(measure, interval=1, wake=completed.set)
+    pipeline = AsyncBBox3D(measure, interval=0., wake=completed.set)
     try:
         submit(pipeline, 1, items=[detection(0), detection(80)])
         assert completed.wait(1)

@@ -96,7 +96,7 @@ def test_seed_recognition_and_catchup_handoff_use_current_frame(pixels):
     assert all(t.closed for t in trackers)
 
 
-def test_refresh_preserves_public_id_and_empty_detection_counts_misses(pixels):
+def test_refresh_and_repeated_empty_detections_preserve_native_track(pixels):
     scheduler = AsyncNvDCFProposals(factory=FakeNvDCF)
     try:
         first, _ = scheduler.update(pixels, 1, 'camera', 100, detect, wait_for_initial_result=True)
@@ -111,10 +111,9 @@ def test_refresh_preserves_public_id_and_empty_detection_counts_misses(pixels):
         scheduler.thread.join(3)
         result, source = scheduler.update(pixels, 5, 'camera', 100, detect)
         assert source == 'sam3' and result[0]['track_id'] == identity
-        assert result[0]['sam3_misses'] == 1
         for frame in (6, 8):
             result, _ = refresh(scheduler, pixels, frame, [])
-        assert result == []
+        assert [p['track_id'] for p in result] == [identity]
     finally:
         scheduler.close()
 
@@ -141,14 +140,17 @@ def test_context_reset_discards_inflight_detector_result(pixels):
         scheduler.close()
 
 
-def test_synchronous_mode_does_not_start_native_backend(pixels):
-    scheduler = AsyncNvDCFProposals(factory=lambda: pytest.fail('native tracker started in sync mode'))
+@pytest.mark.parametrize('interval', [0.0, .1, 1.0])
+def test_every_interval_keeps_native_tracking_enabled(pixels, interval):
+    scheduler = AsyncNvDCFProposals(factory=FakeNvDCF)
     try:
-        result, source = scheduler.update(pixels, 1, 'camera', 1, detect)
+        result, source = scheduler.update(pixels, 1, 'camera', interval, detect,
+                                          wait_for_initial_result=True)
         assert source == 'sam3' and result[0]['label'] == 'medicine'
-        first_id = result[0]['track_id']
-        result, _ = scheduler.update(pixels, 2, 'other', 1, detect)
-        assert result[0]['track_id'] != first_id
+        identity = result[0]['track_id']
+        assert scheduler.active.contexts
+        result, source = scheduler.update(pixels, 2, 'camera', interval, detect)
+        assert source == 'nvdcf' and result[0]['track_id'] == identity
     finally:
         scheduler.close()
 
@@ -204,13 +206,11 @@ def test_partial_handoff_retains_native_state_and_independent_ids(pixels):
         result, _ = refresh(scheduler, pixels, 2, [box(1, 'A-new')])
         assert [(p['track_id'], p['label']) for p in result] == [(a_id, 'A-new'), (b_id, 'B')]
         assert [p['nvdcf_id'] for p in result] == [0, 1]
-        assert result[1]['sam3_misses'] == 1
         scheduler._reaper.drain()
         assert not trackers[0].closed
         assert len(trackers[0].metadata) == 1  # Replaced A cannot reappear.
         result, _ = scheduler.update(pixels, 3, 'camera', 100, detect)
         assert [p['bbox'][0] for p in result] == [2, 102]
-        assert result[1]['sam3_misses'] == 1  # Camera frames are not detector misses.
         # Match B in the original context and add C, whose native ID collides
         # with retained A's native ID in a different context.
         result, _ = refresh(scheduler, pixels, 4, [box(103, 'B-new'), box(200, 'C')])
@@ -219,11 +219,9 @@ def test_partial_handoff_retains_native_state_and_independent_ids(pixels):
         assert result[0]['nvdcf_id'] == result[2]['nvdcf_id'] == 0
         scheduler._reaper.drain()
         assert trackers[0].closed and not trackers[1].closed
-        assert result[0]['sam3_misses'] == 0
         # Reacquire all objects: obsolete contexts must close, with IDs preserved.
         result, _ = refresh(scheduler, pixels, 5, [box(4, 'A'), box(104, 'B'), box(201, 'C')])
         assert [p['track_id'] for p in result] == [a_id, b_id, 3]
-        assert all(p['sam3_misses'] == 0 for p in result)
         scheduler._reaper.drain()
         assert all(t.closed for t in trackers[:-1])
         assert len(scheduler.active.contexts) == 1
@@ -233,22 +231,17 @@ def test_partial_handoff_retains_native_state_and_independent_ids(pixels):
     assert all(t.closed for t in trackers)
 
 
-def test_empty_results_retire_only_at_configured_miss_limit(pixels):
-    scheduler, trackers, first = seed_spatial(pixels, max_missed_detections=2)
+def test_empty_results_never_retire_healthy_native_tracks(pixels):
+    scheduler, trackers, first = seed_spatial(pixels)
     try:
-        result, _ = refresh(scheduler, pixels, 2, [])
-        assert [p['track_id'] for p in result] == [p['track_id'] for p in first]
-        assert all(p['sam3_misses'] == 1 and p['track_status'] == 'coasting' for p in result)
-        scheduler._reaper.drain()
-        assert trackers[1].closed and not trackers[0].closed
-        # Reprocessing the same frame never adds a miss or revives an empty context.
-        for _ in range(3):
-            result, _ = scheduler.update(pixels, 2, 'camera', 100, detect)
-            assert all(p['sam3_misses'] == 1 for p in result)
-        result, _ = refresh(scheduler, pixels, 3, [])
-        assert result == [] and not scheduler.active.contexts
-        scheduler._reaper.drain()
-        assert all(t.closed for t in trackers)
+        identities = [p['track_id'] for p in first]
+        for frame in range(2, 12):
+            result, _ = refresh(scheduler, pixels, frame, [])
+            assert [p['track_id'] for p in result] == identities
+            scheduler._reaper.drain()
+            assert not trackers[0].closed
+            assert all(t.closed for t in trackers[1:])
+        assert len(scheduler.active.contexts) == 1
     finally:
         scheduler.close()
 
@@ -279,7 +272,7 @@ def test_containment_filters_after_merging_retained_tracks(pixels):
         scheduler.close()
 
 
-def test_reset_closes_all_retained_contexts_and_clears_misses(pixels):
+def test_reset_closes_all_retained_contexts(pixels):
     scheduler, trackers, first = seed_spatial(pixels)
     try:
         refresh(scheduler, pixels, 2, [box(1)])
@@ -288,13 +281,12 @@ def test_reset_closes_all_retained_contexts_and_clears_misses(pixels):
                                     lambda _: ([box(0)], {}), wait_for_initial_result=True)
         scheduler._reaper.drain()
         assert all(t.closed for t in trackers[:-1])
-        assert result[0]['sam3_misses'] == 0
         assert result[0]['track_id'] not in {p['track_id'] for p in first}
     finally:
         scheduler.close()
 
 
-def test_stalled_detection_does_not_count_misses(pixels):
+def test_stalled_detection_retains_native_tracks(pixels):
     scheduler, trackers, first = seed_spatial(pixels)
     started, release = threading.Event(), threading.Event()
     def stalled(_):
@@ -307,11 +299,11 @@ def test_stalled_detection_does_not_count_misses(pixels):
         assert started.wait(3)
         for frame in range(3, 8):
             result, _ = scheduler.update(pixels, frame, 'camera', 100, detect)
-            assert all(p['sam3_misses'] == 0 for p in result)
+            assert [p['track_id'] for p in result] == [p['track_id'] for p in first]
         release.set()
         scheduler.thread.join(3)
         result, _ = scheduler.update(pixels, 8, 'camera', 100, detect)
-        assert all(p['sam3_misses'] == 1 for p in result)
+        assert [p['track_id'] for p in result] == [p['track_id'] for p in first]
     finally:
         release.set()
         scheduler.close()
@@ -330,13 +322,16 @@ class OccludedNvDCF(SpatialNvDCF):
         return self.proposals
 
 
-def test_native_shadow_recovers_same_id_label_and_lifecycle(pixels):
+def test_native_shadow_recovers_same_id_label(pixels, monkeypatch):
+    clock = [1.]
+    monkeypatch.setattr("dinov3_cases.tracking.async_nvdcf.time.monotonic", lambda: clock[0])
     scheduler, trackers, first = seed_spatial(pixels, tracker_class=OccludedNvDCF,
-                                             max_missed_frames=2)
+                                             max_missed_seconds=2)
     try:
         trackers[0].missing = {2: {0}, 3: {0}}
         scheduler.busy = True  # Model a pending detector while native output recovers.
         for frame in (2, 3):
+            clock[0] = float(frame)
             result, _ = scheduler.update(pixels, frame, 'camera', 100, detect)
             assert [p['label'] for p in result] == ['B']
             assert len(scheduler.active.hidden) == 1
@@ -347,32 +342,33 @@ def test_native_shadow_recovers_same_id_label_and_lifecycle(pixels):
         result, _ = scheduler.update(pixels, 4, 'camera', 100, detect)
         assert [(p['track_id'], p['nvdcf_id'], p['label']) for p in result] == [
             (p['track_id'], p['nvdcf_id'], p['label']) for p in first]
-        assert result[0]['sam3_hits'] == first[0]['sam3_hits']
-        assert result[0]['sam3_misses'] == 0
         assert not scheduler.active.hidden
     finally:
         scheduler.close()
 
 
 @pytest.mark.parametrize('grace', [0, 2])
-def test_shadow_expires_after_grace_unique_frames_and_cannot_revive(pixels, grace):
+def test_shadow_expires_after_grace_seconds_and_cannot_revive(pixels, grace, monkeypatch):
+    clock = [1.]
+    monkeypatch.setattr("dinov3_cases.tracking.async_nvdcf.time.monotonic", lambda: clock[0])
     scheduler, trackers, first = seed_spatial(pixels, tracker_class=OccludedNvDCF,
-                                             max_missed_frames=grace)
+                                             max_missed_seconds=grace)
     try:
         trackers[0].missing = {frame: {0, 1} for frame in range(2, grace+3)}
         scheduler.busy = True
         for frame in range(2, grace+2):
+            clock[0] = float(frame)
             for _ in range(3):
                 result, _ = scheduler.update(pixels, frame, 'camera', 100, detect)
                 assert result == []
                 assert len(scheduler.active.hidden) == 2
                 scheduler._reaper.drain()
                 assert not trackers[0].closed
+        clock[0] = float(grace + 2)
         result, _ = scheduler.update(pixels, grace+2, 'camera', 100, detect)
         scheduler._reaper.drain()
         assert result == [] and trackers[0].closed
         assert not scheduler.active.contexts
-        assert not scheduler.lifecycle.states
         assert not scheduler.identities.recent
         result, _ = scheduler.update(pixels, grace+3, 'camera', 100, detect)
         assert result == []  # Expired metadata cannot reappear.
@@ -380,25 +376,28 @@ def test_shadow_expires_after_grace_unique_frames_and_cannot_revive(pixels, grac
         scheduler.close()
 
 
-def test_hidden_owner_survives_empty_handoffs_without_resetting_frame_age(pixels):
+def test_hidden_owner_survives_empty_handoffs_without_resetting_time_age(pixels, monkeypatch):
+    clock = [1.]
+    monkeypatch.setattr("dinov3_cases.tracking.async_nvdcf.time.monotonic", lambda: clock[0])
     scheduler, trackers, first = seed_spatial(pixels, tracker_class=OccludedNvDCF,
-                                             max_missed_frames=3,
-                                             max_missed_detections=1)
+                                             max_missed_seconds=3)
     try:
         trackers[0].missing = {frame: {0} for frame in range(2, 6)}
-        # Empty SAM3 results must not delete occluded A via the separate SAM3
-        # miss limit, or reset its last-seen serial on every new generation.
+        # Empty SAM3 results must not reset hidden A's last-seen time.
         for frame in (2, 3, 4):
+            clock[0] = float(frame)
             result, _ = refresh(scheduler, pixels, frame, [])
-            assert result == []
+            assert [p['label'] for p in result] == ['B']
             assert len(scheduler.active.hidden) == 1
             assert scheduler.active.hidden[0]['track_id'] == first[0]['track_id']
-            assert scheduler.active.last_seen == {first[0]['track_id']: 1}
-            assert scheduler.lifecycle.states[first[0]['track_id']]['misses'] == 0
+            assert scheduler.active.last_seen[first[0]['track_id']] == 1.
         scheduler.busy = True
+        clock[0] = 5.
         result, _ = scheduler.update(pixels, 5, 'camera', 100, detect)
         scheduler._reaper.drain()
-        assert result == [] and trackers[0].closed
+        assert [p['label'] for p in result] == ['B']
+        assert len(scheduler.active.hidden) == 0
+        assert set(trackers[0].metadata) == {1}
     finally:
         scheduler.close()
 
@@ -456,10 +455,10 @@ def test_context_reset_and_close_release_hidden_contexts(pixels):
     assert all(t.closed for t in trackers)
 
 
-@pytest.mark.parametrize('value', [-1, True, 1.5])
+@pytest.mark.parametrize('value', [-1, True, float('nan'), float('inf')])
 def test_invalid_shadow_grace_is_rejected(value):
-    with pytest.raises(ValueError, match='nvdcf_max_missed_frames'):
-        AsyncNvDCFProposals(max_missed_frames=value)
+    with pytest.raises(ValueError, match='nvdcf_max_missed_seconds'):
+        AsyncNvDCFProposals(max_missed_seconds=value)
 
 
 def test_blocked_cleanup_does_not_stall_handoff_or_live_tracking(pixels):
@@ -672,5 +671,29 @@ def test_deferred_dino_error_keeps_geometry_and_allows_retry(pixels):
         assert result and source == 'nvdcf'
         assert scheduler.scheduler_metrics()['recognition_error'] == 'classification failed'
         assert scheduler.error is None
+    finally:
+        scheduler.close()
+
+
+@pytest.mark.parametrize('frame_keys', [(2, 3, 4), (20, 200, 2000)])
+def test_detection_cadence_uses_seconds_not_frame_count(pixels, monkeypatch, frame_keys):
+    clock = [10.]
+    monkeypatch.setattr('dinov3_cases.tracking.async_nvdcf.time.monotonic', lambda: clock[0])
+    calls = []
+    def detector(image):
+        calls.append(clock[0])
+        return detect(image)
+    scheduler = AsyncNvDCFProposals(factory=FakeNvDCF)
+    try:
+        scheduler.update(pixels, 1, 'camera', 1., detector, wait_for_initial_result=True)
+        clock[0] = 10.25
+        scheduler.update(pixels, frame_keys[0], 'camera', 1., detector)
+        clock[0] = 10.75
+        scheduler.update(pixels, frame_keys[1], 'camera', 1., detector)
+        assert calls == [10.]
+        clock[0] = 11.
+        scheduler.update(pixels, frame_keys[2], 'camera', 1., detector)
+        scheduler.thread.join(3)
+        assert calls == [10., 11.]
     finally:
         scheduler.close()

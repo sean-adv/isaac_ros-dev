@@ -21,8 +21,8 @@ DEFAULT_CONFIG = PROJECT / 'config/nvdcf.yaml'
 
 
 def validate_detection_interval(value):
-    if type(value) is not int or value < 1:
-        raise ValueError('detection_interval must be an integer >= 1.')
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError('detection_interval must be finite seconds >= 0 (0 runs whenever idle).')
 
 
 def check_nvdcf(config=DEFAULT_CONFIG):

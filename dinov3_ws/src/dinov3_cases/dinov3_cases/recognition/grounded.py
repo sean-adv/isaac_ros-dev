@@ -18,7 +18,7 @@ from dinov3_cases.tracking.nvdcf import validate_detection_interval
 DEFAULT_PROMPT = "medicine bottle, medicine box."
 
 
-def validate_settings(prompt, box_threshold, recognition_threshold, margin, detection_interval=1):
+def validate_settings(prompt, box_threshold, recognition_threshold, margin, detection_interval=0.0):
     """Validate external settings, including the accepted legacy margin field."""
     validate_detection_interval(detection_interval)
     if not isinstance(prompt, str) or not prompt.strip(" .\t\r\n") or len(prompt) > 1000:

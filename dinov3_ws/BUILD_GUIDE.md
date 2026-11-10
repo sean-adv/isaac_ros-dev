@@ -113,22 +113,25 @@ dinov3_ws/.venv/bin/python dinov3_ws/build_models.py --target sam3 --artifact-su
 | 參數 | 目前值 | 用途 |
 | --- | --- | --- |
 | `grounding_prompt` | `box, can.` | 1–4 個逗號分隔類別，文字特徵按 prompt 快取 |
-| `grounding_detection_interval` | 3 | 每 N 個處理影格提交背景 SAM3；1 改為同步且停用 NvDCF |
-| `grounding_box_threshold` | 0.8 | SAM3 偵測門檻 |
+| `grounding_detection_interval` | 0.1 | 背景 SAM3＋DINO 工作啟動的最小間隔（秒）；0.0 在空閒且有新影格時提交，1.0 為每秒一次；NvDCF 始終啟用 |
+| `grounding_box_threshold` | 0.6 | SAM3 偵測門檻 |
 | `grounding_containment_threshold` | 0.5 | 追蹤後去除被包含的小框；0 停用 |
 | `recognition_threshold` | 0.75 | DINO cosine 候選門檻，再以 Lab 色彩相似度選分類 |
 | `nvdcf_width`／`nvdcf_height` | 640／384 | 追蹤解析度，須為 32 的倍數 |
-| `nvdcf_max_missed_detections` | 5 | 已提交 SAM3 結果連續漏偵測的淘汰門檻 |
-| `nvdcf_max_missed_frames` | 15 | 失追寬限影格，期間隱藏舊框；0 停用 |
-| `bbox_smoothing_frames` | 1 | 框移動平均視窗；1 停用 |
-| `bbox3d_interval` | 1 | 背景深度量測間隔 |
+| `nvdcf_max_missed_seconds` | 0.5 | 自最後可見輸出起算的失追寬限秒數，期間隱藏舊框；0.0 停用 |
+| `bbox_smoothing_seconds` | 0.0 | 框移動平均時間視窗（秒）；0.0 停用 |
+| `pose_sync_tolerance` | 0.2 | RGB／深度時間戳容許差距（秒）；0.0 要求完全相同 |
+| `bbox3d_max_age` | 1.0 | 從來源 RGB 接收時間起算的 3D 快取有效期限（秒），須大於 0 |
+| `bbox3d_interval` | 0.0 | 背景深度量測間隔（秒）；0.0 提交每個新處理影格 |
 | `bbox_visualization_mode` | `3d` | 疊圖模式，亦可選 `2d` |
+
+排程與有效期限均以 monotonic 經過秒數計算，不依 `video_fps` 換算；計數型設定（例如深度確認筆數）仍以筆數表示。YAML 時間值接受整數與小數（`1`、`1.0` 均為一秒）。舊設定遷移：`pose_sync_tolerance` 和 `bbox3d_max_age` 的舊影格值除以原 `video_fps`；`grounding_detection_interval`、`bbox3d_interval` 的舊值 1（每幀）改為 `0.0`，其餘可先除以原處理 FPS；`nvdcf_max_missed_frames` 改名為 `nvdcf_max_missed_seconds` 並換算秒數，`bbox_smoothing_frames` 改名為 `bbox_smoothing_seconds`（舊值 1 停用改為 `0.0`）。刪除舊 `nvdcf_max_missed_detections`，不提供舊漏偵測淘汰功能。
 
 包含框過濾在每次追蹤更新及新舊 context 合併後，使用目前框座標計算「交集面積 ÷ 較小框面積」；達到門檻便移除小框及其追蹤身分。IoU NMS 的參數與邏輯已移除。設定修改後需重啟服務。
 
 NvDCF 原生參數位於 [nvdcf.yaml](config/nvdcf.yaml)，可用 ROS `nvdcf_config` 指定其他檔案。追蹤影像縮放不改變 SAM3、Cat2Real 裁切與深度處理的原圖座標。
 
-非同步流程先交接 SAM3 框，再更新 DINO 分類，期間前景 NvDCF 持續追蹤。交接只更新仍存活的 seed owner，不回退目前框。漏偵測物件可保留原 context；失追物件在寬限內隱藏、重試偵測並保留公開 ID。配對是幾何關聯，沒有長期 ReID。
+非同步流程先交接 SAM3 框，再更新 DINO 分類，期間前景 NvDCF 持續追蹤。交接只更新仍存活的 seed owner，不回退目前框。SAM3 漏偵測不再淘汰追蹤，原生追蹤有效的物件持續保留原 context；失追物件在寬限內隱藏、重試偵測並保留公開 ID。配對是幾何關聯，沒有長期 ReID。
 
 `recognition_margin` 為舊 API 相容欄位，已不影響 Lab 分類，因此未列入 YAML。`score` 是所選參考圖的 DINO 分數；`margin` 回傳值是候選類別間的 Lab 分數差。
 
@@ -137,3 +140,7 @@ NvDCF 原生參數位於 [nvdcf.yaml](config/nvdcf.yaml)，可用 ROS `nvdcf_con
 [測試說明](tests/README.md) 列出目前回歸與 GPU 整合檢查。[程式導覽](src/dinov3_cases/README.md) 說明模組責任、影格租約、3D 深度框、ROS topics 與 ROS Image／MJPEG 介面。
 
 API `result_fps` 只計不同 RGB 影格的完成率；背景結果刷新不增加此計數。SAM3、NvDCF、3D、發布與 JPEG 轉換耗時應分別判讀，模型單獨測速不代表完整流程 FPS。
+
+`pose_sync_tolerance` 使用非負整數影格數，以 `video_fps` 換算 RGB／深度時間戳容許差距（秒 = 影格數 / FPS），不是相機實測 FPS 或佇列索引。部署設定為 6 幀，在 30 FPS 下等同原本 0.2 秒；程式預設為 2 幀。0 表示時間戳必須相同，不等待未來深度。舊的秒數設定與命令列覆寫需改為整數幀數。
+
+`bbox3d_max_age` 同樣以 `video_fps` 將正整數幀數換算為有效秒數；影像停止時仍按經過時間淘汰過期快取。原本部署的 1.0 秒改為 30 幀（30 FPS），程式預設 1.5 秒改為 45 幀。舊的秒數設定與命令列覆寫需改為整數幀數；`bbox3d_age_seconds` 輸出仍以秒表示。

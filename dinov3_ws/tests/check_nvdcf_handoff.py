@@ -1,4 +1,4 @@
-"""Real GPU check: partial refresh retains native state until three SAM3 misses."""
+"""Real GPU check: partial refresh retains native state across repeated SAM3 misses."""
 import json
 
 import numpy as np
@@ -51,29 +51,21 @@ def main():
         assert by_label['A-new']['track_id'] == ids['A'], result
         assert by_label['B']['track_id'] == ids['B'], result
         assert by_label['B']['nvdcf_id'] == native_b
-        assert by_label['B']['sam3_misses'] == 1
         assert original.process is not None and original.process.poll() is None
         for frame in range(4, 8):
             result, _ = scheduler.update(image(frame), frame, 'camera', 100, lambda _: ([], {}))
             b = next(p for p in result if p['label'] == 'B')
-            assert b['sam3_misses'] == 1 and b['nvdcf_id'] == native_b
+            assert b['nvdcf_id'] == native_b
             assert abs(b['bbox'][0] - (400 + frame * 2)) < 25, b
         result = refresh(8, [(0, 'A-new')])
-        assert next(p for p in result if p['label'] == 'B')['sam3_misses'] == 2
         result = refresh(10, [(0, 'A-new')])
-        assert [p['track_id'] for p in result] == [ids['A']], result
-        scheduler._reaper.drain()
-        assert original.process is None
-        assert len(scheduler.active.contexts) == 1
-        for misses, frame in enumerate((12, 14, 16), 1):
+        assert {p['track_id'] for p in result} == set(ids.values()), result
+        assert original.process is not None
+        for frame in (12, 14, 16):
             result = refresh(frame, [])
-            if misses < 3:
-                assert result[0]['track_id'] == ids['A']
-                assert result[0]['sam3_misses'] == misses
-            else:
-                assert result == [] and not scheduler.active.contexts
+            assert {p['track_id'] for p in result} == set(ids.values()), result
         print(json.dumps(dict(passed=True, partial_handoff=True,
-                              retained_native_state=True, miss_limit=3)))
+                              retained_native_state=True, repeated_misses_keep_tracks=True)))
     finally:
         scheduler.close()
     assert all(tracker.process is None for tracker in trackers)

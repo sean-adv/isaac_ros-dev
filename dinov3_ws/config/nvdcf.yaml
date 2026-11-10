@@ -8,7 +8,7 @@ TargetManagement:
   preserveStreamUpdateOrder: 1
   maxTargetsPerStream: 150
   minIouDiff4NewTarget: 0.5
-  minTrackerConfidence: 0.2
+  minTrackerConfidence: 0.4
   probationAge: 0
   maxShadowTrackingAge: 30
   earlyTerminationAge: 1

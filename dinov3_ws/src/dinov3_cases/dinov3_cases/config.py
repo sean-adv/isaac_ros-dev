@@ -8,9 +8,17 @@ import numpy as np
 
 from dinov3_cases.runtime import CASES_DIR, DINO_ENGINE, GROUNDING_ENGINE, GROUNDING_PYTHON
 from dinov3_cases.tracking.nvdcf import check_nvdcf, DEFAULT_CONFIG
-from dinov3_cases.tracking.async_nvdcf import validate_missed_frames
+from dinov3_cases.tracking.async_nvdcf import validate_missed_seconds
 from dinov3_cases.geometry.async_bbox3d import validate_bbox3d_schedule
 from dinov3_cases.recognition.grounded import DEFAULT_PROMPT, validate_settings, validate_bbox_limits, validate_containment_threshold
+
+
+# These ROS parameters accept both integer and floating-point seconds.
+SECONDS_PARAMETERS = frozenset({
+    "grounding_detection_interval", "bbox_smoothing_seconds",
+    "nvdcf_max_missed_seconds", "pose_sync_tolerance",
+    "bbox3d_interval", "bbox3d_max_age",
+})
 
 
 def default_parameters():
@@ -24,14 +32,13 @@ def default_parameters():
         grounding_box_threshold=0.3,
         grounding_containment_threshold=0.95,
         grounding_max_detections=20,
-        grounding_detection_interval=1,
-        bbox_smoothing_frames=3,
+        grounding_detection_interval=0.0,
+        bbox_smoothing_seconds=0.1,
         opencv_num_threads=0,
         nvdcf_config=str(DEFAULT_CONFIG),
         nvdcf_width=640,
         nvdcf_height=384,
-        nvdcf_max_missed_detections=3,
-        nvdcf_max_missed_frames=30,
+        nvdcf_max_missed_seconds=1.0,
         grounding_min_bbox_width=0,
         grounding_min_bbox_height=0,
         grounding_min_bbox_area=0,
@@ -47,11 +54,11 @@ def default_parameters():
         pose_enabled=True,
         depth_topic="/camera/depth/image_raw",
         depth_camera_info_topic="/camera/depth/camera_info",
-        pose_sync_tolerance=0.05,
+        pose_sync_tolerance=0.067,  # Seconds; independent of video_fps.
         pose_min_depth=0.1,
         pose_max_depth=5.0,
-        bbox3d_interval=5,
-        bbox3d_max_age=1.5,
+        bbox3d_interval=0.167,
+        bbox3d_max_age=1.5,  # Seconds from source capture.
         bbox3d_depth_band=0.08,
         bbox3d_min_points=80,
         bbox3d_quantile=0.02,
@@ -83,9 +90,8 @@ def validate_parameters(param):
         detection_interval=param("grounding_detection_interval"),
     )
     settings["prompt"] = validate_settings(**settings)
-    validate_missed_frames(param("nvdcf_max_missed_frames"))
-    if settings["detection_interval"] > 1:
-        check_nvdcf(param("nvdcf_config"))
+    validate_missed_seconds(param("nvdcf_max_missed_seconds"))
+    check_nvdcf(param("nvdcf_config"))
     validate_containment_threshold(param("grounding_containment_threshold"))
     if not 1 <= param("grounding_max_detections") <= 100:
         raise ValueError("grounding_max_detections must be between 1 and 100.")
@@ -102,7 +108,13 @@ def validate_parameters(param):
     fps = param("video_fps")
     if isinstance(fps, bool) or not isinstance(fps, (int, float)) or not np.isfinite(fps) or not 1 <= fps <= 30:
         raise ValueError("video_fps must be between 1 and 30.")
-    for name in ("pose_sync_tolerance", "pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
+    tolerance = param("pose_sync_tolerance")
+    if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not np.isfinite(tolerance) or tolerance < 0:
+        raise ValueError("pose_sync_tolerance must be finite seconds >= 0.")
+    smoothing = param("bbox_smoothing_seconds")
+    if isinstance(smoothing, bool) or not isinstance(smoothing, (int, float)) or not np.isfinite(smoothing) or smoothing < 0:
+        raise ValueError("bbox_smoothing_seconds must be finite seconds >= 0.")
+    for name in ("pose_min_depth", "pose_max_depth", "bbox3d_depth_band"):
         if not np.isfinite(param(name)) or param(name) <= 0:
             raise ValueError(f"{name} must be finite and positive.")
     if not 0 <= param("bbox3d_quantile") < 0.5:

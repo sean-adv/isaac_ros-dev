@@ -40,7 +40,7 @@ def test_sync_rejects_stale_unregistered_and_wrong_size_depth():
 @pytest.mark.parametrize("encoding, scale", [("16UC1", 1000), ("32FC1", 1)])
 def test_node_converts_depth_units_and_keeps_original_snapshot(encoding, scale):
     values = dict(pose_min_depth=.1, pose_max_depth=5., pose_enabled=True,
-                  pose_sync_tolerance=.05, bbox3d_depth_band=.08, bbox3d_min_points=80, bbox3d_quantile=.02)
+                  pose_sync_tolerance=2 / 30, video_fps=30, bbox3d_depth_band=.08, bbox3d_min_points=80, bbox3d_quantile=.02)
     from dinov3_cases.geometry.depth_bbox import ProjectionRayCache
     from dinov3_cases.geometry.cloud_filter import CloudFilter
     node = SimpleNamespace(cloud_filter=CloudFilter(), depth_ray_cache=ProjectionRayCache(),
@@ -65,9 +65,34 @@ def test_depth_snapshot_does_not_wait_for_future_depth():
     lock = Mock()
     lock.__enter__ = Mock(return_value=lock)
     lock.__exit__ = Mock(return_value=False)
-    values = dict(pose_enabled=True, pose_sync_tolerance=.05)
+    values = dict(pose_enabled=True, pose_sync_tolerance=2 / 30, video_fps=30)
     node = SimpleNamespace(param=values.__getitem__, lock=lock,
                            depth_frames=[], depth_infos=[calibration()])
     frame = Image(header=header(), width=160, height=120)
     assert CaseNode.depth_inputs_for(node, frame) is None
     lock.__enter__.assert_called_once()
+
+
+@pytest.mark.parametrize("fps,offset,matched", [
+    (30, .19, True), (30, .21, False),
+    (15, .19, True), (15, .21, False),
+])
+def test_node_sync_seconds_are_independent_of_fps(fps, offset, matched):
+    values = dict(pose_enabled=True, pose_sync_tolerance=.2, video_fps=fps)
+    depth = Image(header=header(10. + offset), width=160, height=120)
+    info = calibration()
+    node = SimpleNamespace(param=values.__getitem__, lock=threading.Lock(),
+                           depth_frames=[depth], depth_infos=[info])
+    frame = Image(header=header(), width=160, height=120)
+    assert CaseNode.depth_inputs_for(node, frame) == ((depth, info) if matched else None)
+
+
+@pytest.mark.parametrize("offset,matched", [(0., True), (.001, False)])
+def test_zero_seconds_tolerance_requires_identical_timestamps(offset, matched):
+    values = dict(pose_enabled=True, pose_sync_tolerance=0, video_fps=30)
+    depth = Image(header=header(10. + offset), width=160, height=120)
+    info = calibration()
+    node = SimpleNamespace(param=values.__getitem__, lock=threading.Lock(),
+                           depth_frames=[depth], depth_infos=[info])
+    frame = Image(header=header(), width=160, height=120)
+    assert CaseNode.depth_inputs_for(node, frame) == ((depth, info) if matched else None)

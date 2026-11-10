@@ -70,7 +70,7 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     encoder.device, encoder.description = 'cpu', 'counting encoder'
     encoder.model = object()
     gallery.refresh = Mock(return_value=False)
-    scheduler = Mock(active=Mock(initialized=True), last_metrics={},
+    scheduler = Mock(recognition_error=None, active=Mock(initialized=True), last_metrics={},
                      last_recognition=None, lock=threading.Lock())
     scheduler.scheduler_metrics.return_value = {}
     # seq, bbox x positions, new tracker set, expected diagnostic revision,
@@ -111,14 +111,14 @@ def test_node_worker_encodes_on_handoff_and_keeps_diagnostics_on_recognition_fra
     parameters = dict(engine_path='unused', grounding_engine_path='unused',
                       grounding_worker_python='unused', grounding_ipc_timeout=1.,
                       nvdcf_config='unused', nvdcf_width=640, nvdcf_height=384,
-                      nvdcf_max_missed_detections=3,
-                      nvdcf_max_missed_frames=30,
+                      nvdcf_max_missed_seconds=1.0,
                       grounding_max_detections=20,
                       grounding_containment_threshold=.95,
                       grounding_min_bbox_width=0, grounding_min_bbox_height=0,
                       grounding_min_bbox_area=0, pose_enabled=False)
     logger = Mock()
-    node = SimpleNamespace(
+    node = SimpleNamespace(set_readiness=Mock(), readiness_lock=threading.Lock(),
+        readiness=dict(state="ready"),
         lock=threading.Lock(), generation=0, frame=Image.fromarray(pixels), frame_seq=0,
         source='upload', camera_received_at=None, root=tmp_path, stop=threading.Event(),
         image_changed=threading.Event(), frame_pool=SharedFramePool(),

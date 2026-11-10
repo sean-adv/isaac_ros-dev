@@ -34,7 +34,7 @@
 <summary>Scores and bounding boxes</summary>
 <p id="bbox-help" role="status">{% if bbox_mode == '3d' %}Showing projected 3D bounding box wireframes. Valid synchronized depth is required.{% else %}Showing original 2D bounding boxes.{% endif %}</p>
 <p>det: last SAM3 detection score. DINO: reference similarity, not recognition probability. Eligible references pass the DINO threshold; the highest Lab similarity determines the product. No eligible reference means unknown.</p>
-<p>Confirmed tracks have SAM3 support; coasting tracks use NvDCF between detections. Each SAM3 update replaces the tracking generation and removes unmatched objects.</p>
+<p>Confirmed tracks have SAM3 support; coasting tracks use NvDCF between detections. SAM3 refreshes matched tracks; unmatched objects remain while NvDCF tracking is valid.</p>
 </details>
 </section>
 <section id="grounding-section" class="settings-panel" aria-labelledby="settings-title">
@@ -42,8 +42,8 @@
 <form id="grounding-form" class="settings-form">
 <label>Text prompt<input id="prompt" name="prompt" required maxlength="1000" aria-describedby="prompt-help" placeholder="medicine bottle, medicine box"></label>
 <small id="prompt-help">1–4 class names, separated by commas.</small>
-<label>SAM3 detection interval<input name="detection_interval" type="number" min="1" step="1" required aria-describedby="interval-help"></label>
-<small id="interval-help">1 = every processed frame; N = detect, then track N−1 frames.</small>
+<label>SAM3 detection interval (seconds)<input name="detection_interval" type="number" min="0" step="any" required aria-describedby="interval-help"></label>
+<small id="interval-help">0 = detect whenever idle on a new frame. NvDCF stays enabled at every interval; one background job runs at a time.</small>
 <div class="thresholds">
 <label>Detection threshold<input name="box_threshold" type="number" min="0" max="1" step="0.01" required></label>
 <label>DINO threshold<input name="recognition_threshold" type="number" min="0" max="1" step="0.01" required></label>

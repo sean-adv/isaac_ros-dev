@@ -1,76 +1,122 @@
 dinov3_cases:
   ros__parameters:
-    # SAM3: 1–4 comma-separated class names; text features cached per prompt.
-    grounding_prompt: 'box, can.'
-    grounding_box_threshold: 0.6
-    # After NvDCF tracking: intersection / smaller-box area >= threshold keeps the
-    # larger box and immediately removes the smaller track. One final pass only.
-    # Range 0..1; 0 disables containment filtering. Restart to apply.
-    grounding_containment_threshold: 0.5
-    grounding_max_detections: 20
-    # Submit one background SAM3 + DINO job every N processed frames; NvDCF continues.
-    # One job at a time; seed and each catch-up update use latest admitted RGB.
-    # Publish caught-up SAM3 boxes first; DINO then updates labels by seed ownership.
-    # Matched tracks keep old labels while pending; new tracks show the SAM3 name.
-    # 1 disables NvDCF and uses synchronous SAM3. Lost tracking requests detection early.
-    grounding_detection_interval: 3
-    # Whole-frame GPU NvDCF tracking (DeepStream 9.1). Restart to apply.
-    # Uses config/nvdcf.yaml; override nvdcf_config with an absolute path if needed.
-    nvdcf_width: 640
-    nvdcf_height: 384
-    # Retire after N consecutive committed SAM3 misses; pending jobs do not count.
-    nvdcf_max_missed_detections: 1
-    # Keep occluded tracks hidden for N unique processed frames before removal.
-    # 0 disables grace. Hidden tracks pause SAM3 miss counting. Restart to apply.
-    # Native shadow lifetime is also limited by config/nvdcf.yaml.
-    # While hidden, retry SAM3 every min(detection interval, max(1, N // 3)) frames.
-    nvdcf_max_missed_frames: 15
-    opencv_num_threads: 1
-    # Moving average over raw SAM3/NvDCF boxes per object; 1 disables smoothing.
-    # Counts unique processed frames. Config only; restart after changes.
-    bbox_smoothing_frames: 1
-    # Original-image bbox after clipping/rounding; pixels / pixels squared.
-    # 0 disables each threshold. All enabled thresholds must be met (>=).
-    grounding_min_bbox_width: 0
-    grounding_min_bbox_height: 0
-    grounding_min_bbox_area: 0
-    # Camera ROI in ORIGINAL image pixels: keep only fully contained SAM3 boxes.
-    # 0 keeps the full axis; width=height=0 disables filtering. No image crop.
-    # Center -1 follows the image midpoint; 0 is a valid coordinate at the top/left.
-    # Startup values; live controls are under Recognition settings > SAM3 region.
-    sam3_roi_width: 458
-    sam3_roi_height: 420
-    sam3_roi_center_x: 370
-    sam3_roi_center_y: 200
-    recognition_threshold: 0.75
-    # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
+    # Startup deployment settings; omitted parameters use defaults from config.py.
+    # Comments group flat ROS 2 parameters; web changes are not saved to this file.
+    # All durations/intervals below are seconds, independent of video_fps.
+    # Duration values accept integers and decimals (1 and 1.0 both mean one second).
+
+    # ======================================================================
+    # 1. Image and depth input, processing rate, and 3D box measurement
+    # ======================================================================
+    # --- RGB input and processing rate ---
+    image_topic: /camera/color/image_raw
+    # Maximum overlay output FPS (1..30); does not set camera/inference FPS.
     # One 960x540 ROS Image output, also consumed by the web MJPEG bridge.
     video_fps: 30
-    # RViz2 Image display: raw 960x540 BGR overlay, published only when subscribed.
-    annotated_image_topic: /medicine_recognition/image_annotated
-    bbox_visualization_mode: "3d"
-    # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
+    opencv_num_threads: 1
+
+    # --- 3D measurement ---
     # Legacy pose_* names now configure corner/nearest-depth 3D boxes.
     pose_enabled: true
-    image_topic: /camera/camera/color/image_raw
-    depth_topic: /camera/camera/depth/image_raw
-    depth_camera_info_topic: /camera/camera/depth/camera_info
+
+    # --- Depth input, synchronization, and valid range ---
+    # Registered IR-derived depth in the RGB optical frame; 16UC1 mm / 32FC1 m.
+    depth_topic: /camera/depth/image_raw
+    depth_camera_info_topic: /camera/depth/camera_info
+    # RGB-depth timestamp tolerance in seconds.
+    # 0 requires identical timestamps; this does not wait for future depth.
     pose_sync_tolerance: 0.2
     pose_min_depth: 0.2
     pose_max_depth: 1.0
-    # Foreground depth tolerance around the central patch median (meters).
+
+    # --- Update interval and cache lifetime ---
     # Full 3D center/size/rotation in background; independent of SAM3 interval.
-    # Measure first processed RGB frame, then every bbox3d_interval unique processed frames.
-    bbox3d_interval: 1
+    # Measure immediately, then admit new RGB frames at this seconds interval.
+    # 0.0 submits every new processed frame; background jobs keep only the latest pending input.
+    bbox3d_interval: 0.0
     # Retain the last valid 3D box through depth failures up to this capture age.
+    # Seconds from source RGB receipt; must be > 0.
+    # Expires by elapsed time even when images stop arriving.
     bbox3d_max_age: 1.0
+
+    # --- Point cloud selection and plane fitting ---
+    # Foreground depth tolerance around the central patch median (meters).
     bbox3d_depth_band: 0.08
     bbox3d_min_points: 30
     # Trim box-local axes at the configured quantiles; 0 uses full bounds.
     bbox3d_quantile: 0.07
     bbox3d_plane_backend: cuda  # use cpu to compare the original Open3D RANSAC
+
+    # --- Depth quality and jump filtering ---
     # Reject sparse/depth-jumping components after Z quantile trimming, before RANSAC.
     bbox3d_min_cloud_coverage: 0.15  # retained points / clipped bbox pixels
     bbox3d_min_coverage_ratio: 0.35  # relative to last accepted coverage
     bbox3d_max_depth_jump: 0.10  # meters
     bbox3d_depth_confirmations: 2  # distinct depth frames; sparse fragments stay rejected
+
+    # ======================================================================
+    # 2. SAM3 detection and DINO classification
+    # ======================================================================
+    # SAM3: 1–4 comma-separated class names; text features cached per prompt.
+    grounding_prompt: 'box, can.'
+    grounding_box_threshold: 0.6
+    grounding_max_detections: 20
+    # Minimum seconds between background SAM3 + DINO job starts; NvDCF always continues.
+    # One job at a time; seed and each catch-up update use latest admitted RGB.
+    # Publish caught-up SAM3 boxes first; DINO then updates labels by seed ownership.
+    # Matched tracks keep old labels while pending; new tracks show the SAM3 name.
+    # 0.0 detects whenever idle on a new frame; 1.0 means once per second.
+    # Lost tracking requests detection early. No interval disables NvDCF.
+    grounding_detection_interval: 0.1
+    # Cat2Real ViT-L/16 uses fixed 384×384 inputs; run.sh selects the Torch-TensorRT artifact.
+    recognition_threshold: 0.75
+
+    # ======================================================================
+    # 3. Detection region and 2D box filtering
+    # ======================================================================
+    # --- SAM3 ROI (original image coordinates) ---
+    # Camera ROI in ORIGINAL image pixels: keep only fully contained SAM3 boxes.
+    # 0 keeps the full axis; width=height=0 disables filtering. No image crop.
+    # Center -1 follows the image midpoint; 0 is a valid coordinate at the top/left.
+    # Startup values; live controls are under Recognition settings > SAM3 region.
+    sam3_roi_width: 0
+    sam3_roi_height: 0
+    sam3_roi_center_x: -1
+    sam3_roi_center_y: -1
+
+    # --- Minimum box dimensions ---
+    # Original-image bbox after clipping/rounding; pixels / pixels squared.
+    # 0 disables each threshold. All enabled thresholds must be met (>=).
+    grounding_min_bbox_width: 0
+    grounding_min_bbox_height: 0
+    grounding_min_bbox_area: 0
+
+    # --- Contained box deduplication ---
+    # After NvDCF tracking: intersection / smaller-box area >= threshold keeps the
+    # larger box and immediately removes the smaller track. One final pass only.
+    # Range 0..1; 0 disables containment filtering. Restart to apply.
+    grounding_containment_threshold: 0.5
+
+    # ======================================================================
+    # 4. NvDCF tracking and box smoothing
+    # ======================================================================
+    # Whole-frame GPU NvDCF tracking (DeepStream 9.1). Restart to apply.
+    # Uses config/nvdcf.yaml; override nvdcf_config with an absolute path if needed.
+    nvdcf_width: 640
+    nvdcf_height: 384
+    # SAM3 misses do not retire tracks while native tracking remains valid.
+    # Keep occluded tracks hidden for this many seconds since last visible output.
+    # 0.0 disables grace. Restart to apply.
+    # Native shadow lifetime is also limited by config/nvdcf.yaml.
+    # While hidden, retry at min(detection interval, grace / 3) seconds on new frames.
+    nvdcf_max_missed_seconds: 0.5
+    # Moving average of raw SAM3/NvDCF boxes within this seconds window per object.
+    # 0.0 disables smoothing. Config only; restart after changes.
+    bbox_smoothing_seconds: 0.0
+
+    # ======================================================================
+    # 5. Visualization and image output
+    # ======================================================================
+    bbox_visualization_mode: "3d"
+    # RViz2 Image display: raw 960x540 BGR overlay, published only when subscribed.
+    annotated_image_topic: /medicine_recognition/image_annotated
